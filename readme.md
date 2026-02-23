@@ -1,4 +1,12 @@
-# Rechunk
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="art/dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="art/light.svg">
+    <img alt="Ludos" src="art/dark.svg" width="500">
+  </picture>
+</p>
+
+# Ludos
 **Rechunk** is a library for reprocessing an OSTree OCI image prior to distribution
 (e.g., right after making it).
 It flattens the file system tree, thereby removing files that were replaced in
