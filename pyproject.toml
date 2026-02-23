@@ -1,14 +1,13 @@
 [project]
-name = "rechunk"
+name = "ludos"
 version = "0.0.1"
 authors = [
   { name="Kapenekakis Antheas", email="pypi@antheas.dev" },
 ]
-description = "Rechunk. A tool for reprocessing OCI images to optimize pulling."
+description = "Ludos. An end-to-end tool for building OS images from source."
 readme = "readme.md"
 requires-python = ">=3.10"
 classifiers = [
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -35,4 +34,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]  # list of folders that contain the packages (["."] by default)
-include = ["rechunk*"]  # package names should match these glob patterns (["*"] by default)
+include = ["ludos*", "rechunk*"]  # package names should match these glob patterns (["*"] by default)
