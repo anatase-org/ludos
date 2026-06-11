@@ -410,6 +410,9 @@ def _card_name(source: Path, root_dir: Path) -> str:
     elif parts and Path(parts[-1]).suffix in (".yml", ".yaml"):
         parts[-1] = Path(parts[-1]).stem
 
+    if len(parts) >= 2 and parts[-1] == parts[-2]:
+        parts = parts[:-1]
+
     if not parts:
         return "card"
 
