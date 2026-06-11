@@ -6,15 +6,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 from .model import ConfigError, validate_manifest
-
-
-INSTALL_PACKAGE_EXCLUDE_PREFIXES = (
-    "hunspell-en-AU-",
-    "hunspell-en-CA-",
-)
 
 
 @dataclass(frozen=True)
@@ -59,7 +52,7 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
     dnf_persist_dir = dnf_dir / "persist"
     dnf_log_dir = dnf_dir / "log"
     package_list = dnf_dir / f"{image}-packages.json"
-    package_urls = dnf_dir / f"{image}-package-urls.json"
+    transaction_store_dir = build_dir / "transaction"
 
     package_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -67,6 +60,9 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
     dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     dnf_persist_dir.mkdir(parents=True, exist_ok=True)
     dnf_log_dir.mkdir(parents=True, exist_ok=True)
+    if transaction_store_dir.exists():
+        shutil.rmtree(transaction_store_dir)
+    transaction_store_dir.mkdir(parents=True)
 
     for existing in repo_dir.glob("*.repo"):
         existing.unlink()
@@ -119,71 +115,75 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
         f"{dnf_log_dir}:/ludos/dnf/log",
         "--volume",
         f"{package_dir}:/ludos/packages",
+        "--volume",
+        f"{transaction_store_dir}:/ludos/transaction",
         "--workdir",
         "/workspace/repos",
         bootstrap,
         "dnf5",
     ]
 
-    package_url_result = subprocess.run(
+    subprocess.run(
         [
             *bootstrap_dnf_base,
-            *_dnf_base_args(),
+            "-y",
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--setopt=install_weak_deps=False",
+            "--disable-repo=*",
+            "--enable-repo=*",
             "--refresh",
-            "download",
-            "--resolve",
-            "--alldeps",
-            "--url",
-            *_download_arch_args(validation),
+            "--installroot=/ludos/resolve-root",
+            f"--releasever={validation.manifest.env['releasever']}",
+            "install",
+            "--store=/ludos/transaction",
             *requested_packages,
         ],
         check=True,
         text=True,
-        capture_output=True,
     )
-    package_urls_resolved = tuple(
-        line.strip()
-        for line in package_url_result.stdout.splitlines()
-        if line.strip().endswith(".rpm")
-    )
-    if not package_urls_resolved:
-        raise ConfigError("dnf did not resolve any package URLs")
 
+    transaction_file = transaction_store_dir / "transaction.json"
+    if not transaction_file.is_file():
+        raise ConfigError("dnf did not store a transaction")
+    transaction = json.loads(transaction_file.read_text(encoding="utf-8"))
     resolved_package_list = []
-    for url in package_urls_resolved:
-        filename = Path(unquote(urlparse(url).path)).name
-        if not filename.endswith(".rpm"):
-            raise ConfigError(f"resolved package URL does not end with .rpm: {url}")
-        resolved_package_list.append(filename[:-4])
+    for rpm in transaction.get("rpms", []):
+        if rpm.get("action") != "Install":
+            continue
+        package = rpm.get("nevra")
+        package_path = rpm.get("package_path")
+        if not isinstance(package, str) or not isinstance(package_path, str):
+            raise ConfigError("dnf stored an invalid package transaction")
+
+        stored_package = transaction_store_dir / package_path.removeprefix("./")
+        if not stored_package.is_file():
+            raise ConfigError(f"dnf did not store package file: {package_path}")
+        cached_package = package_dir / stored_package.name
+        if not cached_package.exists():
+            try:
+                cached_package.hardlink_to(stored_package)
+            except OSError:
+                shutil.copy2(stored_package, cached_package)
+
+        resolved_package_list.append(package)
     resolved_packages = tuple(resolved_package_list)
+    if not resolved_packages:
+        raise ConfigError("dnf did not resolve any packages")
 
-    _write_json_array(package_list, resolved_packages)
-    _write_json_array(package_urls, package_urls_resolved)
-
-    subprocess.run(
-        [
-            *bootstrap_dnf_base,
-            *_dnf_base_args(),
-            "download",
-            *_download_arch_args(validation),
-            "--destdir=/ludos/packages",
-            *resolved_packages,
-        ],
-        check=True,
-        text=True,
+    package_list.write_text(
+        json.dumps(list(resolved_packages), indent=2) + "\n",
+        encoding="utf-8",
     )
 
-    install_packages = tuple(
-        package
-        for package in resolved_packages
-        if not package.startswith(INSTALL_PACKAGE_EXCLUDE_PREFIXES)
-    )
     label_lines = "".join(
         f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
         for key, value in validation.manifest.labels.items()
     )
     package_lines = "".join(
-        f"      {shlex.quote(package)} \\\n" for package in install_packages
+        f"      {shlex.quote(package)} \\\n" for package in resolved_packages
     )
     containerfile = build_dir / "Containerfile"
     containerfile.write_text(
@@ -197,11 +197,10 @@ RUN mkdir -p /target && \\
       --setopt=cachedir=/ludos/dnf/cache \\
       --setopt=persistdir=/ludos/dnf/persist \\
       --setopt=logdir=/ludos/dnf/log \\
+      --setopt=install_weak_deps=False \\
       --disable-repo='*' \\
       --enable-repo='*' \\
-      --exclude=hunspell-en-AU \\
-      --exclude=hunspell-en-CA \\
-      install --skip-broken \\
+      install \\
 {package_lines}    && \\
     dnf5 -y --installroot=/target clean all && \\
     rm -rf /target/var/cache/dnf /target/var/log/dnf* \\
@@ -252,17 +251,6 @@ COPY --from=install /target /
     )
 
 
-def _dnf_base_args() -> list[str]:
-    return [
-        "--setopt=reposdir=/ludos/dnf/repos",
-        "--setopt=cachedir=/ludos/dnf/cache",
-        "--setopt=persistdir=/ludos/dnf/persist",
-        "--setopt=logdir=/ludos/dnf/log",
-        "--disable-repo=*",
-        "--enable-repo=*",
-    ]
-
-
 def _cache_name(value: str, description: str) -> str:
     if "/" in value or value in ("", ".", ".."):
         raise ConfigError(f"invalid {description} cache name '{value}'")
@@ -273,12 +261,3 @@ def _substitute_variables(value: str, variables: dict[str, str]) -> str:
     for key, replacement in variables.items():
         value = value.replace(f"${key}", replacement)
     return value
-
-
-def _download_arch_args(validation) -> tuple[str, ...]:
-    arch = validation.manifest.env["arch"]
-    return (f"--arch={arch}", "--arch=noarch")
-
-
-def _write_json_array(path: Path, values: tuple[str, ...]) -> None:
-    path.write_text(json.dumps(list(values), indent=2) + "\n", encoding="utf-8")
