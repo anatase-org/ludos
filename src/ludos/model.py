@@ -19,7 +19,6 @@ class Card:
     priority: int = 1
     packages: tuple[str, ...] = tuple()
     repos: tuple["RepoRef", ...] = tuple()
-    build: tuple[str, ...] = tuple()
     postprocess: str = ""
     source: Path | None = None
 
@@ -31,7 +30,6 @@ class Card:
             priority=_optional_int(data, "priority", path, default=1),
             packages=_string_tuple(data, "packages", path),
             repos=_repo_refs_tuple(data, "repos", path),
-            build=_string_tuple(data, "build", path),
             postprocess=_optional_string(data, "postprocess", path),
             source=path,
         )
