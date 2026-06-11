@@ -52,7 +52,6 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
     dnf_persist_dir = dnf_dir / "persist"
     dnf_log_dir = dnf_dir / "log"
     package_list = dnf_dir / f"{image}-packages.json"
-    transaction_store_dir = build_dir / "transaction"
 
     package_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -60,9 +59,6 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
     dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     dnf_persist_dir.mkdir(parents=True, exist_ok=True)
     dnf_log_dir.mkdir(parents=True, exist_ok=True)
-    if transaction_store_dir.exists():
-        shutil.rmtree(transaction_store_dir)
-    transaction_store_dir.mkdir(parents=True)
 
     for existing in repo_dir.glob("*.repo"):
         existing.unlink()
@@ -115,18 +111,16 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
         f"{dnf_log_dir}:/ludos/dnf/log",
         "--volume",
         f"{package_dir}:/ludos/packages",
-        "--volume",
-        f"{transaction_store_dir}:/ludos/transaction",
         "--workdir",
         "/workspace/repos",
         bootstrap,
         "dnf5",
     ]
 
-    subprocess.run(
+    transaction_preview = subprocess.run(
         [
             *bootstrap_dnf_base,
-            "-y",
+            "--assumeno",
             "--setopt=reposdir=/ludos/dnf/repos",
             "--setopt=cachedir=/ludos/dnf/cache",
             "--setopt=persistdir=/ludos/dnf/persist",
@@ -138,44 +132,63 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
             "--installroot=/ludos/resolve-root",
             f"--releasever={validation.manifest.env['releasever']}",
             "install",
-            "--store=/ludos/transaction",
             *requested_packages,
         ],
-        check=True,
+        check=False,
         text=True,
+        capture_output=True,
     )
 
-    transaction_file = transaction_store_dir / "transaction.json"
-    if not transaction_file.is_file():
-        raise ConfigError("dnf did not store a transaction")
-    transaction = json.loads(transaction_file.read_text(encoding="utf-8"))
     resolved_package_list = []
-    for rpm in transaction.get("rpms", []):
-        if rpm.get("action") != "Install":
+    in_install_section = False
+    for line in (
+        transaction_preview.stdout + "\n" + transaction_preview.stderr
+    ).splitlines():
+        stripped = line.strip()
+        if stripped == "Transaction Summary:":
+            break
+        if not stripped:
             continue
-        package = rpm.get("nevra")
-        package_path = rpm.get("package_path")
-        if not isinstance(package, str) or not isinstance(package_path, str):
-            raise ConfigError("dnf stored an invalid package transaction")
+        if stripped.startswith("Installing"):
+            in_install_section = True
+            continue
+        if stripped.startswith("Package "):
+            continue
+        if not in_install_section:
+            continue
 
-        stored_package = transaction_store_dir / package_path.removeprefix("./")
-        if not stored_package.is_file():
-            raise ConfigError(f"dnf did not store package file: {package_path}")
-        cached_package = package_dir / stored_package.name
-        if not cached_package.exists():
-            try:
-                cached_package.hardlink_to(stored_package)
-            except OSError:
-                shutil.copy2(stored_package, cached_package)
-
-        resolved_package_list.append(package)
+        fields = stripped.split()
+        if len(fields) < 4:
+            continue
+        package, arch, version = fields[:3]
+        resolved_package_list.append(f"{package}-{version}.{arch}")
     resolved_packages = tuple(resolved_package_list)
     if not resolved_packages:
-        raise ConfigError("dnf did not resolve any packages")
+        output = transaction_preview.stdout + transaction_preview.stderr
+        detail = "\n".join(output.splitlines()[-20:])
+        raise ConfigError(f"dnf did not resolve any packages:\n{detail}")
 
     package_list.write_text(
         json.dumps(list(resolved_packages), indent=2) + "\n",
         encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            *bootstrap_dnf_base,
+            "-y",
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--disable-repo=*",
+            "--enable-repo=*",
+            "download",
+            "--destdir=/ludos/packages",
+            *resolved_packages,
+        ],
+        check=True,
+        text=True,
     )
 
     label_lines = "".join(
