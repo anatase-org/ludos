@@ -202,6 +202,7 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
     common_package_set = {
         package for package, count in package_counts.items() if count > 1
     }
+    common_package_set = _drop_minimal_provider_conflicts(common_package_set)
     seen_common_packages = set()
     package_blocks = []
     common_packages = []
@@ -215,16 +216,25 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
         package_blocks.append(("common", tuple(common_packages)))
 
     resolved_package_list = list(common_packages)
+    selected_package_set = set(common_packages)
     for card_name, card_resolution in zip(card_names, card_resolutions):
-        card_packages = tuple(
-            package for package in card_resolution if package not in common_package_set
-        )
+        card_packages = []
+        for package in card_resolution:
+            if package in common_package_set:
+                continue
+            full_package = _full_provider_package(package)
+            if full_package != package and full_package in selected_package_set:
+                continue
+            card_packages.append(package)
         if not card_packages:
             continue
+        card_packages = tuple(card_packages)
         package_blocks.append((card_name, card_packages))
         resolved_package_list.extend(card_packages)
+        selected_package_set.update(card_packages)
     package_blocks = tuple(package_blocks)
     resolved_packages = tuple(resolved_package_list)
+    resolved_packages = _drop_minimal_provider_conflicts(resolved_packages)
     if not resolved_packages:
         raise ConfigError("dnf did not resolve any packages")
 
@@ -375,6 +385,23 @@ def _cache_name(value: str, description: str) -> str:
     if "/" in value or value in ("", ".", ".."):
         raise ConfigError(f"invalid {description} cache name '{value}'")
     return value
+
+
+def _drop_minimal_provider_conflicts(packages):
+    package_set = set(packages)
+    filtered = []
+    for package in packages:
+        full_package = _full_provider_package(package)
+        if full_package != package and full_package in package_set:
+            continue
+        filtered.append(package)
+    if isinstance(packages, set):
+        return set(filtered)
+    return tuple(filtered)
+
+
+def _full_provider_package(package: str) -> str:
+    return package.replace("-minimal-", "-", 1)
 
 
 def _substitute_variables(value: str, variables: dict[str, str]) -> str:
