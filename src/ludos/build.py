@@ -83,7 +83,7 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
     card_entries = []
     used_card_names = set()
     for insertion_order, card in enumerate(validation.cards):
-        card_name = card.source.stem if card.source else "card"
+        card_name = _card_name(card.source, root_dir) if card.source else "card"
         if card_name in used_card_names:
             index = 2
             while f"{card_name}-{index}" in used_card_names:
@@ -386,6 +386,28 @@ def _cache_name(value: str, description: str) -> str:
     if "/" in value or value in ("", ".", ".."):
         raise ConfigError(f"invalid {description} cache name '{value}'")
     return value
+
+
+def _card_name(source: Path, root_dir: Path) -> str:
+    source = source.resolve()
+    try:
+        relative_source = source.relative_to(root_dir)
+    except ValueError:
+        relative_source = source
+
+    parts = list(relative_source.parts)
+    if parts and parts[0] == "cards":
+        parts = parts[1:]
+
+    if parts and parts[-1] in ("card.yml", "card.yaml"):
+        parts = parts[:-1]
+    elif parts and Path(parts[-1]).suffix in (".yml", ".yaml"):
+        parts[-1] = Path(parts[-1]).stem
+
+    if not parts:
+        return "card"
+
+    return "-".join(parts)
 
 
 def _drop_minimal_provider_conflicts(packages):
