@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import datetime as _datetime
+import hashlib
 import json
+import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -23,12 +27,16 @@ class BuildResult:
     package_list: Path
     repo_dir: Path
     podman: str
+    cache_version: str
+    repo_images: tuple[str, ...]
+    package_images: tuple[str, ...]
 
 
 def build_manifest(
     manifest_path: Path,
     cards_dir: Path | None = None,
     cache_dir: Path | None = None,
+    cache_version: str | None = None,
 ) -> BuildResult:
     validation = validate_manifest(manifest_path, cards_dir)
     if validation.missing_repos:
@@ -41,12 +49,23 @@ def build_manifest(
     root_dir = manifest_path.resolve().parent
     image = _cache_name(manifest_path.resolve().stem, "image")
     manifest_env = {key: str(value) for key, value in validation.manifest.env.items()}
+    local_values = _load_dotenv(root_dir / ".env")
+    local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
+    manifest_env.update(local_values)
     distro = _cache_name(
         _substitute_variables(validation.manifest.distro, manifest_env),
         "distro",
     )
     bootstrap = _substitute_variables(validation.manifest.bootstrap, manifest_env)
     output_image = f"localhost/ludos/{image}:{distro}"
+    if cache_version is None:
+        iso_today = _datetime.date.today().isocalendar()
+        cache_version = f"{iso_today.year}-{iso_today.week:02d}"
+        load_only_version = False
+    else:
+        cache_version = _cache_name(cache_version, "version")
+        load_only_version = True
+    local_prefix = _local_prefix(local_prefix)
 
     if cache_dir is None:
         cache_dir = root_dir / "cache"
@@ -60,6 +79,8 @@ def build_manifest(
     dnf_persist_dir = dnf_dir / "persist"
     dnf_log_dir = dnf_dir / "log"
     package_list = dnf_dir / f"{image}-packages.json"
+    oci_dir = build_dir / "oci"
+    resolve_root_dir = build_dir / "resolve-root"
 
     package_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -67,10 +88,20 @@ def build_manifest(
     dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     dnf_persist_dir.mkdir(parents=True, exist_ok=True)
     dnf_log_dir.mkdir(parents=True, exist_ok=True)
+    resolve_root_dir.mkdir(parents=True, exist_ok=True)
+
+    podman = shutil.which("podman")
+    if not podman:
+        raise ConfigError("podman must be installed to build")
 
     for existing in repo_dir.glob("*.repo"):
         existing.unlink()
+    shutil.rmtree(dnf_cache_dir)
+    shutil.rmtree(dnf_persist_dir)
+    dnf_cache_dir.mkdir(parents=True, exist_ok=True)
+    dnf_persist_dir.mkdir(parents=True, exist_ok=True)
 
+    repo_images = []
     for repo in validation.repos:
         repo_variables = dict(manifest_env)
         for key, value in repo.ref.vars.items():
@@ -82,9 +113,45 @@ def build_manifest(
         )
         repo_lines = rendered_repo.rstrip().splitlines()
         repo_lines.append(f"priority={repo.ref.priority}")
-        (repo_dir / repo.source.name).write_text(
-            "\n".join(repo_lines) + "\n",
-            encoding="utf-8",
+        repo_lines.append("metadata_expire=never")
+        rendered_repo = "\n".join(repo_lines) + "\n"
+        repo_id = _repo_id(rendered_repo, repo.source)
+        repo_image = _local_image(local_prefix, "repos", f"{repo.ref.repo}-{cache_version}")
+        repo_images.append(repo_image)
+        if _image_exists(podman, repo_image):
+            _extract_image_paths(
+                podman,
+                repo_image,
+                {
+                    "repos": repo_dir,
+                    "cache": dnf_cache_dir,
+                    "persist": dnf_persist_dir,
+                },
+            )
+            continue
+        if load_only_version:
+            raise ConfigError(
+                f"repository metadata image is missing for requested version: {repo_image}"
+            )
+
+        _create_repo_image(
+            podman=podman,
+            bootstrap=bootstrap,
+            root_dir=root_dir,
+            build_dir=oci_dir / "repos" / f"{repo.ref.repo}-{cache_version}",
+            image=repo_image,
+            repo_name=repo.source.name,
+            repo_id=repo_id,
+            rendered_repo=rendered_repo,
+        )
+        _extract_image_paths(
+            podman,
+            repo_image,
+            {
+                "repos": repo_dir,
+                "cache": dnf_cache_dir,
+                "persist": dnf_persist_dir,
+            },
         )
 
     card_entries = []
@@ -117,10 +184,6 @@ def build_manifest(
     if not requested_packages:
         raise ConfigError(f"{manifest_path}: no packages requested by cards")
 
-    podman = shutil.which("podman")
-    if not podman:
-        raise ConfigError("podman must be installed to build")
-
     bootstrap_dnf_base = [
         podman,
         "run",
@@ -137,11 +200,16 @@ def build_manifest(
         f"{dnf_log_dir}:/ludos/dnf/log",
         "--volume",
         f"{package_dir}:/ludos/packages",
+        "--volume",
+        f"{resolve_root_dir}:/ludos/resolve-root",
         "--workdir",
         "/workspace/repos",
         bootstrap,
         "dnf5",
     ]
+
+    shutil.rmtree(resolve_root_dir, ignore_errors=True)
+    resolve_root_dir.mkdir(parents=True)
 
     card_resolutions = []
     for card_name, card_packages in zip(card_names, card_requests):
@@ -160,9 +228,8 @@ def build_manifest(
                 "--setopt=install_weak_deps=False",
                 "--disable-repo=*",
                 "--enable-repo=*",
-                "--refresh",
                 "--installroot=/ludos/resolve-root",
-                f"--releasever={validation.manifest.env['releasever']}",
+                f"--releasever={manifest_env['releasever']}",
                 "install",
                 *card_packages,
             ],
@@ -221,10 +288,19 @@ def build_manifest(
             common_packages.append(package)
     if common_packages:
         package_blocks.append(("common", tuple(common_packages)))
+        common_hash_inputs = []
+        for card_request, card_resolution in zip(card_requests, card_resolutions):
+            if any(package in common_package_set for package in card_resolution):
+                common_hash_inputs.extend(card_request)
+        package_block_hash_inputs = [tuple(common_hash_inputs)]
+    else:
+        package_block_hash_inputs = []
 
     resolved_package_list = list(common_packages)
     selected_package_set = set(common_packages)
-    for card_name, card_resolution in zip(card_names, card_resolutions):
+    for card_name, card_request, card_resolution in zip(
+        card_names, card_requests, card_resolutions
+    ):
         card_packages = []
         for package in card_resolution:
             if package in common_package_set:
@@ -237,6 +313,7 @@ def build_manifest(
             continue
         card_packages = tuple(card_packages)
         package_blocks.append((card_name, card_packages))
+        package_block_hash_inputs.append(card_request)
         resolved_package_list.extend(card_packages)
         selected_package_set.update(card_packages)
     package_blocks = tuple(package_blocks)
@@ -245,6 +322,48 @@ def build_manifest(
     if not resolved_packages:
         raise ConfigError("dnf did not resolve any packages")
 
+    package_images = []
+    expanded_package_blocks = []
+    shutil.rmtree(resolve_root_dir, ignore_errors=True)
+    resolve_root_dir.mkdir(parents=True)
+    for (block_name, block_packages), hash_inputs in zip(
+        package_blocks, package_block_hash_inputs
+    ):
+        block_hash = _package_hash(hash_inputs)
+        package_image = _local_image(
+            local_prefix,
+            "packages",
+            f"{block_name}-{block_hash}-{cache_version}",
+        )
+        package_images.append(package_image)
+        if _image_exists(podman, package_image):
+            expanded_package_blocks.append((block_name, block_packages))
+            rpm_files = _package_rpm_files(bootstrap_dnf_base, block_packages)
+            _install_resolved_block(bootstrap_dnf_base, manifest_env, rpm_files)
+            continue
+
+        block_packages = _resolve_local_install_block(
+            bootstrap_dnf_base,
+            manifest_env,
+            block_packages,
+        )
+        expanded_package_blocks.append((block_name, block_packages))
+        rpm_files = _download_block_packages(bootstrap_dnf_base, block_packages)
+        _install_resolved_block(bootstrap_dnf_base, manifest_env, rpm_files)
+        _create_package_image(
+            podman=podman,
+            build_dir=oci_dir / "packages" / f"{block_name}-{block_hash}-{cache_version}",
+            image=package_image,
+            package_dir=package_dir,
+            rpm_files=rpm_files,
+        )
+
+    package_blocks = tuple(expanded_package_blocks)
+    resolved_packages = tuple(
+        package
+        for _block_name, block_packages in package_blocks
+        for package in block_packages
+    )
     package_list.write_text(
         json.dumps(
             {
@@ -253,6 +372,7 @@ def build_manifest(
                     block_name: list(block_packages)
                     for block_name, block_packages in package_blocks
                 },
+                "version": cache_version,
             },
             indent=2,
         )
@@ -260,55 +380,42 @@ def build_manifest(
         encoding="utf-8",
     )
 
-    for block_name, block_packages in package_blocks:
-        subprocess.run(
-            [
-                *bootstrap_dnf_base,
-                "-y",
-                "--setopt=reposdir=/ludos/dnf/repos",
-                "--setopt=cachedir=/ludos/dnf/cache",
-                "--setopt=persistdir=/ludos/dnf/persist",
-                "--setopt=logdir=/ludos/dnf/log",
-                "--disable-repo=*",
-                "--enable-repo=*",
-                "download",
-                "--destdir=/ludos/packages",
-                *block_packages,
-            ],
-            check=True,
-            text=True,
-        )
-
     label_lines = "".join(
         f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
         for key, value in validation.manifest.labels.items()
     )
+    package_stage_lines = "".join(
+        f"FROM {package_image} AS packages_{_identifier(block_name)}\n"
+        for (block_name, _block_packages), package_image in zip(
+            package_blocks, package_images
+        )
+    )
     install_steps = []
     for block_name, block_packages in package_blocks:
-        package_lines = "".join(
-            f"      {shlex.quote(package)} \\\n" for package in block_packages
-        )
+        package_lines = f"    /rpms/{block_name}/*.rpm \\\n"
         install_steps.append(
             f"""#
 # Install: {block_name}
 #
 
+COPY --from=packages_{_identifier(block_name)} / /rpms/{block_name}/
 RUN /bin/sh <<'LUDOS_INSTALL_{block_name}'
 set -e
 dnf5 -y \\
     --installroot=/target \\
-    --releasever={validation.manifest.env["releasever"]} \\
+    --releasever={manifest_env["releasever"]} \\
     --setopt=reposdir=/ludos/dnf/repos \\
     --setopt=cachedir=/ludos/dnf/cache \\
     --setopt=persistdir=/ludos/dnf/persist \\
     --setopt=logdir=/ludos/dnf/log \\
     --setopt=install_weak_deps=False \\
+    --cacheonly \\
     --disable-repo='*' \\
     --enable-repo='*' \\
+    --nogpgcheck \\
     install \\
     --allowerasing \\
 {package_lines}    && \\
-    dnf5 -y --installroot=/target clean all && \\
     rm -rf /target/var/cache/dnf /target/var/log/dnf*
 LUDOS_INSTALL_{block_name}
 """
@@ -330,7 +437,7 @@ LUDOS_POSTPROCESS_{block_name}
     postprocess_step_lines = "\n".join(postprocess_steps)
     containerfile = build_dir / "Containerfile"
     containerfile.write_text(
-        f"""FROM {bootstrap} AS install
+        f"""{package_stage_lines}FROM {bootstrap} AS install
 WORKDIR /workspace/repos
 RUN mkdir -p /target
 
@@ -395,7 +502,377 @@ COPY --from=install /target /
         package_list=package_list,
         repo_dir=repo_dir,
         podman=str(podman),
+        cache_version=cache_version,
+        repo_images=tuple(repo_images),
+        package_images=tuple(package_images),
     )
+
+
+def _load_dotenv(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+
+    values = {}
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            raise ConfigError(f"{path}:{line_number}: expected KEY=VALUE")
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ConfigError(f"{path}:{line_number}: invalid environment key '{key}'")
+        if (
+            len(value) >= 2
+            and value[0] == value[-1]
+            and value[0] in ("'", '"')
+        ):
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _local_prefix(value: str) -> str:
+    if "/" in value or ":" in value:
+        raise ConfigError(f"invalid local_prefix '{value}'")
+    return value
+
+
+def _local_image(local_prefix: str, repository: str, tag: str) -> str:
+    return f"localhost/{local_prefix}{repository}:{tag}"
+
+
+def _image_exists(podman: str, image: str) -> bool:
+    return subprocess.run([podman, "image", "exists", image], check=False).returncode == 0
+
+
+def _repo_id(rendered_repo: str, source: Path) -> str:
+    for line in rendered_repo.splitlines():
+        match = re.fullmatch(r"\[([^]]+)]", line.strip())
+        if match:
+            return match.group(1)
+    raise ConfigError(f"{source}: repository definition does not contain a repo id")
+
+
+def _create_repo_image(
+    *,
+    podman: str,
+    bootstrap: str,
+    root_dir: Path,
+    build_dir: Path,
+    image: str,
+    repo_name: str,
+    repo_id: str,
+    rendered_repo: str,
+) -> None:
+    image_root = build_dir / "root"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    (image_root / "repos").mkdir(parents=True)
+    (image_root / "cache").mkdir()
+    (image_root / "persist").mkdir()
+    (build_dir / "log").mkdir()
+    (image_root / "repos" / repo_name).write_text(rendered_repo, encoding="utf-8")
+
+    subprocess.run(
+        [
+            podman,
+            "run",
+            "--rm",
+            "--volume",
+            f"{root_dir / 'repos'}:/workspace/repos:ro",
+            "--volume",
+            f"{image_root / 'repos'}:/ludos/dnf/repos:ro",
+            "--volume",
+            f"{image_root / 'cache'}:/ludos/dnf/cache",
+            "--volume",
+            f"{image_root / 'persist'}:/ludos/dnf/persist",
+            "--volume",
+            f"{build_dir / 'log'}:/ludos/dnf/log",
+            "--workdir",
+            "/workspace/repos",
+            bootstrap,
+            "dnf5",
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--disable-repo=*",
+            f"--enable-repo={repo_id}",
+            "makecache",
+            "--refresh",
+        ],
+        check=True,
+    )
+
+    containerfile = build_dir / "Containerfile"
+    containerfile.write_text("FROM scratch\nCOPY root/ /\n", encoding="utf-8")
+    subprocess.run(
+        [
+            podman,
+            "build",
+            "--layers",
+            "--pull=missing",
+            "--tag",
+            image,
+            "--file",
+            str(containerfile),
+            str(build_dir),
+        ],
+        check=True,
+    )
+
+
+def _extract_image_paths(
+    podman: str, image: str, paths: dict[str, Path]
+) -> None:
+    container = subprocess.run(
+        [podman, "create", image, "true"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    try:
+        for source_name, destination in paths.items():
+            destination.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [
+                    podman,
+                    "cp",
+                    f"{container}:/{source_name}/.",
+                    str(destination),
+                ],
+                check=True,
+            )
+    finally:
+        subprocess.run([podman, "rm", container], check=True, stdout=subprocess.DEVNULL)
+
+
+def _package_rpm_files(
+    bootstrap_dnf_base: list[str], block_packages: tuple[str, ...]
+) -> tuple[str, ...]:
+    query = subprocess.run(
+        [
+            *bootstrap_dnf_base,
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--disable-repo=*",
+            "--enable-repo=*",
+            "repoquery",
+            "--location",
+            *block_packages,
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    rpm_files = []
+    seen = set()
+    for line in query.stdout.splitlines():
+        filename = line.rsplit("/", 1)[-1].strip()
+        if not filename.endswith(".rpm") or filename in seen:
+            continue
+        seen.add(filename)
+        rpm_files.append(filename)
+    if len(rpm_files) != len(block_packages):
+        raise ConfigError(
+            f"repoquery returned {len(rpm_files)} RPM locations for {len(block_packages)} packages"
+        )
+    return tuple(rpm_files)
+
+
+def _download_block_packages(
+    bootstrap_dnf_base: list[str], block_packages: tuple[str, ...]
+) -> tuple[str, ...]:
+    rpm_files = _package_rpm_files(bootstrap_dnf_base, block_packages)
+    subprocess.run(
+        [
+            *bootstrap_dnf_base,
+            "-y",
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--disable-repo=*",
+            "--enable-repo=*",
+            "download",
+            "--destdir=/ludos/packages",
+            *block_packages,
+        ],
+        check=True,
+        text=True,
+    )
+    return rpm_files
+
+
+def _resolve_local_install_block(
+    bootstrap_dnf_base: list[str],
+    manifest_env: dict[str, str],
+    block_packages: tuple[str, ...],
+) -> tuple[str, ...]:
+    resolved = list(block_packages)
+    seen = set(resolved)
+    for _attempt in range(10):
+        rpm_files = _download_block_packages(bootstrap_dnf_base, tuple(resolved))
+        missing_dependencies = _preview_local_install_dependencies(
+            bootstrap_dnf_base,
+            manifest_env,
+            rpm_files,
+        )
+        new_dependencies = [
+            package for package in missing_dependencies if package not in seen
+        ]
+        if not new_dependencies:
+            return tuple(resolved)
+        resolved.extend(new_dependencies)
+        seen.update(new_dependencies)
+
+    raise ConfigError("local RPM install dependency resolution did not converge")
+
+
+def _preview_local_install_dependencies(
+    bootstrap_dnf_base: list[str],
+    manifest_env: dict[str, str],
+    rpm_files: tuple[str, ...],
+) -> tuple[str, ...]:
+    transaction_preview = subprocess.run(
+        [
+            *bootstrap_dnf_base,
+            "--assumeno",
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--setopt=install_weak_deps=False",
+            "--disable-repo=*",
+            "--enable-repo=*",
+            "--installroot=/ludos/resolve-root",
+            f"--releasever={manifest_env['releasever']}",
+            "install",
+            *_rpm_paths(rpm_files),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    missing_dependencies = []
+    in_install_section = False
+    saw_transaction_summary = False
+    for line in (
+        transaction_preview.stdout + "\n" + transaction_preview.stderr
+    ).splitlines():
+        stripped = line.strip()
+        if stripped == "Transaction Summary:":
+            saw_transaction_summary = True
+            break
+        if not stripped:
+            continue
+        if stripped.startswith("Installing"):
+            in_install_section = True
+            continue
+        if stripped.startswith("Package "):
+            continue
+        if not in_install_section:
+            continue
+
+        fields = stripped.split()
+        if len(fields) < 4:
+            continue
+        package, arch, version, repository = fields[:4]
+        if repository == "@commandline":
+            continue
+        missing_dependencies.append(f"{package}-{version}.{arch}")
+
+    if transaction_preview.returncode != 0 and not saw_transaction_summary:
+        output = transaction_preview.stdout + transaction_preview.stderr
+        detail = "\n".join(output.splitlines()[-20:])
+        raise ConfigError(f"dnf did not preview local RPM install:\n{detail}")
+
+    return tuple(missing_dependencies)
+
+
+def _install_resolved_block(
+    bootstrap_dnf_base: list[str],
+    manifest_env: dict[str, str],
+    rpm_files: tuple[str, ...],
+) -> None:
+    subprocess.run(
+        [
+            *bootstrap_dnf_base,
+            "-y",
+            "--installroot=/ludos/resolve-root",
+            f"--releasever={manifest_env['releasever']}",
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--setopt=install_weak_deps=False",
+            "--setopt=tsflags=justdb",
+            "--disable-repo=*",
+            "--enable-repo=*",
+            "--nogpgcheck",
+            "install",
+            *_rpm_paths(rpm_files),
+        ],
+        check=True,
+        text=True,
+    )
+
+
+def _rpm_paths(rpm_files: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(f"/ludos/packages/{rpm_file}" for rpm_file in rpm_files)
+
+
+def _create_package_image(
+    *,
+    podman: str,
+    build_dir: Path,
+    image: str,
+    package_dir: Path,
+    rpm_files: tuple[str, ...],
+) -> None:
+    image_root = build_dir / "root"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    image_root.mkdir(parents=True)
+    for rpm_file in rpm_files:
+        matches = list(package_dir.rglob(rpm_file))
+        if not matches:
+            raise ConfigError(f"downloaded RPM is missing from cache: {rpm_file}")
+        target = image_root / rpm_file
+        try:
+            os.link(matches[0], target)
+        except OSError:
+            shutil.copy2(matches[0], target)
+
+    containerfile = build_dir / "Containerfile"
+    containerfile.write_text("FROM scratch\nCOPY root/ /\n", encoding="utf-8")
+    subprocess.run(
+        [
+            podman,
+            "build",
+            "--layers",
+            "--pull=missing",
+            "--tag",
+            image,
+            "--file",
+            str(containerfile),
+            str(build_dir),
+        ],
+        check=True,
+    )
+
+
+def _package_hash(packages: tuple[str, ...]) -> str:
+    payload = "\n".join(sorted(packages)) + "\n"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+
+
+def _identifier(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", value)
 
 
 def _cache_name(value: str, description: str) -> str:

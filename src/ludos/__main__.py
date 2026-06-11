@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory for build, dnf, and package caches. Defaults to ./cache next to the manifest.",
     )
+    build.add_argument(
+        "--version",
+        default=None,
+        help="Repository/package cache version to load. Defaults to the current ISO YYYY-WW and creates missing cache images.",
+    )
     build.set_defaults(func=build_command)
 
     validate = subcommands.add_parser("validate", help="Validate Ludos config files.")
@@ -65,7 +70,7 @@ def validate_command(args: argparse.Namespace) -> int:
 
 
 def build_command(args: argparse.Namespace) -> int:
-    result = build_manifest(args.manifest, args.cards_dir, args.cache)
+    result = build_manifest(args.manifest, args.cards_dir, args.cache, args.version)
     print(
         f"Built {result.output_image} for {result.image} on {result.distro} "
         f"with {Path(result.podman).name} using {result.bootstrap}"

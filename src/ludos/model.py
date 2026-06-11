@@ -56,6 +56,7 @@ class Manifest:
     bootstrap: str
     repos: tuple[RepoRef, ...]
     cards: tuple[str, ...]
+    local_prefix: str = ""
     labels: dict[str, str] = field(default_factory=dict)
     source: Path | None = None
 
@@ -69,6 +70,7 @@ class Manifest:
             bootstrap=_required_string(data, "bootstrap", path),
             repos=_repo_refs_tuple(data, "repos", path),
             cards=_required_string_tuple(data, "cards", path),
+            local_prefix=_optional_string(data, "local_prefix", path),
             labels=_string_dict(data, "labels", path),
             source=path,
         )
