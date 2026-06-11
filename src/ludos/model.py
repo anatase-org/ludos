@@ -50,6 +50,7 @@ class ResolvedRepo:
 class Manifest:
     version: int
     env: dict[str, str | int]
+    distro: str
     repos: tuple[RepoRef, ...]
     cards: tuple[str, ...]
     labels: dict[str, str] = field(default_factory=dict)
@@ -61,6 +62,7 @@ class Manifest:
         return cls(
             version=_required_version(data, path),
             env=_env_dict(data, path),
+            distro=_required_string(data, "distro", path),
             repos=_repo_refs_tuple(data, "repos", path),
             cards=_required_string_tuple(data, "cards", path),
             labels=_string_dict(data, "labels", path),
@@ -184,6 +186,13 @@ def _required_version(data: dict[str, Any], path: Path) -> int:
     value = data.get("version")
     if value != 1:
         raise ConfigError(f"{path}: 'version' must be 1")
+    return value
+
+
+def _required_string(data: dict[str, Any], key: str, path: Path) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{path}: '{key}' must be a non-empty string")
     return value
 
 
