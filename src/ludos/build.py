@@ -18,6 +18,7 @@ class BuildResult:
     output_image: str
     requested_packages: tuple[str, ...]
     resolved_packages: tuple[str, ...]
+    package_blocks: tuple[tuple[str, tuple[str, ...]], ...]
     package_dir: Path
     package_list: Path
     repo_dir: Path
@@ -80,13 +81,24 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
         )
 
     requested_packages = []
-    seen_packages = set()
+    card_requests = []
+    card_names = []
+    used_card_names = set()
     for card in validation.cards:
+        card_name = card.source.stem if card.source else "card"
+        if card_name in used_card_names:
+            index = 2
+            while f"{card_name}-{index}" in used_card_names:
+                index += 1
+            card_name = f"{card_name}-{index}"
+        used_card_names.add(card_name)
+        card_names.append(card_name)
+
+        card_packages = []
         for package in card.packages:
-            if package in seen_packages:
-                continue
-            seen_packages.add(package)
+            card_packages.append(package)
             requested_packages.append(package)
+        card_requests.append(tuple(card_packages))
     requested_packages = tuple(requested_packages)
     if not requested_packages:
         raise ConfigError(f"{manifest_path}: no packages requested by cards")
@@ -117,93 +129,144 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
         "dnf5",
     ]
 
-    transaction_preview = subprocess.run(
-        [
-            *bootstrap_dnf_base,
-            "--assumeno",
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--setopt=install_weak_deps=False",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            "--refresh",
-            "--installroot=/ludos/resolve-root",
-            f"--releasever={validation.manifest.env['releasever']}",
-            "install",
-            *requested_packages,
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
-
-    resolved_package_list = []
-    in_install_section = False
-    for line in (
-        transaction_preview.stdout + "\n" + transaction_preview.stderr
-    ).splitlines():
-        stripped = line.strip()
-        if stripped == "Transaction Summary:":
-            break
-        if not stripped:
-            continue
-        if stripped.startswith("Installing"):
-            in_install_section = True
-            continue
-        if stripped.startswith("Package "):
-            continue
-        if not in_install_section:
+    card_resolutions = []
+    for card_name, card_packages in zip(card_names, card_requests):
+        if not card_packages:
+            card_resolutions.append(tuple())
             continue
 
-        fields = stripped.split()
-        if len(fields) < 4:
+        transaction_preview = subprocess.run(
+            [
+                *bootstrap_dnf_base,
+                "--assumeno",
+                "--setopt=reposdir=/ludos/dnf/repos",
+                "--setopt=cachedir=/ludos/dnf/cache",
+                "--setopt=persistdir=/ludos/dnf/persist",
+                "--setopt=logdir=/ludos/dnf/log",
+                "--setopt=install_weak_deps=False",
+                "--disable-repo=*",
+                "--enable-repo=*",
+                "--refresh",
+                "--installroot=/ludos/resolve-root",
+                f"--releasever={validation.manifest.env['releasever']}",
+                "install",
+                *card_packages,
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        card_resolved_package_list = []
+        in_install_section = False
+        for line in (
+            transaction_preview.stdout + "\n" + transaction_preview.stderr
+        ).splitlines():
+            stripped = line.strip()
+            if stripped == "Transaction Summary:":
+                break
+            if not stripped:
+                continue
+            if stripped.startswith("Installing"):
+                in_install_section = True
+                continue
+            if stripped.startswith("Package "):
+                continue
+            if not in_install_section:
+                continue
+
+            fields = stripped.split()
+            if len(fields) < 4:
+                continue
+            package, arch, version = fields[:3]
+            card_resolved_package_list.append(f"{package}-{version}.{arch}")
+
+        if not card_resolved_package_list:
+            output = transaction_preview.stdout + transaction_preview.stderr
+            detail = "\n".join(output.splitlines()[-20:])
+            raise ConfigError(f"dnf did not resolve packages for {card_name}:\n{detail}")
+        card_resolutions.append(tuple(card_resolved_package_list))
+
+    package_counts = {}
+    for card_resolution in card_resolutions:
+        for package in set(card_resolution):
+            package_counts[package] = package_counts.get(package, 0) + 1
+
+    common_package_set = {
+        package for package, count in package_counts.items() if count > 1
+    }
+    seen_common_packages = set()
+    package_blocks = []
+    common_packages = []
+    for card_resolution in card_resolutions:
+        for package in card_resolution:
+            if package not in common_package_set or package in seen_common_packages:
+                continue
+            seen_common_packages.add(package)
+            common_packages.append(package)
+    if common_packages:
+        package_blocks.append(("common", tuple(common_packages)))
+
+    resolved_package_list = list(common_packages)
+    for card_name, card_resolution in zip(card_names, card_resolutions):
+        card_packages = tuple(
+            package for package in card_resolution if package not in common_package_set
+        )
+        if not card_packages:
             continue
-        package, arch, version = fields[:3]
-        resolved_package_list.append(f"{package}-{version}.{arch}")
+        package_blocks.append((card_name, card_packages))
+        resolved_package_list.extend(card_packages)
+    package_blocks = tuple(package_blocks)
     resolved_packages = tuple(resolved_package_list)
     if not resolved_packages:
-        output = transaction_preview.stdout + transaction_preview.stderr
-        detail = "\n".join(output.splitlines()[-20:])
-        raise ConfigError(f"dnf did not resolve any packages:\n{detail}")
+        raise ConfigError("dnf did not resolve any packages")
 
     package_list.write_text(
-        json.dumps(list(resolved_packages), indent=2) + "\n",
+        json.dumps(
+            {
+                "packages": list(resolved_packages),
+                "blocks": {
+                    block_name: list(block_packages)
+                    for block_name, block_packages in package_blocks
+                },
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
-    subprocess.run(
-        [
-            *bootstrap_dnf_base,
-            "-y",
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            "download",
-            "--destdir=/ludos/packages",
-            *resolved_packages,
-        ],
-        check=True,
-        text=True,
-    )
+    for block_name, block_packages in package_blocks:
+        subprocess.run(
+            [
+                *bootstrap_dnf_base,
+                "-y",
+                "--setopt=reposdir=/ludos/dnf/repos",
+                "--setopt=cachedir=/ludos/dnf/cache",
+                "--setopt=persistdir=/ludos/dnf/persist",
+                "--setopt=logdir=/ludos/dnf/log",
+                "--disable-repo=*",
+                "--enable-repo=*",
+                "download",
+                "--destdir=/ludos/packages",
+                *block_packages,
+            ],
+            check=True,
+            text=True,
+        )
 
     label_lines = "".join(
         f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
         for key, value in validation.manifest.labels.items()
     )
-    package_lines = "".join(
-        f"      {shlex.quote(package)} \\\n" for package in resolved_packages
-    )
-    containerfile = build_dir / "Containerfile"
-    containerfile.write_text(
-        f"""FROM {bootstrap} AS install
-WORKDIR /workspace/repos
-RUN mkdir -p /target && \\
-    dnf5 -y \\
+    install_steps = []
+    for block_name, block_packages in package_blocks:
+        package_lines = "".join(
+            f"      {shlex.quote(package)} \\\n" for package in block_packages
+        )
+        install_steps.append(
+            f"""# Install {block_name} packages.
+RUN dnf5 -y \\
       --installroot=/target \\
       --releasever={validation.manifest.env["releasever"]} \\
       --setopt=reposdir=/ludos/dnf/repos \\
@@ -216,8 +279,18 @@ RUN mkdir -p /target && \\
       install \\
 {package_lines}    && \\
     dnf5 -y --installroot=/target clean all && \\
-    rm -rf /target/var/cache/dnf /target/var/log/dnf* \\
-      /target/etc/machine-id /target/var/lib/dbus/machine-id
+    rm -rf /target/var/cache/dnf /target/var/log/dnf*
+"""
+        )
+    install_step_lines = "\n".join(install_steps)
+    containerfile = build_dir / "Containerfile"
+    containerfile.write_text(
+        f"""FROM {bootstrap} AS install
+WORKDIR /workspace/repos
+RUN mkdir -p /target
+
+{install_step_lines}
+RUN rm -rf /target/etc/machine-id /target/var/lib/dbus/machine-id
 
 FROM scratch
 COPY --from=install /target /
@@ -257,6 +330,7 @@ COPY --from=install /target /
         output_image=output_image,
         requested_packages=requested_packages,
         resolved_packages=resolved_packages,
+        package_blocks=package_blocks,
         package_dir=package_dir,
         package_list=package_list,
         repo_dir=repo_dir,

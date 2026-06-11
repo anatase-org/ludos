@@ -65,6 +65,11 @@ def build_command(args: argparse.Namespace) -> int:
         f"with {Path(result.podman).name} using {result.bootstrap}"
     )
     print(f"Downloaded {len(result.resolved_packages)} resolved packages into {result.package_dir}")
+    blocks = ", ".join(
+        f"{block_name}: {len(block_packages)}"
+        for block_name, block_packages in result.package_blocks
+    )
+    print(f"Package blocks: {blocks}")
     print(f"Package list: {result.package_list}")
     return 0
 
