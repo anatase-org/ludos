@@ -80,11 +80,9 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
             encoding="utf-8",
         )
 
-    requested_packages = []
-    card_requests = []
-    card_names = []
+    card_entries = []
     used_card_names = set()
-    for card in validation.cards:
+    for insertion_order, card in enumerate(validation.cards):
         card_name = card.source.stem if card.source else "card"
         if card_name in used_card_names:
             index = 2
@@ -92,13 +90,22 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
                 index += 1
             card_name = f"{card_name}-{index}"
         used_card_names.add(card_name)
-        card_names.append(card_name)
+        card_entries.append((card.priority, insertion_order, card_name, card))
 
+    card_entries.sort(key=lambda entry: (entry[0], entry[1]))
+    requested_packages = []
+    card_requests = []
+    card_names = []
+    postprocess_blocks = []
+    for _priority, _insertion_order, card_name, card in card_entries:
+        card_names.append(card_name)
         card_packages = []
         for package in card.packages:
             card_packages.append(package)
             requested_packages.append(package)
         card_requests.append(tuple(card_packages))
+        if card.postprocess.strip():
+            postprocess_blocks.append((card_name, card.postprocess.rstrip()))
     requested_packages = tuple(requested_packages)
     if not requested_packages:
         raise ConfigError(f"{manifest_path}: no packages requested by cards")
@@ -283,17 +290,43 @@ RUN dnf5 -y \\
 """
         )
     install_step_lines = "\n".join(install_steps)
+    postprocess_steps = []
+    for block_name, postprocess in postprocess_blocks:
+        postprocess_steps.append(
+            f"""# Postprocess: {block_name}
+RUN /bin/sh <<'LUDOS_POSTPROCESS_{block_name}'
+set -e
+{postprocess}
+LUDOS_POSTPROCESS_{block_name}
+"""
+        )
+    postprocess_step_lines = "\n".join(postprocess_steps)
     containerfile = build_dir / "Containerfile"
     containerfile.write_text(
         f"""FROM {bootstrap} AS install
 WORKDIR /workspace/repos
 RUN mkdir -p /target
 
+#
+# Install packages
+#
+
 {install_step_lines}
+
+#
+# Switch to real root
+#
+
 RUN rm -rf /target/etc/machine-id /target/var/lib/dbus/machine-id
 
 FROM scratch
 COPY --from=install /target /
+
+#
+# Run postprocessing
+#
+
+{postprocess_step_lines}
 {label_lines}""",
         encoding="utf-8",
     )

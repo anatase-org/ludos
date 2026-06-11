@@ -16,9 +16,11 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class Card:
     version: int
+    priority: int = 1
     packages: tuple[str, ...] = tuple()
     repos: tuple["RepoRef", ...] = tuple()
     build: tuple[str, ...] = tuple()
+    postprocess: str = ""
     source: Path | None = None
 
     @classmethod
@@ -26,9 +28,11 @@ class Card:
         data = _load_mapping(path)
         return cls(
             version=_required_version(data, path),
+            priority=_optional_int(data, "priority", path, default=1),
             packages=_string_tuple(data, "packages", path),
             repos=_repo_refs_tuple(data, "repos", path),
             build=_string_tuple(data, "build", path),
+            postprocess=_optional_string(data, "postprocess", path),
             source=path,
         )
 
@@ -195,6 +199,22 @@ def _required_string(data: dict[str, Any], key: str, path: Path) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{path}: '{key}' must be a non-empty string")
+    return value
+
+
+def _optional_string(data: dict[str, Any], key: str, path: Path) -> str:
+    value = data.get(key, "")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ConfigError(f"{path}: '{key}' must be a string")
+    return value
+
+
+def _optional_int(data: dict[str, Any], key: str, path: Path, default: int) -> int:
+    value = data.get(key, default)
+    if not isinstance(value, int):
+        raise ConfigError(f"{path}: '{key}' must be an integer")
     return value
 
 
