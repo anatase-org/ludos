@@ -24,6 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory containing card YAML files. Defaults to ./cards next to the manifest.",
     )
+    build.add_argument(
+        "--cache",
+        type=Path,
+        default=None,
+        help="Directory for build, dnf, and package caches. Defaults to ./cache next to the manifest.",
+    )
     build.set_defaults(func=build_command)
 
     validate = subcommands.add_parser("validate", help="Validate Ludos config files.")
@@ -59,7 +65,7 @@ def validate_command(args: argparse.Namespace) -> int:
 
 
 def build_command(args: argparse.Namespace) -> int:
-    result = build_manifest(args.manifest, args.cards_dir)
+    result = build_manifest(args.manifest, args.cards_dir, args.cache)
     print(
         f"Built {result.output_image} for {result.image} on {result.distro} "
         f"with {Path(result.podman).name} using {result.bootstrap}"

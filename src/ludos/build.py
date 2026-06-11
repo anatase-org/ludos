@@ -25,7 +25,11 @@ class BuildResult:
     podman: str
 
 
-def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildResult:
+def build_manifest(
+    manifest_path: Path,
+    cards_dir: Path | None = None,
+    cache_dir: Path | None = None,
+) -> BuildResult:
     validation = validate_manifest(manifest_path, cards_dir)
     if validation.missing_repos:
         missing = ", ".join(validation.missing_repos)
@@ -44,7 +48,10 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
     bootstrap = _substitute_variables(validation.manifest.bootstrap, manifest_env)
     output_image = f"localhost/ludos/{image}:{distro}"
 
-    cache_dir = root_dir / "cache"
+    if cache_dir is None:
+        cache_dir = root_dir / "cache"
+    else:
+        cache_dir = cache_dir.expanduser().resolve()
     package_dir = cache_dir / "packages" / distro
     dnf_dir = cache_dir / "dnf" / distro
     build_dir = cache_dir / "build" / distro / image
