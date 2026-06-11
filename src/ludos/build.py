@@ -293,21 +293,24 @@ def build_manifest(
 # Install: {block_name}
 #
 
-RUN dnf5 -y \\
-      --installroot=/target \\
-      --releasever={validation.manifest.env["releasever"]} \\
-      --setopt=reposdir=/ludos/dnf/repos \\
-      --setopt=cachedir=/ludos/dnf/cache \\
-      --setopt=persistdir=/ludos/dnf/persist \\
-      --setopt=logdir=/ludos/dnf/log \\
-      --setopt=install_weak_deps=False \\
-      --disable-repo='*' \\
-      --enable-repo='*' \\
-      install \\
-      --allowerasing \\
+RUN /bin/sh <<'LUDOS_INSTALL_{block_name}'
+set -e
+dnf5 -y \\
+    --installroot=/target \\
+    --releasever={validation.manifest.env["releasever"]} \\
+    --setopt=reposdir=/ludos/dnf/repos \\
+    --setopt=cachedir=/ludos/dnf/cache \\
+    --setopt=persistdir=/ludos/dnf/persist \\
+    --setopt=logdir=/ludos/dnf/log \\
+    --setopt=install_weak_deps=False \\
+    --disable-repo='*' \\
+    --enable-repo='*' \\
+    install \\
+    --allowerasing \\
 {package_lines}    && \\
     dnf5 -y --installroot=/target clean all && \\
     rm -rf /target/var/cache/dnf /target/var/log/dnf*
+LUDOS_INSTALL_{block_name}
 """
         )
     install_step_lines = "\n".join(install_steps)
