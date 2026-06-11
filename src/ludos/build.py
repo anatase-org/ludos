@@ -282,7 +282,10 @@ def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildR
             f"      {shlex.quote(package)} \\\n" for package in block_packages
         )
         install_steps.append(
-            f"""# Install {block_name} packages.
+            f"""#
+# Install: {block_name}
+#
+
 RUN dnf5 -y \\
       --installroot=/target \\
       --releasever={validation.manifest.env["releasever"]} \\
@@ -304,7 +307,10 @@ RUN dnf5 -y \\
     postprocess_steps = []
     for block_name, postprocess in postprocess_blocks:
         postprocess_steps.append(
-            f"""# Postprocess: {block_name}
+            f"""#
+# Postprocess: {block_name}
+#
+
 RUN /bin/sh <<'LUDOS_POSTPROCESS_{block_name}'
 set -e
 {postprocess}
