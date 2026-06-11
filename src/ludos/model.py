@@ -137,6 +137,14 @@ def _resolve_card_path(
         return path
 
     if path.is_dir():
+        for card_path in (
+            path / "card.yml",
+            path / "card.yaml",
+            path / f"{path.name}.yml",
+            path / f"{path.name}.yaml",
+        ):
+            if card_path.exists():
+                return card_path
         return path / "card.yml"
 
     return path.with_suffix(".yml")
