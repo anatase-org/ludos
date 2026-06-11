@@ -1,146 +1,38 @@
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from .model import ConfigError, ManifestValidation, RepoRef, validate_manifest
+from .model import ConfigError, validate_manifest
+
+
+INSTALL_PACKAGE_EXCLUDE_PREFIXES = (
+    "hunspell-en-AU-",
+    "hunspell-en-CA-",
+)
 
 
 @dataclass(frozen=True)
 class BuildResult:
+    image: str
     distro: str
+    bootstrap: str
+    output_image: str
     requested_packages: tuple[str, ...]
     resolved_packages: tuple[str, ...]
     package_dir: Path
     package_list: Path
     repo_dir: Path
-    dnf: str
+    podman: str
 
 
 def build_manifest(manifest_path: Path, cards_dir: Path | None = None) -> BuildResult:
     validation = validate_manifest(manifest_path, cards_dir)
-    _raise_validation_errors(manifest_path, validation)
-
-    root_dir = manifest_path.resolve().parent
-    distro = _distro_cache_name(validation)
-    cache_dir = root_dir / "cache"
-    package_dir = cache_dir / "packages" / distro
-    dnf_dir = cache_dir / "dnf" / distro
-    repo_dir = dnf_dir / "repos"
-    dnf_cache_dir = dnf_dir / "cache"
-    dnf_persist_dir = dnf_dir / "persist"
-    dnf_log_dir = dnf_dir / "log"
-    package_list = dnf_dir / "packages.json"
-    package_urls = dnf_dir / "package-urls.json"
-
-    package_dir.mkdir(parents=True, exist_ok=True)
-    repo_dir.mkdir(parents=True, exist_ok=True)
-    dnf_cache_dir.mkdir(parents=True, exist_ok=True)
-    dnf_persist_dir.mkdir(parents=True, exist_ok=True)
-    dnf_log_dir.mkdir(parents=True, exist_ok=True)
-
-    _render_repos(validation, repo_dir)
-
-    requested_packages = _package_set(validation)
-    if not requested_packages:
-        raise ConfigError(f"{manifest_path}: no packages requested by cards")
-
-    dnf = _find_dnf()
-    dnf_base_command = _dnf_base_command(
-        dnf=dnf,
-        repo_dir=repo_dir,
-        dnf_cache_dir=dnf_cache_dir,
-        dnf_persist_dir=dnf_persist_dir,
-        dnf_log_dir=dnf_log_dir,
-    )
-    package_urls_resolved = _resolve_package_urls(
-        dnf_base_command=dnf_base_command,
-        validation=validation,
-        root_dir=root_dir,
-        packages=requested_packages,
-    )
-    resolved_packages = tuple(_package_spec_from_url(url) for url in package_urls_resolved)
-    _write_json_array(package_list, resolved_packages)
-    _write_json_array(package_urls, package_urls_resolved)
-
-    command = [
-        *dnf_base_command,
-        "download",
-        *_download_arch_args(validation),
-        "--destdir=" + str(package_dir),
-        *resolved_packages,
-    ]
-    subprocess.run(command, cwd=root_dir / "repos", check=True)
-
-    return BuildResult(
-        distro=distro,
-        requested_packages=requested_packages,
-        resolved_packages=resolved_packages,
-        package_dir=package_dir,
-        package_list=package_list,
-        repo_dir=repo_dir,
-        dnf=dnf,
-    )
-
-
-def _dnf_base_command(
-    dnf: str,
-    repo_dir: Path,
-    dnf_cache_dir: Path,
-    dnf_persist_dir: Path,
-    dnf_log_dir: Path,
-) -> list[str]:
-    return [
-        dnf,
-        "--setopt=reposdir=" + str(repo_dir),
-        "--setopt=cachedir=" + str(dnf_cache_dir),
-        "--setopt=persistdir=" + str(dnf_persist_dir),
-        "--setopt=logdir=" + str(dnf_log_dir),
-        "--disable-repo=*",
-        "--enable-repo=*",
-    ]
-
-
-def _resolve_package_urls(
-    dnf_base_command: list[str],
-    validation: ManifestValidation,
-    root_dir: Path,
-    packages: tuple[str, ...],
-) -> tuple[str, ...]:
-    command = [
-        *dnf_base_command,
-        "--refresh",
-        "download",
-        "--resolve",
-        "--alldeps",
-        "--url",
-        *_download_arch_args(validation),
-        *packages,
-    ]
-    result = subprocess.run(
-        command,
-        cwd=root_dir / "repos",
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    urls = tuple(
-        line.strip()
-        for line in result.stdout.splitlines()
-        if line.strip().endswith(".rpm")
-    )
-    if not urls:
-        raise ConfigError("dnf did not resolve any package URLs")
-    return urls
-
-
-def _raise_validation_errors(
-    manifest_path: Path, validation: ManifestValidation
-) -> None:
     if validation.missing_repos:
         missing = ", ".join(validation.missing_repos)
         raise ConfigError(f"{manifest_path}: missing repository definitions: {missing}")
@@ -148,34 +40,233 @@ def _raise_validation_errors(
         missing = ", ".join(validation.missing_cards)
         raise ConfigError(f"{manifest_path}: missing card definitions: {missing}")
 
+    root_dir = manifest_path.resolve().parent
+    image = _cache_name(manifest_path.resolve().stem, "image")
+    manifest_env = {key: str(value) for key, value in validation.manifest.env.items()}
+    distro = _cache_name(
+        _substitute_variables(validation.manifest.distro, manifest_env),
+        "distro",
+    )
+    bootstrap = _substitute_variables(validation.manifest.bootstrap, manifest_env)
+    output_image = f"localhost/ludos/{image}:{distro}"
 
-def _render_repos(validation: ManifestValidation, repo_dir: Path) -> None:
+    cache_dir = root_dir / "cache"
+    package_dir = cache_dir / "packages" / distro
+    dnf_dir = cache_dir / "dnf" / distro
+    build_dir = cache_dir / "build" / distro / image
+    repo_dir = dnf_dir / "repos"
+    dnf_cache_dir = dnf_dir / "cache"
+    dnf_persist_dir = dnf_dir / "persist"
+    dnf_log_dir = dnf_dir / "log"
+    package_list = dnf_dir / f"{image}-packages.json"
+    package_urls = dnf_dir / f"{image}-package-urls.json"
+
+    package_dir.mkdir(parents=True, exist_ok=True)
+    build_dir.mkdir(parents=True, exist_ok=True)
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    dnf_cache_dir.mkdir(parents=True, exist_ok=True)
+    dnf_persist_dir.mkdir(parents=True, exist_ok=True)
+    dnf_log_dir.mkdir(parents=True, exist_ok=True)
+
     for existing in repo_dir.glob("*.repo"):
         existing.unlink()
 
     for repo in validation.repos:
-        content = repo.source.read_text(encoding="utf-8")
-        variables = _repo_variables(repo.ref, validation.manifest.env)
-        rendered = _substitute_variables(content, variables)
-        rendered = _append_priority(rendered, repo.ref.priority)
-        (repo_dir / repo.source.name).write_text(rendered, encoding="utf-8")
+        repo_variables = dict(manifest_env)
+        for key, value in repo.ref.vars.items():
+            repo_variables[key] = _substitute_variables(value, repo_variables)
 
+        rendered_repo = _substitute_variables(
+            repo.source.read_text(encoding="utf-8"),
+            repo_variables,
+        )
+        repo_lines = rendered_repo.rstrip().splitlines()
+        repo_lines.append(f"priority={repo.ref.priority}")
+        (repo_dir / repo.source.name).write_text(
+            "\n".join(repo_lines) + "\n",
+            encoding="utf-8",
+        )
 
-def _repo_variables(repo: RepoRef, env: dict[str, str | int]) -> dict[str, str]:
-    variables = {key: str(value) for key, value in env.items()}
-    for key, value in repo.vars.items():
-        variables[key] = _substitute_variables(value, variables)
-    return variables
+    requested_packages = []
+    seen_packages = set()
+    for card in validation.cards:
+        for package in card.packages:
+            if package in seen_packages:
+                continue
+            seen_packages.add(package)
+            requested_packages.append(package)
+    requested_packages = tuple(requested_packages)
+    if not requested_packages:
+        raise ConfigError(f"{manifest_path}: no packages requested by cards")
 
+    podman = shutil.which("podman")
+    if not podman:
+        raise ConfigError("podman must be installed to build")
 
-def _distro_cache_name(validation: ManifestValidation) -> str:
-    distro = _substitute_variables(
-        validation.manifest.distro,
-        {key: str(value) for key, value in validation.manifest.env.items()},
+    bootstrap_dnf_base = [
+        podman,
+        "run",
+        "--rm",
+        "--volume",
+        f"{root_dir / 'repos'}:/workspace/repos:ro",
+        "--volume",
+        f"{repo_dir}:/ludos/dnf/repos:ro",
+        "--volume",
+        f"{dnf_cache_dir}:/ludos/dnf/cache",
+        "--volume",
+        f"{dnf_persist_dir}:/ludos/dnf/persist",
+        "--volume",
+        f"{dnf_log_dir}:/ludos/dnf/log",
+        "--volume",
+        f"{package_dir}:/ludos/packages",
+        "--workdir",
+        "/workspace/repos",
+        bootstrap,
+        "dnf5",
+    ]
+
+    package_url_result = subprocess.run(
+        [
+            *bootstrap_dnf_base,
+            *_dnf_base_args(),
+            "--refresh",
+            "download",
+            "--resolve",
+            "--alldeps",
+            "--url",
+            *_download_arch_args(validation),
+            *requested_packages,
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
     )
-    if "/" in distro or distro in ("", ".", ".."):
-        raise ConfigError(f"invalid distro cache name '{distro}'")
-    return distro
+    package_urls_resolved = tuple(
+        line.strip()
+        for line in package_url_result.stdout.splitlines()
+        if line.strip().endswith(".rpm")
+    )
+    if not package_urls_resolved:
+        raise ConfigError("dnf did not resolve any package URLs")
+
+    resolved_package_list = []
+    for url in package_urls_resolved:
+        filename = Path(unquote(urlparse(url).path)).name
+        if not filename.endswith(".rpm"):
+            raise ConfigError(f"resolved package URL does not end with .rpm: {url}")
+        resolved_package_list.append(filename[:-4])
+    resolved_packages = tuple(resolved_package_list)
+
+    _write_json_array(package_list, resolved_packages)
+    _write_json_array(package_urls, package_urls_resolved)
+
+    subprocess.run(
+        [
+            *bootstrap_dnf_base,
+            *_dnf_base_args(),
+            "download",
+            *_download_arch_args(validation),
+            "--destdir=/ludos/packages",
+            *resolved_packages,
+        ],
+        check=True,
+        text=True,
+    )
+
+    install_packages = tuple(
+        package
+        for package in resolved_packages
+        if not package.startswith(INSTALL_PACKAGE_EXCLUDE_PREFIXES)
+    )
+    label_lines = "".join(
+        f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
+        for key, value in validation.manifest.labels.items()
+    )
+    package_lines = "".join(
+        f"      {shlex.quote(package)} \\\n" for package in install_packages
+    )
+    containerfile = build_dir / "Containerfile"
+    containerfile.write_text(
+        f"""FROM {bootstrap} AS install
+WORKDIR /workspace/repos
+RUN mkdir -p /target && \\
+    dnf5 -y \\
+      --installroot=/target \\
+      --releasever={validation.manifest.env["releasever"]} \\
+      --setopt=reposdir=/ludos/dnf/repos \\
+      --setopt=cachedir=/ludos/dnf/cache \\
+      --setopt=persistdir=/ludos/dnf/persist \\
+      --setopt=logdir=/ludos/dnf/log \\
+      --disable-repo='*' \\
+      --enable-repo='*' \\
+      --exclude=hunspell-en-AU \\
+      --exclude=hunspell-en-CA \\
+      install --skip-broken \\
+{package_lines}    && \\
+    dnf5 -y --installroot=/target clean all && \\
+    rm -rf /target/var/cache/dnf /target/var/log/dnf* \\
+      /target/etc/machine-id /target/var/lib/dbus/machine-id
+
+FROM scratch
+COPY --from=install /target /
+{label_lines}""",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            podman,
+            "build",
+            "--layers",
+            "--pull=missing",
+            "--tag",
+            output_image,
+            "--volume",
+            f"{root_dir / 'repos'}:/workspace/repos:ro",
+            "--volume",
+            f"{repo_dir}:/ludos/dnf/repos:ro",
+            "--volume",
+            f"{dnf_cache_dir}:/ludos/dnf/cache",
+            "--volume",
+            f"{dnf_persist_dir}:/ludos/dnf/persist",
+            "--volume",
+            f"{dnf_log_dir}:/ludos/dnf/log",
+            "--file",
+            str(containerfile),
+            str(build_dir),
+        ],
+        check=True,
+    )
+
+    return BuildResult(
+        image=image,
+        distro=distro,
+        bootstrap=bootstrap,
+        output_image=output_image,
+        requested_packages=requested_packages,
+        resolved_packages=resolved_packages,
+        package_dir=package_dir,
+        package_list=package_list,
+        repo_dir=repo_dir,
+        podman=str(podman),
+    )
+
+
+def _dnf_base_args() -> list[str]:
+    return [
+        "--setopt=reposdir=/ludos/dnf/repos",
+        "--setopt=cachedir=/ludos/dnf/cache",
+        "--setopt=persistdir=/ludos/dnf/persist",
+        "--setopt=logdir=/ludos/dnf/log",
+        "--disable-repo=*",
+        "--enable-repo=*",
+    ]
+
+
+def _cache_name(value: str, description: str) -> str:
+    if "/" in value or value in ("", ".", ".."):
+        raise ConfigError(f"invalid {description} cache name '{value}'")
+    return value
 
 
 def _substitute_variables(value: str, variables: dict[str, str]) -> str:
@@ -184,43 +275,10 @@ def _substitute_variables(value: str, variables: dict[str, str]) -> str:
     return value
 
 
-def _append_priority(repo_content: str, priority: int) -> str:
-    lines = repo_content.rstrip().splitlines()
-    lines.append(f"priority={priority}")
-    return "\n".join(lines) + "\n"
-
-
-def _package_set(validation: ManifestValidation) -> tuple[str, ...]:
-    packages = []
-    seen = set()
-    for card in validation.cards:
-        for package in card.packages:
-            if package in seen:
-                continue
-            seen.add(package)
-            packages.append(package)
-    return tuple(packages)
-
-
-def _download_arch_args(validation: ManifestValidation) -> tuple[str, ...]:
+def _download_arch_args(validation) -> tuple[str, ...]:
     arch = validation.manifest.env["arch"]
     return (f"--arch={arch}", "--arch=noarch")
 
 
-def _package_spec_from_url(url: str) -> str:
-    filename = Path(unquote(urlparse(url).path)).name
-    if not filename.endswith(".rpm"):
-        raise ConfigError(f"resolved package URL does not end with .rpm: {url}")
-    return filename[:-4]
-
-
 def _write_json_array(path: Path, values: tuple[str, ...]) -> None:
     path.write_text(json.dumps(list(values), indent=2) + "\n", encoding="utf-8")
-
-
-def _find_dnf() -> str:
-    for command in ("dnf5", "dnf"):
-        path = shutil.which(command)
-        if path:
-            return path
-    raise ConfigError("dnf5 or dnf must be installed to build")

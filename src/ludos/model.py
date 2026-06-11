@@ -51,6 +51,7 @@ class Manifest:
     version: int
     env: dict[str, str | int]
     distro: str
+    bootstrap: str
     repos: tuple[RepoRef, ...]
     cards: tuple[str, ...]
     labels: dict[str, str] = field(default_factory=dict)
@@ -63,6 +64,7 @@ class Manifest:
             version=_required_version(data, path),
             env=_env_dict(data, path),
             distro=_required_string(data, "distro", path),
+            bootstrap=_required_string(data, "bootstrap", path),
             repos=_repo_refs_tuple(data, "repos", path),
             cards=_required_string_tuple(data, "cards", path),
             labels=_string_dict(data, "labels", path),

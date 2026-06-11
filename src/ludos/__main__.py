@@ -61,9 +61,10 @@ def validate_command(args: argparse.Namespace) -> int:
 def build_command(args: argparse.Namespace) -> int:
     result = build_manifest(args.manifest, args.cards_dir)
     print(
-        f"Downloaded {len(result.resolved_packages)} resolved packages "
-        f"for {result.distro} with {Path(result.dnf).name} into {result.package_dir}"
+        f"Built {result.output_image} for {result.image} on {result.distro} "
+        f"with {Path(result.podman).name} using {result.bootstrap}"
     )
+    print(f"Downloaded {len(result.resolved_packages)} resolved packages into {result.package_dir}")
     print(f"Package list: {result.package_list}")
     return 0
 
