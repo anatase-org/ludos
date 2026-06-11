@@ -294,6 +294,7 @@ RUN dnf5 -y \\
       --disable-repo='*' \\
       --enable-repo='*' \\
       install \\
+      --allowerasing \\
 {package_lines}    && \\
     dnf5 -y --installroot=/target clean all && \\
     rm -rf /target/var/cache/dnf /target/var/log/dnf*
