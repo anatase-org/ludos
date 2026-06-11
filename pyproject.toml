@@ -22,10 +22,11 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/todo"
-"Bug Tracker" = "https://github.com/todo/issues"
+"Homepage" = "https://github.com/anatase-org/ludos"
+"Bug Tracker" = "https://github.com/anatase-org/ludos/issues"
 
 [project.entry-points."console_scripts"]
+ludos = "ludos.__main__:main"
 rechunk = "rechunk.__main__:main"
 
 [build-system]
