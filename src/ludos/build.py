@@ -500,7 +500,7 @@ COPY --from=install /target /
         encoding="utf-8",
     )
 
-    subprocess.run(
+    _run_container_build(
         [
             podman,
             "build",
@@ -522,7 +522,7 @@ COPY --from=install /target /
             str(containerfile),
             str(build_dir),
         ],
-        check=True,
+        containerfile,
     )
 
     return BuildResult(
@@ -917,6 +917,91 @@ def _starts_with_set_command(script: str) -> bool:
             continue
         return re.fullmatch(r"set\s+-[A-Za-z]+(?:\s+#.*)?", stripped) is not None
     return False
+
+
+def _run_container_build(command: list[str], containerfile: Path) -> None:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output_lines = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        output_lines.append(line)
+        print(line, end="")
+
+    returncode = process.wait()
+    if returncode == 0:
+        return
+
+    location = _containerfile_error_location(containerfile, "".join(output_lines))
+    command_line = " ".join(shlex.quote(str(part)) for part in command)
+    message = f"command failed with exit status {returncode}: {command_line}"
+    if location is not None:
+        message = f"{message}\n\nThe error occurred in:\n{location}"
+    raise ConfigError(message)
+
+
+def _containerfile_error_location(containerfile: Path, output: str) -> str | None:
+    lines = containerfile.read_text(encoding="utf-8").splitlines()
+    step_line = _last_build_step_line(lines, output)
+    trace_command = _last_shell_trace_command(output)
+    if step_line is not None and trace_command:
+        trace_line = _find_trace_command_line(lines, trace_command, step_line)
+        if trace_line is not None:
+            return _format_source_location(containerfile, trace_line)
+    if step_line is not None:
+        return _format_source_location(containerfile, step_line)
+    return None
+
+
+def _last_build_step_line(lines: list[str], output: str) -> int | None:
+    step = None
+    for output_line in output.splitlines():
+        match = re.search(r"(?:\[[^]]+]\s+)?STEP\s+\d+/\d+:\s+(.*)", output_line)
+        if match:
+            step = match.group(1).strip()
+            continue
+        match = re.search(r'building at STEP "([^"]+)"', output_line)
+        if match:
+            step = match.group(1).strip()
+    if step is None:
+        return None
+
+    line_match = None
+    for line_number, line in enumerate(lines, 1):
+        if line.strip() == step:
+            line_match = line_number
+    return line_match
+
+
+def _last_shell_trace_command(output: str) -> str | None:
+    trace_command = None
+    for output_line in output.splitlines():
+        stripped = output_line.strip()
+        if not stripped.startswith("+"):
+            continue
+        trace_command = stripped.lstrip("+").strip()
+    return trace_command
+
+
+def _find_trace_command_line(
+    lines: list[str], trace_command: str, step_line: int
+) -> int | None:
+    for line_number, line in enumerate(lines[step_line:], step_line + 1):
+        if line.strip() == trace_command:
+            return line_number
+    return None
+
+
+def _format_source_location(path: Path, line_number: int) -> str:
+    try:
+        display_path = f"./{path.resolve().relative_to(Path.cwd())}"
+    except ValueError:
+        display_path = str(path)
+    return f"{display_path}:{line_number}"
 
 
 def _cache_name(value: str, description: str) -> str:
