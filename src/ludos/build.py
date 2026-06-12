@@ -98,7 +98,6 @@ def build_manifest(
     dnf_persist_dir = dnf_dir / "persist"
     dnf_log_dir = dnf_dir / "log"
     oci_dir = build_dir / "oci"
-    resolve_root_dir = build_dir / "resolve-root"
     mock_cache_dir = cache_dir / "mock" / distro
     mock_dnf_cache_dir = mock_cache_dir / "dnf"
     mock_root_cache_dir = mock_cache_dir / "root"
@@ -114,7 +113,6 @@ def build_manifest(
     dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     dnf_persist_dir.mkdir(parents=True, exist_ok=True)
     dnf_log_dir.mkdir(parents=True, exist_ok=True)
-    resolve_root_dir.mkdir(parents=True, exist_ok=True)
 
     podman = shutil.which("podman")
     if not podman:
@@ -281,16 +279,11 @@ def build_manifest(
         f"{dnf_log_dir}:/ludos/dnf/log",
         "--volume",
         f"{package_dir}:/ludos/packages",
-        "--volume",
-        f"{resolve_root_dir}:/ludos/resolve-root",
         "--workdir",
         "/workspace/repos",
         bootstrap,
         "dnf5",
     ]
-
-    shutil.rmtree(resolve_root_dir, ignore_errors=True)
-    resolve_root_dir.mkdir(parents=True)
 
     card_resolutions = []
     for card_name, card_packages in zip(card_names, card_requests):
@@ -451,8 +444,6 @@ def build_manifest(
 
     package_images = []
     expanded_package_blocks = []
-    shutil.rmtree(resolve_root_dir, ignore_errors=True)
-    resolve_root_dir.mkdir(parents=True)
     for (block_name, block_packages), block_hash in zip(
         package_blocks, package_block_hashes
     ):
@@ -487,21 +478,13 @@ def build_manifest(
                 package_dir=package_dir,
             )
 
-        log(f"Resolving local RPM closure for block: {block_name}")
-        block_packages, rpm_files = _resolve_local_install_block(
-            bootstrap_dnf_base,
-            manifest_env,
-            block_packages,
-            build_output.rpm_files,
-        )
+        repo_rpm_files = _download_block_packages(bootstrap_dnf_base, block_packages)
+        rpm_files = tuple(dict.fromkeys((*build_output.rpm_files, *repo_rpm_files)))
         if not rpm_files and build_output.file_count == 0:
             log(f"No RPMs found for block, skipping install block: {block_name}")
             continue
         package_images.append(package_image)
         expanded_package_blocks.append((block_name, block_packages))
-        if rpm_files:
-            log(f"Recording install state for block: {block_name}")
-            _install_resolved_block(bootstrap_dnf_base, manifest_env, rpm_files)
         log(f"Creating card image: {package_image}")
         _create_package_image(
             podman=podman,
@@ -975,130 +958,6 @@ def _download_block_packages(
         text=True,
     )
     return rpm_files
-
-
-def _resolve_local_install_block(
-    bootstrap_dnf_base: list[str],
-    manifest_env: dict[str, str],
-    block_packages: tuple[str, ...],
-    initial_rpm_files: tuple[str, ...] = tuple(),
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    if not block_packages and not initial_rpm_files:
-        return tuple(), tuple()
-
-    resolved = list(block_packages)
-    seen = set(resolved)
-    for _attempt in range(10):
-        rpm_files = _download_block_packages(bootstrap_dnf_base, tuple(resolved))
-        all_rpm_files = tuple(dict.fromkeys((*initial_rpm_files, *rpm_files)))
-        missing_dependencies = _preview_local_install_dependencies(
-            bootstrap_dnf_base,
-            manifest_env,
-            all_rpm_files,
-        )
-        new_dependencies = [
-            package for package in missing_dependencies if package not in seen
-        ]
-        if not new_dependencies:
-            return tuple(resolved), all_rpm_files
-        resolved.extend(new_dependencies)
-        seen.update(new_dependencies)
-
-    raise ConfigError("local RPM install dependency resolution did not converge")
-
-
-def _preview_local_install_dependencies(
-    bootstrap_dnf_base: list[str],
-    manifest_env: dict[str, str],
-    rpm_files: tuple[str, ...],
-) -> tuple[str, ...]:
-    transaction_preview = subprocess.run(
-        [
-            *bootstrap_dnf_base,
-            "--assumeno",
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--setopt=install_weak_deps=False",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            "--installroot=/ludos/resolve-root",
-            f"--releasever={manifest_env['releasever']}",
-            "install",
-            *_rpm_paths(rpm_files),
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
-
-    missing_dependencies = []
-    in_install_section = False
-    saw_transaction_summary = False
-    for line in (
-        transaction_preview.stdout + "\n" + transaction_preview.stderr
-    ).splitlines():
-        stripped = line.strip()
-        if stripped == "Transaction Summary:":
-            saw_transaction_summary = True
-            break
-        if not stripped:
-            continue
-        if stripped.startswith("Installing"):
-            in_install_section = True
-            continue
-        if stripped.startswith("Package "):
-            continue
-        if not in_install_section:
-            continue
-
-        fields = stripped.split()
-        if len(fields) < 4:
-            continue
-        package, arch, version, repository = fields[:4]
-        if repository == "@commandline":
-            continue
-        missing_dependencies.append(f"{package}-{version}.{arch}")
-
-    if transaction_preview.returncode != 0 and not saw_transaction_summary:
-        output = transaction_preview.stdout + transaction_preview.stderr
-        detail = "\n".join(output.splitlines()[-20:])
-        raise ConfigError(f"dnf did not preview local RPM install:\n{detail}")
-
-    return tuple(missing_dependencies)
-
-
-def _install_resolved_block(
-    bootstrap_dnf_base: list[str],
-    manifest_env: dict[str, str],
-    rpm_files: tuple[str, ...],
-) -> None:
-    subprocess.run(
-        [
-            *bootstrap_dnf_base,
-            "-y",
-            "--installroot=/ludos/resolve-root",
-            f"--releasever={manifest_env['releasever']}",
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--setopt=install_weak_deps=False",
-            "--setopt=tsflags=justdb",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            "--nogpgcheck",
-            "install",
-            *_rpm_paths(rpm_files),
-        ],
-        check=True,
-        text=True,
-    )
-
-
-def _rpm_paths(rpm_files: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(f"/ludos/packages/{rpm_file}" for rpm_file in rpm_files)
 
 
 def _create_package_image(
