@@ -1407,8 +1407,34 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
     shutil.rmtree(source_dir, ignore_errors=True)
     source_dir.parent.mkdir(parents=True, exist_ok=True)
     log(f"Fetching git file source: {source}")
-    subprocess.run([git, "clone", "--no-checkout", repo_url, str(source_dir)], check=True)
-    subprocess.run([git, "-C", str(source_dir), "checkout", ref], check=True)
+    subprocess.run([git, "init", str(source_dir)], check=True)
+    subprocess.run([git, "-C", str(source_dir), "remote", "add", "origin", repo_url], check=True)
+    subprocess.run(
+        [
+            git,
+            "-C",
+            str(source_dir),
+            "fetch",
+            "--depth=1",
+            "--filter=blob:none",
+            "origin",
+            _git_fetch_ref(ref),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            git,
+            "-C",
+            str(source_dir),
+            "-c",
+            "advice.detachedHead=false",
+            "checkout",
+            "--detach",
+            "FETCH_HEAD",
+        ],
+        check=True,
+    )
     source_path = (source_dir / repo_path).resolve()
     try:
         source_path.relative_to(source_dir.resolve())
@@ -1422,25 +1448,36 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
         raise ConfigError(f"git files source '{source}' does not contain a file or directory")
 
 
-def _parse_git_file_source(source: str) -> tuple[str, str, Path]:
+def _parse_git_file_source(source: str) -> tuple[str, tuple[str, str], Path]:
     raw_source = source.removeprefix("git+")
     parsed = urllib.parse.urlsplit(raw_source)
     if parsed.scheme not in ("https", "http", "ssh"):
         raise ConfigError(f"unsupported git files source protocol in '{source}'")
-    if not parsed.fragment or ":" not in parsed.fragment:
-        raise ConfigError(
-            f"git files source '{source}' must use '#commit=HASH:path', '#tag=TAG:path', '#branch=BRANCH:path', or '#ref=REF:path'"
-        )
-
-    ref_expr, path_expr = parsed.fragment.split(":", 1)
-    if "=" not in ref_expr:
-        raise ConfigError(f"git files source '{source}' has invalid ref selector")
-    ref_kind, ref_value = ref_expr.split("=", 1)
-    if ref_kind not in ("commit", "tag", "branch", "ref") or not ref_value:
-        raise ConfigError(f"git files source '{source}' has invalid ref selector")
-    repo_path = _validate_relative_file_path(path_expr, Path(source), "git source path")
+    if parsed.fragment:
+        ref_expr = parsed.fragment
+        if ":" in ref_expr:
+            raise ConfigError(f"git files source '{source}' must not include a subpath")
+        if "=" not in ref_expr:
+            raise ConfigError(f"git files source '{source}' has invalid ref selector")
+        ref_kind, ref_value = ref_expr.split("=", 1)
+        if ref_kind not in ("commit", "tag", "branch", "ref") or not ref_value:
+            raise ConfigError(f"git files source '{source}' has invalid ref selector")
+        ref = (ref_kind, ref_value)
+    else:
+        ref = ("default", "")
     repo_url = urllib.parse.urlunsplit(parsed._replace(fragment=""))
-    return repo_url, ref_value, repo_path
+    return repo_url, ref, Path(".")
+
+
+def _git_fetch_ref(ref: tuple[str, str]) -> str:
+    ref_kind, ref_value = ref
+    if ref_kind == "default":
+        return "HEAD"
+    if ref_kind == "branch":
+        return f"refs/heads/{ref_value}"
+    if ref_kind == "tag":
+        return f"refs/tags/{ref_value}"
+    return ref_value
 
 
 def _card_env(
