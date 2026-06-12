@@ -23,6 +23,12 @@ class CleanupTarget:
     image_id: str
 
 
+@dataclass(frozen=True)
+class BuildahContainer:
+    id: str
+    name: str
+
+
 def cleanup_local_images(
     *,
     version: str | None = None,
@@ -52,6 +58,22 @@ def cleanup_local_images(
     total_size = _estimated_total_size(stale_images)
     log(f"{action} {len(stale_images)} stale local cache images")
     log(f"Estimated total saved: {_format_bytes(total_size)}")
+    buildah = shutil.which("buildah")
+    buildah_containers = _buildah_containers_by_image(buildah) if buildah else {}
+    protected_image_ids = _protected_image_ids(
+        podman, f"-{clean_version}", manifest_targets
+    )
+    stale_containers = _stale_buildah_containers(
+        stale_images, buildah_containers, protected_image_ids
+    )
+    if dry_run:
+        for container in stale_containers:
+            log(f"Would remove build container: {container.name}")
+    elif buildah:
+        for container in stale_containers:
+            log(f"Removing build container: {container.name}")
+            subprocess.run([buildah, "rm", container.id], check=True)
+
     for image in stale_images:
         display = f"{image.display} ({_format_bytes(image.size_bytes)})"
         if dry_run:
@@ -149,8 +171,7 @@ def _stale_local_images(
 
         if _is_stale_dangling_image(
             image,
-            cache_repositories,
-            manifest_repositories,
+            current_suffix,
         ):
             if image_id and image_id not in seen:
                 history = ", ".join(_image_history(image)) or "<unknown>"
@@ -186,6 +207,96 @@ def _estimated_total_size(images: tuple[CleanupTarget, ...]) -> int:
         total += image.size_bytes
         seen_ids.add(key)
     return total
+
+
+def _stale_buildah_containers(
+    images: tuple[CleanupTarget, ...],
+    containers_by_image: dict[str, tuple[BuildahContainer, ...]],
+    protected_image_ids: set[str],
+) -> tuple[BuildahContainer, ...]:
+    containers: list[BuildahContainer] = []
+    seen_ids = set()
+    target_image_ids = {image.image_id for image in images if image.image_id}
+    for image in images:
+        for container in containers_by_image.get(image.image_id, ()):
+            if container.id in seen_ids:
+                continue
+            containers.append(container)
+            seen_ids.add(container.id)
+    for image_id, image_containers in containers_by_image.items():
+        if image_id in target_image_ids or image_id in protected_image_ids:
+            continue
+        for container in image_containers:
+            if container.id in seen_ids:
+                continue
+            containers.append(container)
+            seen_ids.add(container.id)
+    return tuple(containers)
+
+
+def _protected_image_ids(
+    podman: str, current_suffix: str, manifest_targets: tuple[str, ...]
+) -> set[str]:
+    result = subprocess.run(
+        [podman, "images", "--format", "json"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    images = json.loads(result.stdout or "[]")
+    manifest_keep_refs = set(manifest_targets)
+    protected = set()
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        image_id = image.get("Id")
+        if not isinstance(image_id, str):
+            continue
+        refs = (*_image_names(image), *_image_history(image))
+        if any(_is_current_ref(ref, current_suffix, manifest_keep_refs) for ref in refs):
+            protected.add(image_id)
+    return protected
+
+
+def _is_current_ref(
+    ref: str, current_suffix: str, manifest_keep_refs: set[str]
+) -> bool:
+    if ref in manifest_keep_refs:
+        return True
+    parsed = _split_image_name(ref)
+    if parsed is None:
+        return False
+    _repository, tag = parsed
+    return tag.endswith(current_suffix)
+
+
+def _buildah_containers_by_image(
+    buildah: str,
+) -> dict[str, tuple[BuildahContainer, ...]]:
+    result = subprocess.run(
+        [buildah, "containers", "--all", "--json"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    containers = json.loads(result.stdout or "[]")
+    by_image: dict[str, list[BuildahContainer]] = {}
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        image_id = container.get("imageid")
+        container_id = container.get("id")
+        name = container.get("containername")
+        if not (
+            isinstance(image_id, str)
+            and isinstance(container_id, str)
+            and isinstance(name, str)
+        ):
+            continue
+        if not image_id or not container_id:
+            continue
+        by_image.setdefault(image_id, []).append(BuildahContainer(container_id, name))
+    return {image_id: tuple(items) for image_id, items in by_image.items()}
 
 
 def _format_bytes(size: int) -> str:
@@ -235,8 +346,7 @@ def _keep_named_image(
 
 def _is_stale_dangling_image(
     image: dict[str, object],
-    cache_repositories: set[str],
-    manifest_repositories: set[str],
+    current_suffix: str,
 ) -> bool:
     if _image_names(image) or not image.get("Dangling"):
         return False
@@ -244,12 +354,10 @@ def _is_stale_dangling_image(
         parsed = _split_image_name(history_name)
         if parsed is None:
             continue
-        repository, _tag = parsed
-        if repository in cache_repositories:
-            return True
-        if repository in manifest_repositories:
-            return True
-    return False
+        _repository, tag = parsed
+        if tag.endswith(current_suffix):
+            return False
+    return True
 
 
 def _split_image_name(name: str) -> tuple[str, str] | None:
