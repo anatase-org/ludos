@@ -130,6 +130,9 @@ def build_manifest(
     if not podman:
         raise ConfigError("podman must be installed to build")
     log(f"Using Podman: {podman}")
+    buildah = shutil.which("buildah")
+    if buildah:
+        log(f"Using Buildah: {buildah}")
 
     releasever = _cache_name(manifest_env["releasever"], "releasever")
     bootstrap_image = _local_image(
@@ -451,7 +454,7 @@ def build_manifest(
             repo_rpm_files = _download_block_packages(bootstrap_dnf_base, block_packages)
             log(f"Creating card package image: {package_image}")
             _create_package_image(
-                podman=podman,
+                buildah=_require_buildah(buildah),
                 build_dir=oci_dir / "cards" / f"{block_name}-{block_hash}-{cache_version}",
                 image=package_image,
                 package_dir=package_dir,
@@ -503,7 +506,7 @@ def build_manifest(
 
         log(f"Creating build output image: {build_image}")
         _create_build_output_image(
-            podman=podman,
+            buildah=_require_buildah(buildah),
             build_dir=oci_dir / "builds" / f"{block_name}-{build_hash}-{cache_version}",
             image=build_image,
             rpm_dir=build_output.rpm_dir,
@@ -788,6 +791,12 @@ def _local_image(local_prefix: str, repository: str, tag: str) -> str:
 
 def _image_exists(podman: str, image: str) -> bool:
     return subprocess.run([podman, "image", "exists", image], check=False).returncode == 0
+
+
+def _require_buildah(buildah: str | None) -> str:
+    if buildah is None:
+        raise ConfigError("buildah must be installed to create card/build output images")
+    return buildah
 
 
 def _create_bootstrap_image(*, podman: str, source: str, image: str) -> None:
@@ -1082,7 +1091,7 @@ def _download_block_packages(
 
 def _create_package_image(
     *,
-    podman: str,
+    buildah: str,
     build_dir: Path,
     image: str,
     package_dir: Path,
@@ -1114,28 +1123,13 @@ def _create_package_image(
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, target)
 
-    containerfile = build_dir / "Containerfile"
-    containerfile.write_text("FROM scratch\nCOPY root/ /\n", encoding="utf-8")
-    subprocess.run(
-        [
-            podman,
-            "build",
-            "--layers",
-            "--pull=missing",
-            "--tag",
-            image,
-            "--file",
-            str(containerfile),
-            str(build_dir),
-        ],
-        check=True,
-    )
-    _remove_tree(build_dir, podman=podman)
+    _create_scratch_image(buildah=buildah, image_root=image_root, image=image)
+    _remove_tree(build_dir)
 
 
 def _create_build_output_image(
     *,
-    podman: str,
+    buildah: str,
     build_dir: Path,
     image: str,
     rpm_dir: Path | None,
@@ -1167,23 +1161,45 @@ def _create_build_output_image(
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, target)
 
-    containerfile = build_dir / "Containerfile"
-    containerfile.write_text("FROM scratch\nCOPY root/ /\n", encoding="utf-8")
-    subprocess.run(
-        [
-            podman,
-            "build",
-            "--layers",
-            "--pull=missing",
-            "--tag",
-            image,
-            "--file",
-            str(containerfile),
-            str(build_dir),
-        ],
+    _create_scratch_image(buildah=buildah, image_root=image_root, image=image)
+    _remove_tree(build_dir)
+
+
+def _create_scratch_image(*, buildah: str, image_root: Path, image: str) -> None:
+    container = subprocess.run(
+        [buildah, "from", "--quiet", "scratch"],
         check=True,
-    )
-    _remove_tree(build_dir, podman=podman)
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    try:
+        subprocess.run(
+            [buildah, "copy", "--quiet", container, f"{image_root}/.", "/"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                buildah,
+                "commit",
+                "--rm",
+                "--quiet",
+                "--format",
+                "oci",
+                container,
+                image,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        container = ""
+    finally:
+        if container:
+            subprocess.run(
+                [buildah, "rm", container],
+                check=False,
+                stdout=subprocess.DEVNULL,
+            )
 
 
 def _run_prepare_block(
