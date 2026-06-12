@@ -10,6 +10,7 @@ import signal
 import shlex
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -232,6 +233,14 @@ def build_manifest(
         if card.source is None:
             raise ConfigError(f"card '{card_name}' has no source path")
         card_env = _card_env(inherited_env, card.env)
+        if card.prepare.strip():
+            log(f"Preparing card: {card_name}")
+            prepared_env = _run_prepare_block(
+                card_source=card.source,
+                card_env=card_env,
+                prepare_script=card.prepare.rstrip(),
+            )
+            card_env.update(prepared_env)
         inherited_env.update(card_env)
         card_names.append(card_name)
         card_envs[card_name] = card_env
@@ -1144,6 +1153,35 @@ def _create_package_image(
     )
 
 
+def _run_prepare_block(
+    *,
+    card_source: Path,
+    card_env: dict[str, str],
+    prepare_script: str,
+) -> dict[str, str]:
+    card_base_dir = _card_base_dir(card_source)
+    with tempfile.TemporaryDirectory(prefix="ludos-prepare-") as temp_dir:
+        env_file = Path(temp_dir) / "env"
+        env = dict(os.environ)
+        env.update(card_env)
+        env["LUDOS_ENV"] = str(env_file)
+        returncode, _output = _run_streamed_command(
+            ["/bin/sh", "-s"],
+            input_text=prepare_script + "\n",
+            cwd=card_base_dir,
+            env=env,
+        )
+        if returncode != 0:
+            raise ConfigError(
+                f"card prepare failed with exit status {returncode}: {card_source}"
+            )
+        values = _load_dotenv(env_file)
+        if values:
+            card_name = _card_name(card_source, Path.cwd())
+            log(f"Prepared {len(values)} environment values for card: {card_name}")
+        return values
+
+
 def _run_card_build(
     *,
     podman: str,
@@ -1473,6 +1511,8 @@ def _run_streamed_command(
     command: list[str],
     input_text: str | None = None,
     line_rewriter: Callable[[str], str] | None = None,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     process = subprocess.Popen(
         command,
@@ -1481,6 +1521,8 @@ def _run_streamed_command(
         stderr=subprocess.STDOUT,
         start_new_session=True,
         text=True,
+        cwd=cwd,
+        env=env,
     )
     output_lines = []
     try:

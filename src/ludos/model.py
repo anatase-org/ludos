@@ -23,6 +23,7 @@ class Card:
     repos: tuple["RepoRef", ...] = tuple()
     files: tuple[str, ...] = tuple()
     hash: str = ""
+    prepare: str = ""
     build: str = ""
     postprocess: str = ""
     source: Path | None = None
@@ -39,6 +40,7 @@ class Card:
             repos=_repo_refs_tuple(data, "repos", path),
             files=_string_tuple(data, "files", path),
             hash=_optional_string(data, "hash", path),
+            prepare=_optional_string(data, "prepare", path),
             build=_optional_string(data, "build", path),
             postprocess=_optional_string(data, "postprocess", path),
             source=path,
