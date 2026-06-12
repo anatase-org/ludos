@@ -296,56 +296,42 @@ def build_manifest(
             continue
 
         log(f"Resolving package transaction for card: {card_name}")
-        transaction_preview = subprocess.run(
-            [
-                *bootstrap_dnf_base,
-                "--assumeno",
-                "--setopt=reposdir=/ludos/dnf/repos",
-                "--setopt=cachedir=/ludos/dnf/cache",
-                "--setopt=persistdir=/ludos/dnf/persist",
-                "--setopt=logdir=/ludos/dnf/log",
-                "--setopt=install_weak_deps=False",
-                "--disable-repo=*",
-                "--enable-repo=*",
-                "--installroot=/ludos/resolve-root",
-                f"--releasever={manifest_env['releasever']}",
-                "install",
-                *card_packages,
-            ],
-            check=False,
-            text=True,
-            capture_output=True,
+        card_resolved_package_list = _resolve_packages(
+            bootstrap_dnf_base,
+            manifest_env["releasever"],
+            card_packages,
         )
-
-        card_resolved_package_list = []
-        in_install_section = False
-        for line in (
-            transaction_preview.stdout + "\n" + transaction_preview.stderr
-        ).splitlines():
-            stripped = line.strip()
-            if stripped == "Transaction Summary:":
-                break
-            if not stripped:
-                continue
-            if stripped.startswith("Installing"):
-                in_install_section = True
-                continue
-            if stripped.startswith("Package "):
-                continue
-            if not in_install_section:
-                continue
-
-            fields = stripped.split()
-            if len(fields) < 4:
-                continue
-            package, arch, version = fields[:3]
-            card_resolved_package_list.append(f"{package}-{version}.{arch}")
-
         if not card_resolved_package_list:
-            output = transaction_preview.stdout + transaction_preview.stderr
-            detail = "\n".join(output.splitlines()[-20:])
-            raise ConfigError(f"dnf did not resolve packages for {card_name}:\n{detail}")
+            raise ConfigError(f"dnf did not resolve packages for {card_name}")
         card_resolutions.append(tuple(card_resolved_package_list))
+
+    log("Resolving package transactions with prior-card context")
+    contextual_requests = []
+    previous_contextual_resolved = set()
+    for index, (card_name, card_packages) in enumerate(zip(card_names, card_requests)):
+        if not card_packages:
+            continue
+        contextual_requests.extend(card_packages)
+        contextual_resolved = _resolve_packages(
+            bootstrap_dnf_base,
+            manifest_env["releasever"],
+            tuple(contextual_requests),
+        )
+        contextual_additions = tuple(
+            package
+            for package in contextual_resolved
+            if package not in previous_contextual_resolved
+            and package not in card_resolutions[index]
+        )
+        if contextual_additions:
+            log(
+                f"Adding {len(contextual_additions)} contextual dependencies to card: {card_name}"
+            )
+            card_resolutions[index] = (
+                *card_resolutions[index],
+                *contextual_additions,
+            )
+        previous_contextual_resolved = set(contextual_resolved)
 
     log("Grouping resolved packages into install blocks")
     package_counts = {}
@@ -368,11 +354,7 @@ def build_manifest(
             common_packages.append(package)
     if common_packages:
         package_blocks.append(("common", tuple(common_packages)))
-        common_hash_inputs = []
-        for card_request, card_resolution in zip(card_requests, card_resolutions):
-            if any(package in common_package_set for package in card_resolution):
-                common_hash_inputs.extend(card_request)
-        package_block_hashes = [_package_hash(tuple(common_hash_inputs))]
+        package_block_hashes = [_package_hash(tuple(common_packages))]
     else:
         package_block_hashes = []
 
@@ -396,7 +378,7 @@ def build_manifest(
         package_block_hashes.append(
             _card_package_hash(
                 card_name,
-                card_request,
+                card_packages,
                 card_hashes,
                 card_envs,
                 card_sources,
@@ -897,6 +879,63 @@ def _extract_image_paths(
             )
     finally:
         subprocess.run([podman, "rm", container], check=True, stdout=subprocess.DEVNULL)
+
+
+def _resolve_packages(
+    bootstrap_dnf_base: list[str],
+    releasever: str,
+    packages: tuple[str, ...],
+) -> tuple[str, ...]:
+    transaction_preview = subprocess.run(
+        [
+            *bootstrap_dnf_base,
+            "--assumeno",
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--setopt=install_weak_deps=False",
+            "--disable-repo=*",
+            "--enable-repo=*",
+            "--installroot=/ludos/resolve-root",
+            f"--releasever={releasever}",
+            "install",
+            *packages,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    output = transaction_preview.stdout + "\n" + transaction_preview.stderr
+    if transaction_preview.returncode not in (0, 1):
+        detail = "\n".join(output.splitlines()[-20:])
+        raise ConfigError(f"dnf did not resolve packages:\n{detail}")
+    return _parse_resolved_packages(output)
+
+
+def _parse_resolved_packages(output: str) -> tuple[str, ...]:
+    resolved_packages = []
+    in_install_section = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped == "Transaction Summary:":
+            break
+        if not stripped:
+            continue
+        if stripped.startswith("Installing"):
+            in_install_section = True
+            continue
+        if stripped.startswith("Package "):
+            continue
+        if not in_install_section:
+            continue
+
+        fields = stripped.split()
+        if len(fields) < 4:
+            continue
+        package, arch, version = fields[:3]
+        resolved_packages.append(f"{package}-{version}.{arch}")
+    return tuple(resolved_packages)
 
 
 def _package_rpm_files(
