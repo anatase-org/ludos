@@ -37,6 +37,7 @@ class BuildResult:
     cache_version: str
     repo_images: tuple[str, ...]
     package_images: tuple[str, ...]
+    build_images: tuple[str, ...] = tuple()
     builder_images: tuple[str, ...] = tuple()
 
 
@@ -44,6 +45,8 @@ class BuildResult:
 class CardBuildOutput:
     rpm_files: tuple[str, ...] = tuple()
     file_count: int = 0
+    rpm_dir: Path | None = None
+    files_dir: Path | None = None
 
 
 def build_manifest(
@@ -375,15 +378,7 @@ def build_manifest(
             continue
         card_packages = tuple(card_packages)
         package_blocks.append((card_name, card_packages))
-        package_block_hashes.append(
-            _card_package_hash(
-                card_name,
-                card_packages,
-                card_hashes,
-                card_envs,
-                card_sources,
-            )
-        )
+        package_block_hashes.append(_package_hash(card_packages))
         resolved_package_list.extend(card_packages)
         selected_package_set.update(card_packages)
     package_blocks = tuple(package_blocks)
@@ -425,61 +420,91 @@ def build_manifest(
         )
 
     package_images = []
+    package_images_by_block = {}
+    build_images = []
+    build_images_by_block = {}
     expanded_package_blocks = []
     for (block_name, block_packages), block_hash in zip(
         package_blocks, package_block_hashes
     ):
-        package_image = _local_image(
-            local_prefix,
-            "cards",
-            f"{block_name}-{block_hash}-{cache_version}",
-        )
-        if _image_exists(podman, package_image):
-            log(f"Reusing card image: {package_image}")
-            package_images.append(package_image)
-            expanded_package_blocks.append((block_name, block_packages))
-            continue
-        if cache_only:
-            raise ConfigError(f"card image is not cached: {package_image}")
-
         build_output = CardBuildOutput()
         if block_name in card_builds:
-            log(f"Running build for card: {block_name}")
-            build_output = _run_card_build(
-                podman=podman,
-                bootstrap=builder_images[block_name],
-                build_dir=build_dir / "build" / _identifier(block_name),
-                mock_dir=mock_cache_dir / _identifier(block_name),
-                mock_dnf_dir=mock_dnf_cache_dir,
-                mock_root_cache_dir=mock_root_cache_dir,
-                artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
-                card_name=block_name,
-                card_source=card_sources[block_name],
-                card_env=card_envs[block_name],
-                build_script=card_builds[block_name],
-                package_dir=package_dir,
+            build_hash = _card_build_hash(
+                block_name,
+                block_packages,
+                card_hashes,
+                card_envs,
+                card_sources,
             )
+            build_image = _local_image(
+                local_prefix,
+                "builds",
+                f"{block_name}-{build_hash}-{cache_version}",
+            )
+            if _image_exists(podman, build_image):
+                log(f"Reusing build output image: {build_image}")
+                build_images.append(build_image)
+                build_images_by_block[block_name] = build_image
+            elif cache_only:
+                raise ConfigError(f"build output image is not cached: {build_image}")
+            else:
+                log(f"Running build for card: {block_name}")
+                build_output = _run_card_build(
+                    podman=podman,
+                    bootstrap=builder_images[block_name],
+                    build_dir=build_dir / "build" / _identifier(block_name),
+                    mock_dir=mock_cache_dir / _identifier(block_name),
+                    mock_dnf_dir=mock_dnf_cache_dir,
+                    mock_root_cache_dir=mock_root_cache_dir,
+                    artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
+                    card_name=block_name,
+                    card_source=card_sources[block_name],
+                    card_env=card_envs[block_name],
+                    build_script=card_builds[block_name],
+                )
+                if not build_output.rpm_files and build_output.file_count == 0:
+                    log(f"No build outputs found for card: {block_name}")
+                else:
+                    log(f"Creating build output image: {build_image}")
+                    _create_build_output_image(
+                        podman=podman,
+                        build_dir=oci_dir / "builds" / f"{block_name}-{build_hash}-{cache_version}",
+                        image=build_image,
+                        rpm_dir=build_output.rpm_dir,
+                        files_dir=build_output.files_dir,
+                    )
+                    build_images.append(build_image)
+                    build_images_by_block[block_name] = build_image
 
-        repo_rpm_files = _download_block_packages(bootstrap_dnf_base, block_packages)
-        rpm_files = tuple(dict.fromkeys((*build_output.rpm_files, *repo_rpm_files)))
-        if not rpm_files and build_output.file_count == 0:
+        package_image = None
+        repo_rpm_files = tuple()
+        if block_packages:
+            package_image = _local_image(
+                local_prefix,
+                "cards",
+                f"{block_name}-{block_hash}-{cache_version}",
+            )
+            if _image_exists(podman, package_image):
+                log(f"Reusing card package image: {package_image}")
+            elif cache_only:
+                raise ConfigError(f"card package image is not cached: {package_image}")
+            else:
+                repo_rpm_files = _download_block_packages(bootstrap_dnf_base, block_packages)
+                log(f"Creating card package image: {package_image}")
+                _create_package_image(
+                    podman=podman,
+                    build_dir=oci_dir / "cards" / f"{block_name}-{block_hash}-{cache_version}",
+                    image=package_image,
+                    package_dir=package_dir,
+                    rpm_files=repo_rpm_files,
+                )
+            package_images.append(package_image)
+            package_images_by_block[block_name] = package_image
+
+        if block_name not in package_images_by_block and block_name not in build_images_by_block:
             log(f"No RPMs found for block, skipping install block: {block_name}")
             continue
-        package_images.append(package_image)
         expanded_package_blocks.append((block_name, block_packages))
-        log(f"Creating card image: {package_image}")
-        _create_package_image(
-            podman=podman,
-            build_dir=oci_dir / "cards" / f"{block_name}-{block_hash}-{cache_version}",
-            image=package_image,
-            package_dir=package_dir,
-            rpm_files=rpm_files,
-            files_dir=(
-                build_dir / "build" / _identifier(block_name) / "files"
-                if build_output.file_count
-                else None
-            ),
-        )
 
     package_blocks = tuple(expanded_package_blocks)
     resolved_packages = tuple(
@@ -530,26 +555,54 @@ def build_manifest(
     package_stage_names = {
         block_name: f"cards_{_identifier(block_name)}"
         for block_name, _block_packages in package_blocks
+        if block_name in package_images_by_block
+    }
+    build_stage_names = {
+        block_name: f"builds_{_identifier(block_name)}"
+        for block_name, _block_packages in package_blocks
+        if block_name in build_images_by_block
     }
     package_stage_lines = "".join(
-        f"FROM {package_image} AS {package_stage_names[block_name]}\n"
-        for (block_name, _block_packages), package_image in zip(
-            package_blocks, package_images
-        )
+        f"FROM {package_images_by_block[block_name]} AS {package_stage_names[block_name]}\n"
+        for block_name, _block_packages in package_blocks
+        if block_name in package_images_by_block
+    )
+    build_stage_lines = "".join(
+        f"FROM {build_images_by_block[block_name]} AS {build_stage_names[block_name]}\n"
+        for block_name, _block_packages in package_blocks
+        if block_name in build_images_by_block
     )
     install_steps = []
     for block_name, block_packages in package_blocks:
-        if not block_packages:
+        rpm_sources = []
+        if block_name in package_stage_names:
+            rpm_sources.append(("packages", package_stage_names[block_name]))
+        if block_name in build_stage_names:
+            rpm_sources.append(("build", build_stage_names[block_name]))
+        if not rpm_sources:
             continue
-        package_lines = f"    /rpms/{block_name}/*.rpm \\\n"
+        copy_lines = "".join(
+            f"COPY --from={stage_name} /rpms/ /rpms/{block_name}/{source_name}/\n"
+            for source_name, stage_name in rpm_sources
+        )
+        package_globs = " ".join(
+            f"/rpms/{block_name}/{source_name}/*.rpm"
+            for source_name, _stage_name in rpm_sources
+        )
         install_steps.append(
             f"""#
 # Install: {block_name}
 #
 
-COPY --from={package_stage_names[block_name]} /rpms/ /rpms/{block_name}/
+{copy_lines}\
 RUN /bin/sh <<'LUDOS_INSTALL_{block_name}'
 set -e
+rpm_args=
+for rpm in {package_globs}; do
+    [ -e "$rpm" ] || continue
+    rpm_args="$rpm_args $rpm"
+done
+[ -n "$rpm_args" ] || exit 0
 dnf5 -y \\
     --installroot=/target \\
     --releasever={manifest_env["releasever"]} \\
@@ -564,7 +617,8 @@ dnf5 -y \\
     --nogpgcheck \\
     install \\
     --allowerasing \\
-{package_lines}    && \\
+    $rpm_args \\
+    && \\
     rm -rf /target/var/cache/dnf /target/var/log/dnf*
 LUDOS_INSTALL_{block_name}
 """
@@ -573,9 +627,9 @@ LUDOS_INSTALL_{block_name}
     postprocess_steps = []
     for block_name, postprocess in postprocess_blocks:
         file_steps = []
-        if block_name in package_stage_names:
+        if block_name in build_stage_names:
             file_steps.append(
-                f"COPY --from={package_stage_names[block_name]} /files/ /files/\n"
+                f"COPY --from={build_stage_names[block_name]} /files/ /files/\n"
             )
         if block_name in card_file_cards:
             file_steps.append(f"COPY files/{_identifier(block_name)}/ /files/\n")
@@ -597,7 +651,7 @@ LUDOS_POSTPROCESS_{block_name}
     postprocess_step_lines = "\n".join(postprocess_steps)
     containerfile = build_dir / "Containerfile"
     containerfile.write_text(
-        f"""{package_stage_lines}FROM {bootstrap} AS install
+        f"""{package_stage_lines}{build_stage_lines}FROM {bootstrap} AS install
 WORKDIR /workspace/repos
 RUN mkdir -p /target
 
@@ -665,6 +719,7 @@ COPY --from=install /target /
         cache_version=cache_version,
         repo_images=tuple(repo_images),
         package_images=tuple(package_images),
+        build_images=tuple(build_images),
         builder_images=tuple(builder_images.values()),
     )
 
@@ -1051,6 +1106,58 @@ def _create_package_image(
     )
 
 
+def _create_build_output_image(
+    *,
+    podman: str,
+    build_dir: Path,
+    image: str,
+    rpm_dir: Path | None,
+    files_dir: Path | None,
+) -> None:
+    image_root = build_dir / "root"
+    image_rpm_dir = image_root / "rpms"
+    image_files_dir = image_root / "files"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    image_rpm_dir.mkdir(parents=True)
+    image_files_dir.mkdir(parents=True)
+
+    if rpm_dir is not None and rpm_dir.exists():
+        for source_path in rpm_dir.rglob("*.rpm"):
+            if source_path.name.endswith(".src.rpm"):
+                continue
+            target = image_rpm_dir / source_path.name
+            try:
+                os.link(source_path, target)
+            except OSError:
+                shutil.copy2(source_path, target)
+
+    if files_dir is not None and files_dir.exists():
+        for source_path in files_dir.rglob("*"):
+            if source_path.is_dir():
+                continue
+            relative = source_path.relative_to(files_dir)
+            target = image_files_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target)
+
+    containerfile = build_dir / "Containerfile"
+    containerfile.write_text("FROM scratch\nCOPY root/ /\n", encoding="utf-8")
+    subprocess.run(
+        [
+            podman,
+            "build",
+            "--layers",
+            "--pull=missing",
+            "--tag",
+            image,
+            "--file",
+            str(containerfile),
+            str(build_dir),
+        ],
+        check=True,
+    )
+
+
 def _run_prepare_block(
     *,
     card_source: Path,
@@ -1093,7 +1200,6 @@ def _run_card_build(
     card_source: Path,
     card_env: dict[str, str],
     build_script: str,
-    package_dir: Path,
 ) -> CardBuildOutput:
     card_base_dir = _card_base_dir(card_source)
     workspace_dir = build_dir / "workspace"
@@ -1162,18 +1268,18 @@ def _run_card_build(
     for rpm_path in rpm_sources:
         if rpm_path.name.endswith(".src.rpm"):
             continue
-        target = package_dir / rpm_path.name
-        try:
-            os.link(rpm_path, target)
-        except OSError:
-            shutil.copy2(rpm_path, target)
         rpm_files.append(rpm_path.name)
 
     log(f"Collected {len(rpm_files)} built RPMs for card: {card_name}")
     file_count = sum(1 for path in files_dir.rglob("*") if path.is_file())
     if file_count:
         log(f"Collected {file_count} built files for card: {card_name}")
-    return CardBuildOutput(rpm_files=tuple(rpm_files), file_count=file_count)
+    return CardBuildOutput(
+        rpm_files=tuple(rpm_files),
+        file_count=file_count,
+        rpm_dir=rpm_dir,
+        files_dir=files_dir,
+    )
 
 
 def _package_hash(packages: tuple[str, ...]) -> str:
@@ -1181,7 +1287,7 @@ def _package_hash(packages: tuple[str, ...]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:HASH_LENGTH]
 
 
-def _card_package_hash(
+def _card_build_hash(
     card_name: str,
     card_packages: tuple[str, ...],
     card_hashes: dict[str, str],
@@ -1196,7 +1302,7 @@ def _card_package_hash(
             card_envs[card_name],
             _card_base_dir(card_sources[card_name]),
         ),
-        f"{card_name} package hash",
+        f"{card_name} build hash",
     )
 
 
