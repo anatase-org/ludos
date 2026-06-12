@@ -17,6 +17,7 @@ error_console = Console(stderr=True)
 
 STREAM_HISTORY_LIMIT = 15
 STREAM_TRUNCATED_LINE = "| ... <truncated>"
+INFO_MESSAGE_INDENT = 8
 LOG_DIR = Path("logs")
 LOG_FILE = LOG_DIR / "ludos.log"
 LOG_MAX_BYTES = 10 * 1024 * 1024
@@ -111,7 +112,12 @@ class LudosHandler(logging.Handler):
         self._clear_stream_display()
         lines = self._stream_snapshot(self._stream_display_limit())
         for line in lines:
-            console.print(line, markup=False, no_wrap=True, overflow="crop")
+            console.print(
+                " " * INFO_MESSAGE_INDENT + line,
+                markup=False,
+                no_wrap=True,
+                overflow="crop",
+            )
         self._stream_rendered_lines = len(lines)
         console.file.flush()
 
