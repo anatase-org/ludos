@@ -1414,9 +1414,12 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
         source_path.relative_to(source_dir.resolve())
     except ValueError as exc:
         raise ConfigError(f"git files source '{source}' escapes the repository") from exc
-    if not source_path.is_file():
-        raise ConfigError(f"git files source '{source}' does not contain a file")
-    shutil.copy2(source_path, target)
+    if source_path.is_dir():
+        shutil.copytree(source_path, target, dirs_exist_ok=True)
+    elif source_path.is_file():
+        shutil.copy2(source_path, target)
+    else:
+        raise ConfigError(f"git files source '{source}' does not contain a file or directory")
 
 
 def _parse_git_file_source(source: str) -> tuple[str, str, Path]:
