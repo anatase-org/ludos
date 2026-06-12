@@ -49,7 +49,6 @@ def build_manifest(
 
     root_dir = manifest_path.resolve().parent
     image = _cache_name(manifest_path.resolve().stem, "image")
-    log("Loading local environment overrides")
     manifest_env = {key: str(value) for key, value in validation.manifest.env.items()}
     local_values = _load_dotenv(root_dir / ".env")
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
@@ -162,7 +161,6 @@ def build_manifest(
             },
         )
 
-    log("Ordering cards")
     card_entries = []
     used_card_names = set()
     for insertion_order, card in enumerate(validation.cards):
@@ -399,6 +397,7 @@ def build_manifest(
             raise ConfigError(f"card '{card_name}' has files but no source path")
         card_source_dir = card_source.parent.resolve()
         card_context_dir = card_files_dir / _identifier(card_name)
+        staged_file_count = 0
         for file_ref in card_files:
             file_path = Path(file_ref)
             if file_path.is_absolute() or ".." in file_path.parts:
@@ -417,8 +416,9 @@ def build_manifest(
             target_path = card_context_dir / file_path
             target_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, target_path)
+            staged_file_count += 1
         card_file_cards.add(card_name)
-        log(f"Staged files for card: {card_name}")
+        log(f"Staged {staged_file_count} files for card: {card_name}")
 
     log(f"Generating Containerfile: {build_dir / 'Containerfile'}")
     package_stage_lines = "".join(
