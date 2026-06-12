@@ -37,6 +37,7 @@ def build_manifest(
     cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
+    cache_only: bool = False,
 ) -> BuildResult:
     log(f"Validating manifest: {manifest_path}")
     validation = validate_manifest(manifest_path, cards_dir)
@@ -67,6 +68,8 @@ def build_manifest(
         cache_version = _cache_name(cache_version, "version")
         load_only_version = True
     local_prefix = _local_prefix(local_prefix)
+    if cache_only:
+        log("Using cache-only mode")
 
     if cache_dir is None:
         cache_dir = root_dir / "cache"
@@ -134,9 +137,9 @@ def build_manifest(
                 },
             )
             continue
-        if load_only_version:
+        if load_only_version or cache_only:
             raise ConfigError(
-                f"repository metadata image is missing for requested version: {repo_image}"
+                f"repository metadata image is not cached: {repo_image}"
             )
 
         log(f"Creating repository metadata image: {repo_image}")
@@ -354,6 +357,8 @@ def build_manifest(
             log(f"Reusing package image: {package_image}")
             expanded_package_blocks.append((block_name, block_packages))
             continue
+        if cache_only:
+            raise ConfigError(f"package image is not cached: {package_image}")
 
         log(f"Resolving local RPM closure for block: {block_name}")
         block_packages = _resolve_local_install_block(

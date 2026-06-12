@@ -28,6 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.add_argument(
         "--cache",
+        action="store_true",
+        help="Only use cached repository and package images. Fail if any are missing.",
+    )
+    build.add_argument(
+        "--cache-dir",
         type=Path,
         default=None,
         help="Directory for build, dnf, and package caches. Defaults to ./cache next to the manifest.",
@@ -72,7 +77,13 @@ def validate_command(args: argparse.Namespace) -> int:
 
 
 def build_command(args: argparse.Namespace) -> int:
-    result = build_manifest(args.manifest, args.cards_dir, args.cache, args.version)
+    result = build_manifest(
+        args.manifest,
+        args.cards_dir,
+        args.cache_dir,
+        args.version,
+        args.cache,
+    )
     log(
         f"Built {result.output_image} for {result.image} on {result.distro} "
         f"with {Path(result.podman).name} using {result.bootstrap}"
