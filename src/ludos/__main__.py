@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .build import build_manifest
+from .cleanup import cleanup_local_images
 from .logging import LOGO_STR, configure_tracebacks, error, log
 from .model import ConfigError, validate_manifest
 
@@ -54,6 +55,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate.set_defaults(func=validate_command)
 
+    cleanup = subcommands.add_parser(
+        "cleanup",
+        help="Remove stale local Ludos cache images.",
+    )
+    cleanup.add_argument(
+        "--version",
+        default=None,
+        help="Cache version to keep. Defaults to the current ISO YYYY-WW.",
+    )
+    cleanup.add_argument(
+        "--local-prefix",
+        default="",
+        help="Local image prefix to clean. Defaults to the unprefixed local cache.",
+    )
+    cleanup.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show stale images without removing them.",
+    )
+    cleanup.add_argument(
+        "manifests",
+        nargs="*",
+        type=Path,
+        help="Optional manifests whose final image tags should also be cleaned.",
+    )
+    cleanup.set_defaults(func=cleanup_command)
+
     return parser
 
 
@@ -94,6 +122,15 @@ def build_command(args: argparse.Namespace) -> int:
     )
     log(f"Package blocks: {blocks}")
     return 0
+
+
+def cleanup_command(args: argparse.Namespace) -> int:
+    return cleanup_local_images(
+        version=args.version,
+        local_prefix=args.local_prefix,
+        manifests=tuple(args.manifests),
+        dry_run=args.dry_run,
+    )
 
 
 def main() -> int:
