@@ -384,7 +384,7 @@ def build_manifest(
         f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
         for key, value in validation.manifest.labels.items()
     )
-    card_files_dir = build_dir / "card-files"
+    card_files_dir = build_dir / "files"
     shutil.rmtree(card_files_dir, ignore_errors=True)
     card_file_cards = set()
     for card_name, card_source, card_files in card_file_sets:
@@ -454,7 +454,7 @@ LUDOS_INSTALL_{block_name}
     for block_name, postprocess in postprocess_blocks:
         file_step = ""
         if block_name in card_file_cards:
-            file_step = f"COPY card-files/{_identifier(block_name)}/ /files/\n"
+            file_step = f"COPY files/{_identifier(block_name)}/ /files/\n"
         set_command = "" if _starts_with_set_command(postprocess) else "set -e\n"
         postprocess_steps.append(
             f"""#
