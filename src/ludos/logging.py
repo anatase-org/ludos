@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime as _datetime
 import logging
 import shutil
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from rich.console import Console
 from rich.errors import MarkupError
@@ -15,6 +17,10 @@ error_console = Console(stderr=True)
 
 STREAM_HISTORY_LIMIT = 15
 STREAM_TRUNCATED_LINE = "| ... <truncated>"
+LOG_DIR = Path("logs")
+LOG_FILE = LOG_DIR / "ludos.log"
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
 
 
 LOGO_STR = r""".____          .___              ╭──────────/┐
@@ -127,11 +133,48 @@ class LudosHandler(logging.Handler):
         self._emit_lines(logging.INFO, "INFO", created, lines)
 
 
+class LudosFileFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        timestamp = _datetime.datetime.fromtimestamp(record.created).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        message = record.getMessage()
+        if record.exc_info:
+            message = f"{message}\n{self.formatException(record.exc_info)}"
+        if record.stack_info:
+            message = f"{message}\n{self.formatStack(record.stack_info)}"
+
+        if getattr(record, "ludos_stream", False):
+            lines = [f"| {line}" for line in message.splitlines() or [""]]
+        else:
+            lines = message.splitlines() or [""]
+
+        prefix = f"[{timestamp}] {record.levelname}: "
+        continuation = " " * len(prefix)
+        return "\n".join(
+            f"{prefix if index == 0 else continuation}{line}"
+            for index, line in enumerate(lines)
+        )
+
+
+def _make_file_handler() -> logging.Handler:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setFormatter(LudosFileFormatter())
+    return handler
+
+
 logger = logging.getLogger("ludos")
 logger.setLevel(logging.INFO)
 logger.propagate = False
 logger.handlers.clear()
 logger.addHandler(LudosHandler())
+logger.addHandler(_make_file_handler())
 
 
 def configure_tracebacks() -> None:
