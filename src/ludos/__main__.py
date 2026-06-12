@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -92,6 +94,9 @@ def main() -> int:
         return args.func(args)
     except ConfigError as exc:
         parser.exit(1, f"error: {exc}\n")
+    except subprocess.CalledProcessError as exc:
+        command = " ".join(shlex.quote(str(part)) for part in exc.cmd)
+        parser.exit(1, f"error: command failed with exit status {exc.returncode}: {command}\n")
 
 
 if __name__ == "__main__":
