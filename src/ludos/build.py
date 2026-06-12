@@ -338,8 +338,6 @@ def build_manifest(
         package_images.append(package_image)
         if _image_exists(podman, package_image):
             expanded_package_blocks.append((block_name, block_packages))
-            rpm_files = _package_rpm_files(bootstrap_dnf_base, block_packages)
-            _install_resolved_block(bootstrap_dnf_base, manifest_env, rpm_files)
             continue
 
         block_packages = _resolve_local_install_block(
