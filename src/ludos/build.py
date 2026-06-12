@@ -11,7 +11,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .logging import stream
+from .logging import log, stream
 from .model import ConfigError, validate_manifest
 
 
@@ -25,7 +25,6 @@ class BuildResult:
     resolved_packages: tuple[str, ...]
     package_blocks: tuple[tuple[str, tuple[str, ...]], ...]
     package_dir: Path
-    package_list: Path
     repo_dir: Path
     podman: str
     cache_version: str
@@ -39,6 +38,7 @@ def build_manifest(
     cache_dir: Path | None = None,
     cache_version: str | None = None,
 ) -> BuildResult:
+    log(f"Validating manifest: {manifest_path}")
     validation = validate_manifest(manifest_path, cards_dir)
     if validation.missing_repos:
         missing = ", ".join(validation.missing_repos)
@@ -49,6 +49,7 @@ def build_manifest(
 
     root_dir = manifest_path.resolve().parent
     image = _cache_name(manifest_path.resolve().stem, "image")
+    log("Loading local environment overrides")
     manifest_env = {key: str(value) for key, value in validation.manifest.env.items()}
     local_values = _load_dotenv(root_dir / ".env")
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
@@ -72,6 +73,7 @@ def build_manifest(
         cache_dir = root_dir / "cache"
     else:
         cache_dir = cache_dir.expanduser().resolve()
+    log(f"Preparing cache directories under {cache_dir}")
     package_dir = cache_dir / "packages" / distro
     dnf_dir = cache_dir / "dnf" / distro
     build_dir = cache_dir / "build" / f"{image}-{distro}"
@@ -79,7 +81,6 @@ def build_manifest(
     dnf_cache_dir = dnf_dir / "cache"
     dnf_persist_dir = dnf_dir / "persist"
     dnf_log_dir = dnf_dir / "log"
-    package_list = dnf_dir / f"{image}-packages.json"
     oci_dir = build_dir / "oci"
     resolve_root_dir = build_dir / "resolve-root"
 
@@ -94,7 +95,9 @@ def build_manifest(
     podman = shutil.which("podman")
     if not podman:
         raise ConfigError("podman must be installed to build")
+    log(f"Using Podman: {podman}")
 
+    log("Resetting DNF metadata workspace")
     for existing in repo_dir.glob("*.repo"):
         existing.unlink()
     shutil.rmtree(dnf_cache_dir)
@@ -104,6 +107,7 @@ def build_manifest(
 
     repo_images = []
     for repo in validation.repos:
+        log(f"Rendering repository metadata: {repo.ref.repo}")
         repo_variables = dict(manifest_env)
         for key, value in repo.ref.vars.items():
             repo_variables[key] = _substitute_variables(value, repo_variables)
@@ -120,6 +124,7 @@ def build_manifest(
         repo_image = _local_image(local_prefix, "repos", f"{repo.ref.repo}-{cache_version}")
         repo_images.append(repo_image)
         if _image_exists(podman, repo_image):
+            log(f"Reusing repository metadata image: {repo_image}")
             _extract_image_paths(
                 podman,
                 repo_image,
@@ -135,6 +140,7 @@ def build_manifest(
                 f"repository metadata image is missing for requested version: {repo_image}"
             )
 
+        log(f"Creating repository metadata image: {repo_image}")
         _create_repo_image(
             podman=podman,
             bootstrap=bootstrap,
@@ -145,6 +151,7 @@ def build_manifest(
             repo_id=repo_id,
             rendered_repo=rendered_repo,
         )
+        log(f"Extracting repository metadata: {repo.ref.repo}")
         _extract_image_paths(
             podman,
             repo_image,
@@ -155,6 +162,7 @@ def build_manifest(
             },
         )
 
+    log("Ordering cards")
     card_entries = []
     used_card_names = set()
     for insertion_order, card in enumerate(validation.cards):
@@ -186,6 +194,7 @@ def build_manifest(
     requested_packages = tuple(requested_packages)
     if not requested_packages:
         raise ConfigError(f"{manifest_path}: no packages requested by cards")
+    log(f"Collected {len(requested_packages)} requested packages from {len(card_entries)} cards")
 
     bootstrap_dnf_base = [
         podman,
@@ -217,9 +226,11 @@ def build_manifest(
     card_resolutions = []
     for card_name, card_packages in zip(card_names, card_requests):
         if not card_packages:
+            log(f"Skipping package resolution for empty card: {card_name}")
             card_resolutions.append(tuple())
             continue
 
+        log(f"Resolving package transaction for card: {card_name}")
         transaction_preview = subprocess.run(
             [
                 *bootstrap_dnf_base,
@@ -271,6 +282,7 @@ def build_manifest(
             raise ConfigError(f"dnf did not resolve packages for {card_name}:\n{detail}")
         card_resolutions.append(tuple(card_resolved_package_list))
 
+    log("Grouping resolved packages into install blocks")
     package_counts = {}
     for card_resolution in card_resolutions:
         for package in set(card_resolution):
@@ -324,6 +336,7 @@ def build_manifest(
     resolved_packages = _drop_minimal_provider_conflicts(resolved_packages)
     if not resolved_packages:
         raise ConfigError("dnf did not resolve any packages")
+    log(f"Resolved {len(resolved_packages)} packages into {len(package_blocks)} install blocks")
 
     package_images = []
     expanded_package_blocks = []
@@ -340,17 +353,22 @@ def build_manifest(
         )
         package_images.append(package_image)
         if _image_exists(podman, package_image):
+            log(f"Reusing package image: {package_image}")
             expanded_package_blocks.append((block_name, block_packages))
             continue
 
+        log(f"Resolving local RPM closure for block: {block_name}")
         block_packages = _resolve_local_install_block(
             bootstrap_dnf_base,
             manifest_env,
             block_packages,
         )
         expanded_package_blocks.append((block_name, block_packages))
+        log(f"Downloading RPMs for block: {block_name}")
         rpm_files = _download_block_packages(bootstrap_dnf_base, block_packages)
+        log(f"Recording install state for block: {block_name}")
         _install_resolved_block(bootstrap_dnf_base, manifest_env, rpm_files)
+        log(f"Creating package image: {package_image}")
         _create_package_image(
             podman=podman,
             build_dir=oci_dir / "packages" / f"{block_name}-{block_hash}-{cache_version}",
@@ -365,27 +383,13 @@ def build_manifest(
         for _block_name, block_packages in package_blocks
         for package in block_packages
     )
-    package_list.write_text(
-        json.dumps(
-            {
-                "packages": list(resolved_packages),
-                "blocks": {
-                    block_name: list(block_packages)
-                    for block_name, block_packages in package_blocks
-                },
-                "version": cache_version,
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
 
     label_lines = "".join(
         f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
         for key, value in validation.manifest.labels.items()
     )
     card_files_dir = build_dir / "files"
+    log("Staging card files")
     shutil.rmtree(card_files_dir, ignore_errors=True)
     card_file_cards = set()
     for card_name, card_source, card_files in card_file_sets:
@@ -414,6 +418,9 @@ def build_manifest(
             target_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, target_path)
         card_file_cards.add(card_name)
+        log(f"Staged files for card: {card_name}")
+
+    log(f"Generating Containerfile: {build_dir / 'Containerfile'}")
     package_stage_lines = "".join(
         f"FROM {package_image} AS packages_{_identifier(block_name)}\n"
         for (block_name, _block_packages), package_image in zip(
@@ -501,6 +508,7 @@ COPY --from=install /target /
         encoding="utf-8",
     )
 
+    log(f"Building final image: {output_image}")
     _run_container_build(
         [
             podman,
@@ -535,7 +543,6 @@ COPY --from=install /target /
         resolved_packages=resolved_packages,
         package_blocks=package_blocks,
         package_dir=package_dir,
-        package_list=package_list,
         repo_dir=repo_dir,
         podman=str(podman),
         cache_version=cache_version,

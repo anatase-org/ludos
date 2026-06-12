@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .build import build_manifest
-from .logging import LOGO_STR, error, log
+from .logging import LOGO_STR, configure_tracebacks, error, log
 from .model import ConfigError, validate_manifest
 
 
@@ -77,17 +77,16 @@ def build_command(args: argparse.Namespace) -> int:
         f"Built {result.output_image} for {result.image} on {result.distro} "
         f"with {Path(result.podman).name} using {result.bootstrap}"
     )
-    log(f"Downloaded {len(result.resolved_packages)} resolved packages into {result.package_dir}")
     blocks = ", ".join(
         f"{block_name}: {len(block_packages)}"
         for block_name, block_packages in result.package_blocks
     )
     log(f"Package blocks: {blocks}")
-    log(f"Package list: {result.package_list}")
     return 0
 
 
 def main() -> int:
+    configure_tracebacks()
     parser = build_parser()
     args = parser.parse_args()
     show_logo(args)
@@ -95,6 +94,9 @@ def main() -> int:
         return 0
     try:
         return args.func(args)
+    except KeyboardInterrupt:
+        error("User requested to exit...")
+        return 130
     except ConfigError as exc:
         error(exc)
         return 1

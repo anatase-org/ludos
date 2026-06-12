@@ -5,6 +5,7 @@ import logging
 
 from rich.console import Console
 from rich.text import Text
+from rich.traceback import install as install_rich_traceback
 
 
 console = Console()
@@ -49,6 +50,10 @@ logger.handlers.clear()
 logger.addHandler(LudosHandler())
 
 
+def configure_tracebacks() -> None:
+    install_rich_traceback(show_locals=False, suppress=[])
+
+
 def log(message: object = "") -> None:
     logger.info("%s", message)
 
@@ -63,7 +68,7 @@ def error(message: object = "") -> None:
 
 def stream(message: str) -> None:
     for line in message.splitlines():
-        logger.info("%s", line)
+        logger.info("| %s", line)
 
 
 def main() -> None:
