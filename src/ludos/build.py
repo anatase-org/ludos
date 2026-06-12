@@ -11,6 +11,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .logging import stream
 from .model import ConfigError, validate_manifest
 
 
@@ -930,7 +931,7 @@ def _run_container_build(command: list[str], containerfile: Path) -> None:
     assert process.stdout is not None
     for line in process.stdout:
         output_lines.append(line)
-        print(line, end="")
+        stream(line)
 
     returncode = process.wait()
     if returncode == 0:

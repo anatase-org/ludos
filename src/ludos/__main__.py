@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .build import build_manifest
-from .logging import LOGO_STR
+from .logging import LOGO_STR, error, log
 from .model import ConfigError, validate_manifest
 
 
@@ -49,12 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate.set_defaults(func=validate_command)
 
-    parser.set_defaults(func=show_logo)
     return parser
 
 
 def show_logo(_args: argparse.Namespace) -> int:
-    print(LOGO_STR)
+    log(LOGO_STR)
+    log("Starting Ludos...")
     return 0
 
 
@@ -67,36 +67,41 @@ def validate_command(args: argparse.Namespace) -> int:
         missing = ", ".join(result.missing_cards)
         raise ConfigError(f"{args.manifest}: missing card definitions: {missing}")
 
-    print(f"Manifest is valid: {len(result.repos)} repos, {len(result.cards)} cards")
+    log(f"Manifest is valid: {len(result.repos)} repos, {len(result.cards)} cards")
     return 0
 
 
 def build_command(args: argparse.Namespace) -> int:
     result = build_manifest(args.manifest, args.cards_dir, args.cache, args.version)
-    print(
+    log(
         f"Built {result.output_image} for {result.image} on {result.distro} "
         f"with {Path(result.podman).name} using {result.bootstrap}"
     )
-    print(f"Downloaded {len(result.resolved_packages)} resolved packages into {result.package_dir}")
+    log(f"Downloaded {len(result.resolved_packages)} resolved packages into {result.package_dir}")
     blocks = ", ".join(
         f"{block_name}: {len(block_packages)}"
         for block_name, block_packages in result.package_blocks
     )
-    print(f"Package blocks: {blocks}")
-    print(f"Package list: {result.package_list}")
+    log(f"Package blocks: {blocks}")
+    log(f"Package list: {result.package_list}")
     return 0
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    show_logo(args)
+    if not hasattr(args, "func"):
+        return 0
     try:
         return args.func(args)
     except ConfigError as exc:
-        parser.exit(1, f"error: {exc}\n")
+        error(exc)
+        return 1
     except subprocess.CalledProcessError as exc:
         command = " ".join(shlex.quote(str(part)) for part in exc.cmd)
-        parser.exit(1, f"error: command failed with exit status {exc.returncode}: {command}\n")
+        error(f"command failed with exit status {exc.returncode}: {command}")
+        return 1
 
 
 if __name__ == "__main__":
