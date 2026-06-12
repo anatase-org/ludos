@@ -1130,6 +1130,7 @@ def _create_package_image(
         ],
         check=True,
     )
+    _remove_tree(build_dir, podman=podman)
 
 
 def _create_build_output_image(
@@ -1182,6 +1183,7 @@ def _create_build_output_image(
         ],
         check=True,
     )
+    _remove_tree(build_dir, podman=podman)
 
 
 def _run_prepare_block(
