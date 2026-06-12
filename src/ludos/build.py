@@ -1069,7 +1069,7 @@ def _download_block_packages(
     if not block_packages:
         return tuple()
     rpm_files = _package_rpm_files(bootstrap_dnf_base, block_packages)
-    subprocess.run(
+    _run_logged_command(
         [
             *bootstrap_dnf_base,
             "-y",
@@ -1083,8 +1083,7 @@ def _download_block_packages(
             "--destdir=/ludos/packages",
             *block_packages,
         ],
-        check=True,
-        text=True,
+        "package download",
     )
     return rpm_files
 
