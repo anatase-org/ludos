@@ -21,6 +21,7 @@ LOG_DIR = Path("logs")
 LOG_FILE = LOG_DIR / "ludos.log"
 LOG_MAX_BYTES = 10 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
+LOG_ROTATE_ON_START = True
 
 
 LOGO_STR = r""".____          .___              ╭──────────/┐
@@ -135,9 +136,6 @@ class LudosHandler(logging.Handler):
 
 class LudosFileFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        timestamp = _datetime.datetime.fromtimestamp(record.created).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
         message = record.getMessage()
         if record.exc_info:
             message = f"{message}\n{self.formatException(record.exc_info)}"
@@ -149,12 +147,18 @@ class LudosFileFormatter(logging.Formatter):
         else:
             lines = message.splitlines() or [""]
 
-        prefix = f"[{timestamp}] {record.levelname}: "
-        continuation = " " * len(prefix)
+        if record.levelno < logging.WARNING:
+            return "\n".join(lines)
+
         return "\n".join(
-            f"{prefix if index == 0 else continuation}{line}"
+            f"{record.levelname}: {line}" if index == 0 else line
             for index, line in enumerate(lines)
         )
+
+
+class SkipLogoFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage() != LOGO_STR
 
 
 def _make_file_handler() -> logging.Handler:
@@ -165,6 +169,9 @@ def _make_file_handler() -> logging.Handler:
         backupCount=LOG_BACKUP_COUNT,
         encoding="utf-8",
     )
+    if LOG_ROTATE_ON_START and LOG_FILE.exists() and LOG_FILE.stat().st_size > 0:
+        handler.doRollover()
+    handler.addFilter(SkipLogoFilter())
     handler.setFormatter(LudosFileFormatter())
     return handler
 
