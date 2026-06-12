@@ -4,6 +4,7 @@ import datetime as _datetime
 import logging
 
 from rich.console import Console
+from rich.errors import MarkupError
 from rich.text import Text
 from rich.traceback import install as install_rich_traceback
 
@@ -46,7 +47,10 @@ class LudosHandler(logging.Handler):
             else:
                 width = 8 + (len(record.levelname) + 2 if record.levelno >= logging.WARNING else 0)
                 line_prefix = Text(" " * width, no_wrap=True)
-            target.print(line_prefix, line, sep="")
+            try:
+                target.print(line_prefix, line, sep="")
+            except MarkupError:
+                target.print(line_prefix, line, sep="", markup=False)
         target.file.flush()
 
 
