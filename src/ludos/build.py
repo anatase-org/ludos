@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .logging import log, stream
 from .model import ConfigError, validate_manifest
@@ -1201,7 +1202,15 @@ def _run_card_build(
         command.extend(["--env", f"{key}={value}"])
     command.extend(["--env", "PS4=+ "])
     command.extend([bootstrap, "/bin/sh", "-ex", "-s"])
-    returncode, _output = _run_streamed_command(command, input_text=build_script + "\n")
+    returncode, _output = _run_streamed_command(
+        command,
+        input_text=build_script + "\n",
+        line_rewriter=_workspace_path_rewriter(
+            source_dir=card_base_dir,
+            workspace_dir=workspace_dir,
+            root_dir=Path.cwd(),
+        ),
+    )
     if returncode != 0:
         command_line = " ".join(shlex.quote(str(part)) for part in command)
         raise ConfigError(f"card build failed with exit status {returncode}: {command_line}")
@@ -1460,7 +1469,11 @@ def _run_container_build(command: list[str], containerfile: Path) -> None:
     raise ConfigError(message)
 
 
-def _run_streamed_command(command: list[str], input_text: str | None = None) -> tuple[int, str]:
+def _run_streamed_command(
+    command: list[str],
+    input_text: str | None = None,
+    line_rewriter: Callable[[str], str] | None = None,
+) -> tuple[int, str]:
     process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE if input_text is not None else None,
@@ -1479,12 +1492,45 @@ def _run_streamed_command(command: list[str], input_text: str | None = None) -> 
         assert process.stdout is not None
         for line in process.stdout:
             output_lines.append(line)
+            if line_rewriter is not None:
+                line = line_rewriter(line)
             stream(line)
 
         return process.wait(), "".join(output_lines)
     except KeyboardInterrupt:
         _terminate_process_group(process)
         raise
+
+
+def _workspace_path_rewriter(
+    *,
+    source_dir: Path,
+    workspace_dir: Path,
+    root_dir: Path,
+) -> Callable[[str], str]:
+    source = _display_path(source_dir, root_dir)
+    workspace = _display_path(workspace_dir, root_dir)
+
+    def rewrite(line: str) -> str:
+        line = re.sub(
+            r"(?<![A-Za-z0-9_./-])/workspace/build(?=/?|\W)",
+            f"{workspace}/build",
+            line,
+        )
+        return re.sub(
+            r"(?<![A-Za-z0-9_./-])/workspace(?=/?|\W)",
+            source,
+            line,
+        )
+
+    return rewrite
+
+
+def _display_path(path: Path, root_dir: Path) -> str:
+    try:
+        return f"./{path.relative_to(root_dir)}"
+    except ValueError:
+        return str(path)
 
 
 def _terminate_process_group(process: subprocess.Popen[str]) -> None:
