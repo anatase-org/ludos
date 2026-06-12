@@ -118,6 +118,25 @@ def build_manifest(
         raise ConfigError("podman must be installed to build")
     log(f"Using Podman: {podman}")
 
+    releasever = _cache_name(manifest_env["releasever"], "releasever")
+    bootstrap_image = _local_image(
+        local_prefix,
+        "bootstrap",
+        f"{releasever}-{cache_version}",
+    )
+    if _image_exists(podman, bootstrap_image):
+        log(f"Reusing bootstrap image: {bootstrap_image}")
+    elif load_only_version or cache_only:
+        raise ConfigError(f"bootstrap image is not cached: {bootstrap_image}")
+    else:
+        log(f"Creating bootstrap image: {bootstrap_image}")
+        _create_bootstrap_image(
+            podman=podman,
+            source=bootstrap,
+            image=bootstrap_image,
+        )
+    bootstrap = bootstrap_image
+
     log("Resetting DNF metadata workspace")
     for existing in repo_dir.glob("*.repo"):
         existing.unlink()
@@ -712,6 +731,13 @@ def _local_image(local_prefix: str, repository: str, tag: str) -> str:
 
 def _image_exists(podman: str, image: str) -> bool:
     return subprocess.run([podman, "image", "exists", image], check=False).returncode == 0
+
+
+def _create_bootstrap_image(*, podman: str, source: str, image: str) -> None:
+    returncode, _output = _run_streamed_command([podman, "pull", source])
+    if returncode != 0:
+        raise ConfigError(f"failed to pull bootstrap image: {source}")
+    subprocess.run([podman, "tag", source, image], check=True)
 
 
 def _repo_id(rendered_repo: str, source: Path) -> str:
