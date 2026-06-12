@@ -237,7 +237,6 @@ def build_manifest(
     card_hashes = {}
     card_envs = {}
     card_sources = {}
-    card_file_refs = {}
     postprocess_blocks = []
     inherited_env = dict(manifest_env)
     for _priority, _insertion_order, card_name, card in card_entries:
@@ -263,7 +262,6 @@ def build_manifest(
         card_requests.append(tuple(card_packages))
         parsed_file_refs = tuple(_parse_file_ref(file_ref) for file_ref in card.files)
         card_file_sets.append((card_name, card.source, parsed_file_refs))
-        card_file_refs[card_name] = parsed_file_refs
         if card.build.strip():
             card_builds[card_name] = card.build.rstrip()
             card_build_deps[card_name] = card.build_deps
@@ -390,9 +388,7 @@ def build_manifest(
             continue
         card_packages = tuple(card_packages)
         package_blocks.append((card_name, card_packages))
-        package_block_hashes.append(
-            _card_package_hash(card_packages, card_file_refs.get(card_name, tuple()))
-        )
+        package_block_hashes.append(_package_hash(card_packages))
         resolved_package_list.extend(card_packages)
         selected_package_set.update(card_packages)
     package_blocks = tuple(package_blocks)
@@ -1314,21 +1310,6 @@ def _run_card_build(
 
 def _package_hash(packages: tuple[str, ...]) -> str:
     payload = "\n".join(sorted(packages)) + "\n"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:HASH_LENGTH]
-
-
-def _card_package_hash(
-    card_packages: tuple[str, ...],
-    file_refs: tuple[FileRef, ...],
-) -> str:
-    remote_sources = tuple(
-        file_ref.original for file_ref in file_refs if _is_remote_file_source(file_ref.source)
-    )
-    if not remote_sources:
-        return _package_hash(card_packages)
-
-    payload = "\n".join(sorted(card_packages)) + "\n"
-    payload += "\n".join(f"file:{source}" for source in sorted(remote_sources)) + "\n"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:HASH_LENGTH]
 
 
