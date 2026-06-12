@@ -1209,6 +1209,8 @@ def _run_card_build(
     mock_dnf_dir.mkdir(parents=True, exist_ok=True)
     mock_root_cache_dir.mkdir(parents=True, exist_ok=True)
     artifact_cache_dir.mkdir(parents=True, exist_ok=True)
+    podman_cache_dir = artifact_cache_dir / "podman"
+    podman_cache_dir.mkdir(parents=True, exist_ok=True)
 
     ignore_rules = _load_containerignore(card_base_dir)
     _copy_build_context(card_base_dir, workspace_dir, ignore_rules)
@@ -1233,6 +1235,8 @@ def _run_card_build(
         f"{mock_root_cache_dir}:/cache/mock",
         "--volume",
         f"{artifact_cache_dir}:/cache/artifacts",
+        "--volume",
+        f"{podman_cache_dir}:/cache/podman",
         "--workdir",
         "/workspace",
     ]
