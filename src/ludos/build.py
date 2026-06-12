@@ -11,6 +11,8 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -47,6 +49,13 @@ class CardBuildOutput:
     file_count: int = 0
     rpm_dir: Path | None = None
     files_dir: Path | None = None
+
+
+@dataclass(frozen=True)
+class FileRef:
+    original: str
+    source: str
+    target: str
 
 
 def build_manifest(
@@ -228,6 +237,7 @@ def build_manifest(
     card_hashes = {}
     card_envs = {}
     card_sources = {}
+    card_file_refs = {}
     postprocess_blocks = []
     inherited_env = dict(manifest_env)
     for _priority, _insertion_order, card_name, card in card_entries:
@@ -251,7 +261,9 @@ def build_manifest(
             card_packages.append(package)
             requested_packages.append(package)
         card_requests.append(tuple(card_packages))
-        card_file_sets.append((card_name, card.source, card.files))
+        parsed_file_refs = tuple(_parse_file_ref(file_ref) for file_ref in card.files)
+        card_file_sets.append((card_name, card.source, parsed_file_refs))
+        card_file_refs[card_name] = parsed_file_refs
         if card.build.strip():
             card_builds[card_name] = card.build.rstrip()
             card_build_deps[card_name] = card.build_deps
@@ -378,7 +390,9 @@ def build_manifest(
             continue
         card_packages = tuple(card_packages)
         package_blocks.append((card_name, card_packages))
-        package_block_hashes.append(_package_hash(card_packages))
+        package_block_hashes.append(
+            _card_package_hash(card_packages, card_file_refs.get(card_name, tuple()))
+        )
         resolved_package_list.extend(card_packages)
         selected_package_set.update(card_packages)
     package_blocks = tuple(package_blocks)
@@ -521,32 +535,45 @@ def build_manifest(
     log("Staging card files")
     shutil.rmtree(card_files_dir, ignore_errors=True)
     card_file_cards = set()
-    for card_name, card_source, card_files in card_file_sets:
-        if not card_files:
+    for card_name, card_source, file_refs in card_file_sets:
+        if not file_refs:
             continue
         if card_source is None:
             raise ConfigError(f"card '{card_name}' has files but no source path")
         card_source_dir = card_source.parent.resolve()
         card_context_dir = card_files_dir / _identifier(card_name)
         staged_file_count = 0
-        for file_ref in card_files:
-            file_path = Path(file_ref)
-            if file_path.is_absolute() or ".." in file_path.parts:
-                raise ConfigError(
-                    f"{card_source}: files entry '{file_ref}' must be relative to the card"
-                )
-            source_path = (card_source_dir / file_path).resolve()
-            try:
-                source_path.relative_to(card_source_dir)
-            except ValueError as exc:
-                raise ConfigError(
-                    f"{card_source}: files entry '{file_ref}' escapes the card directory"
-                ) from exc
-            if not source_path.is_file():
-                raise ConfigError(f"{card_source}: files entry '{file_ref}' is missing")
-            target_path = card_context_dir / file_path
+        git_cache_dir = build_dir / "file-sources" / _identifier(card_name)
+        shutil.rmtree(git_cache_dir, ignore_errors=True)
+        for file_ref in file_refs:
+            target_path = card_context_dir / _validate_relative_file_path(
+                file_ref.target,
+                card_source,
+                "files destination",
+            )
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, target_path)
+            if _is_http_source(file_ref.source):
+                _download_file_source(file_ref.source, target_path)
+            elif _is_git_source(file_ref.source):
+                _copy_git_file_source(file_ref.source, target_path, git_cache_dir)
+            else:
+                source_relpath = _validate_relative_file_path(
+                    file_ref.source,
+                    card_source,
+                    "files source",
+                )
+                source_path = (card_source_dir / source_relpath).resolve()
+                try:
+                    source_path.relative_to(card_source_dir)
+                except ValueError as exc:
+                    raise ConfigError(
+                        f"{card_source}: files entry '{file_ref.original}' escapes the card directory"
+                    ) from exc
+                if not source_path.is_file():
+                    raise ConfigError(
+                        f"{card_source}: files entry '{file_ref.original}' is missing"
+                    )
+                shutil.copy2(source_path, target_path)
             staged_file_count += 1
         card_file_cards.add(card_name)
         log(f"Staged {staged_file_count} files for card: {card_name}")
@@ -1287,6 +1314,21 @@ def _package_hash(packages: tuple[str, ...]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:HASH_LENGTH]
 
 
+def _card_package_hash(
+    card_packages: tuple[str, ...],
+    file_refs: tuple[FileRef, ...],
+) -> str:
+    remote_sources = tuple(
+        file_ref.original for file_ref in file_refs if _is_remote_file_source(file_ref.source)
+    )
+    if not remote_sources:
+        return _package_hash(card_packages)
+
+    payload = "\n".join(sorted(card_packages)) + "\n"
+    payload += "\n".join(f"file:{source}" for source in sorted(remote_sources)) + "\n"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:HASH_LENGTH]
+
+
 def _card_build_hash(
     card_name: str,
     card_packages: tuple[str, ...],
@@ -1304,6 +1346,95 @@ def _card_build_hash(
         ),
         f"{card_name} build hash",
     )
+
+
+def _parse_file_ref(value: str) -> FileRef:
+    if "::" not in value:
+        source = value.strip()
+        if _is_remote_file_source(source):
+            raise ConfigError(
+                f"remote files entry '{value}' must use '<destination>::<source>'"
+            )
+        return FileRef(original=value, source=source, target=source)
+
+    target, source = (part.strip() for part in value.split("::", 1))
+    if not target or not source:
+        raise ConfigError(f"files entry '{value}' must be '<destination>::<source>'")
+    return FileRef(original=value, source=source, target=target)
+
+
+def _is_remote_file_source(source: str) -> bool:
+    return _is_http_source(source) or _is_git_source(source)
+
+
+def _is_http_source(source: str) -> bool:
+    return source.startswith(("https://", "http://"))
+
+
+def _is_git_source(source: str) -> bool:
+    return source.startswith(("git+https://", "git+http://", "git+ssh://"))
+
+
+def _validate_relative_file_path(value: str, source: Path, label: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or not value.strip():
+        raise ConfigError(
+            f"{source}: {label} '{value}' must be a relative path without '..'"
+        )
+    return path
+
+
+def _download_file_source(source: str, target: Path) -> None:
+    log(f"Downloading file source: {source}")
+    try:
+        with urllib.request.urlopen(source) as response:
+            with target.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+    except OSError as exc:
+        raise ConfigError(f"failed to download file source '{source}': {exc}") from exc
+
+
+def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
+    git = shutil.which("git")
+    if not git:
+        raise ConfigError("git must be installed to use git files sources")
+
+    repo_url, ref, repo_path = _parse_git_file_source(source)
+    source_dir = cache_dir / hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+    shutil.rmtree(source_dir, ignore_errors=True)
+    source_dir.parent.mkdir(parents=True, exist_ok=True)
+    log(f"Fetching git file source: {source}")
+    subprocess.run([git, "clone", "--no-checkout", repo_url, str(source_dir)], check=True)
+    subprocess.run([git, "-C", str(source_dir), "checkout", ref], check=True)
+    source_path = (source_dir / repo_path).resolve()
+    try:
+        source_path.relative_to(source_dir.resolve())
+    except ValueError as exc:
+        raise ConfigError(f"git files source '{source}' escapes the repository") from exc
+    if not source_path.is_file():
+        raise ConfigError(f"git files source '{source}' does not contain a file")
+    shutil.copy2(source_path, target)
+
+
+def _parse_git_file_source(source: str) -> tuple[str, str, Path]:
+    raw_source = source.removeprefix("git+")
+    parsed = urllib.parse.urlsplit(raw_source)
+    if parsed.scheme not in ("https", "http", "ssh"):
+        raise ConfigError(f"unsupported git files source protocol in '{source}'")
+    if not parsed.fragment or ":" not in parsed.fragment:
+        raise ConfigError(
+            f"git files source '{source}' must use '#commit=HASH:path', '#tag=TAG:path', '#branch=BRANCH:path', or '#ref=REF:path'"
+        )
+
+    ref_expr, path_expr = parsed.fragment.split(":", 1)
+    if "=" not in ref_expr:
+        raise ConfigError(f"git files source '{source}' has invalid ref selector")
+    ref_kind, ref_value = ref_expr.split("=", 1)
+    if ref_kind not in ("commit", "tag", "branch", "ref") or not ref_value:
+        raise ConfigError(f"git files source '{source}' has invalid ref selector")
+    repo_path = _validate_relative_file_path(path_expr, Path(source), "git source path")
+    repo_url = urllib.parse.urlunsplit(parsed._replace(fragment=""))
+    return repo_url, ref_value, repo_path
 
 
 def _card_env(
