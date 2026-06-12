@@ -73,7 +73,7 @@ def build_manifest(
         cache_dir = cache_dir.expanduser().resolve()
     package_dir = cache_dir / "packages" / distro
     dnf_dir = cache_dir / "dnf" / distro
-    build_dir = cache_dir / "build" / distro / image
+    build_dir = cache_dir / "build" / f"{image}-{distro}"
     repo_dir = dnf_dir / "repos"
     dnf_cache_dir = dnf_dir / "cache"
     dnf_persist_dir = dnf_dir / "persist"
