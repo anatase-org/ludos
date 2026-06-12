@@ -99,12 +99,14 @@ def build_manifest(
     mock_cache_dir = cache_dir / "mock" / distro
     mock_dnf_cache_dir = mock_cache_dir / "dnf"
     mock_root_cache_dir = mock_cache_dir / "root"
+    build_artifact_cache_dir = cache_dir / "build-artifacts" / distro
 
     package_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
     mock_cache_dir.mkdir(parents=True, exist_ok=True)
     mock_dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     mock_root_cache_dir.mkdir(parents=True, exist_ok=True)
+    build_artifact_cache_dir.mkdir(parents=True, exist_ok=True)
     repo_dir.mkdir(parents=True, exist_ok=True)
     dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     dnf_persist_dir.mkdir(parents=True, exist_ok=True)
@@ -447,6 +449,7 @@ def build_manifest(
                 mock_dir=mock_cache_dir / _identifier(block_name),
                 mock_dnf_dir=mock_dnf_cache_dir,
                 mock_root_cache_dir=mock_root_cache_dir,
+                artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
                 card_name=block_name,
                 card_source=card_sources[block_name],
                 card_env=card_envs[block_name],
@@ -1121,6 +1124,7 @@ def _run_card_build(
     mock_dir: Path,
     mock_dnf_dir: Path,
     mock_root_cache_dir: Path,
+    artifact_cache_dir: Path,
     card_name: str,
     card_source: Path,
     card_env: dict[str, str],
@@ -1138,6 +1142,7 @@ def _run_card_build(
     mock_dir.mkdir(parents=True, exist_ok=True)
     mock_dnf_dir.mkdir(parents=True, exist_ok=True)
     mock_root_cache_dir.mkdir(parents=True, exist_ok=True)
+    artifact_cache_dir.mkdir(parents=True, exist_ok=True)
 
     ignore_rules = _load_containerignore(card_base_dir)
     _copy_build_context(card_base_dir, workspace_dir, ignore_rules)
@@ -1160,6 +1165,8 @@ def _run_card_build(
         f"{mock_dnf_dir}:/cache/dnf",
         "--volume",
         f"{mock_root_cache_dir}:/cache/mock",
+        "--volume",
+        f"{artifact_cache_dir}:/cache/artifacts",
         "--workdir",
         "/workspace",
     ]
