@@ -455,6 +455,7 @@ LUDOS_INSTALL_{block_name}
         file_step = ""
         if block_name in card_file_cards:
             file_step = f"COPY card-files/{_identifier(block_name)}/ /files/\n"
+        set_command = "" if _starts_with_set_command(postprocess) else "set -e\n"
         postprocess_steps.append(
             f"""#
 # Postprocess: {block_name}
@@ -462,7 +463,7 @@ LUDOS_INSTALL_{block_name}
 
 {file_step}\
 RUN /bin/sh <<'LUDOS_POSTPROCESS_{block_name}'
-set -e
+{set_command}\
 {postprocess}
 rm -rf /files
 LUDOS_POSTPROCESS_{block_name}
@@ -907,6 +908,15 @@ def _package_hash(packages: tuple[str, ...]) -> str:
 
 def _identifier(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", value)
+
+
+def _starts_with_set_command(script: str) -> bool:
+    for line in script.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        return re.fullmatch(r"set\s+-[A-Za-z]+(?:\s+#.*)?", stripped) is not None
+    return False
 
 
 def _cache_name(value: str, description: str) -> str:
