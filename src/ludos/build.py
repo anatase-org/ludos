@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -1161,7 +1162,7 @@ def _run_card_build(
     workspace_dir = build_dir / "workspace"
     rpm_dir = build_dir / "rpms"
     files_dir = build_dir / "files"
-    shutil.rmtree(build_dir, ignore_errors=True)
+    _remove_tree(build_dir, podman=podman)
     workspace_dir.mkdir(parents=True)
     rpm_dir.mkdir(parents=True)
     files_dir.mkdir(parents=True)
@@ -1465,20 +1466,54 @@ def _run_streamed_command(command: list[str], input_text: str | None = None) -> 
         stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        start_new_session=True,
         text=True,
     )
-    if input_text is not None:
-        assert process.stdin is not None
-        process.stdin.write(input_text)
-        process.stdin.close()
-
     output_lines = []
-    assert process.stdout is not None
-    for line in process.stdout:
-        output_lines.append(line)
-        stream(line)
+    try:
+        if input_text is not None:
+            assert process.stdin is not None
+            process.stdin.write(input_text)
+            process.stdin.close()
 
-    return process.wait(), "".join(output_lines)
+        assert process.stdout is not None
+        for line in process.stdout:
+            output_lines.append(line)
+            stream(line)
+
+        return process.wait(), "".join(output_lines)
+    except KeyboardInterrupt:
+        _terminate_process_group(process)
+        raise
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+    try:
+        process.wait(timeout=10)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.wait()
+
+
+def _remove_tree(path: Path, *, podman: str | None = None) -> None:
+    shutil.rmtree(path, ignore_errors=True)
+    if not path.exists():
+        return
+    if podman is not None:
+        subprocess.run([podman, "unshare", "rm", "-rf", str(path)], check=False)
+    if path.exists():
+        raise ConfigError(f"failed to remove cache directory: {path}")
 
 
 def _containerfile_error_location(containerfile: Path, output: str) -> str | None:
