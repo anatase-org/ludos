@@ -79,13 +79,14 @@ def build_manifest(
     manifest_env = {key: str(value) for key, value in validation.manifest.env.items()}
     local_values = _load_dotenv(root_dir / ".env")
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
+    local_prefix = _local_prefix(local_prefix)
     manifest_env.update(local_values)
     distro = _cache_name(
         _substitute_variables(validation.manifest.distro, manifest_env),
         "distro",
     )
     bootstrap = _substitute_variables(validation.manifest.bootstrap, manifest_env)
-    output_image = f"localhost/ludos/{image}:{distro}"
+    output_image = f"localhost/{local_prefix}{image}:{distro}"
     if cache_version is None:
         iso_today = _datetime.date.today().isocalendar()
         cache_version = f"{iso_today.year}-{iso_today.week:02d}"
@@ -93,7 +94,6 @@ def build_manifest(
     else:
         cache_version = _cache_name(cache_version, "version")
         load_only_version = True
-    local_prefix = _local_prefix(local_prefix)
     if cache_only:
         log("Using cache-only mode")
 
