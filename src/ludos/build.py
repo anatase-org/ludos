@@ -437,84 +437,87 @@ def build_manifest(
     package_images_by_block = {}
     build_images = []
     build_images_by_block = {}
-    expanded_package_blocks = []
     for (block_name, block_packages), block_hash in zip(
         package_blocks, package_block_hashes
     ):
-        build_output = CardBuildOutput()
-        if block_name in card_builds:
-            build_hash = _card_build_hash(
-                block_name,
-                block_packages,
-                card_hashes,
-                card_envs,
-                card_sources,
+        if not block_packages:
+            continue
+        package_image = _local_image(
+            local_prefix,
+            "cards",
+            f"{block_name}-{block_hash}-{cache_version}",
+        )
+        if _image_exists(podman, package_image):
+            log(f"Reusing card package image: {package_image}")
+        elif cache_only:
+            raise ConfigError(f"card package image is not cached: {package_image}")
+        else:
+            repo_rpm_files = _download_block_packages(bootstrap_dnf_base, block_packages)
+            log(f"Creating card package image: {package_image}")
+            _create_package_image(
+                podman=podman,
+                build_dir=oci_dir / "cards" / f"{block_name}-{block_hash}-{cache_version}",
+                image=package_image,
+                package_dir=package_dir,
+                rpm_files=repo_rpm_files,
             )
-            build_image = _local_image(
-                local_prefix,
-                "builds",
-                f"{block_name}-{build_hash}-{cache_version}",
-            )
-            if _image_exists(podman, build_image):
-                log(f"Reusing build output image: {build_image}")
-                build_images.append(build_image)
-                build_images_by_block[block_name] = build_image
-            elif cache_only:
-                raise ConfigError(f"build output image is not cached: {build_image}")
-            else:
-                log(f"Running build for card: {block_name}")
-                build_output = _run_card_build(
-                    podman=podman,
-                    bootstrap=builder_images[block_name],
-                    build_dir=build_dir / "build" / _identifier(block_name),
-                    mock_dir=mock_cache_dir / _identifier(block_name),
-                    mock_dnf_dir=mock_dnf_cache_dir,
-                    mock_root_cache_dir=mock_root_cache_dir,
-                    artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
-                    card_name=block_name,
-                    card_source=card_sources[block_name],
-                    card_env=card_envs[block_name],
-                    build_script=card_builds[block_name],
-                )
-                if not build_output.rpm_files and build_output.file_count == 0:
-                    log(f"No build outputs found for card: {block_name}")
-                else:
-                    log(f"Creating build output image: {build_image}")
-                    _create_build_output_image(
-                        podman=podman,
-                        build_dir=oci_dir / "builds" / f"{block_name}-{build_hash}-{cache_version}",
-                        image=build_image,
-                        rpm_dir=build_output.rpm_dir,
-                        files_dir=build_output.files_dir,
-                    )
-                    build_images.append(build_image)
-                    build_images_by_block[block_name] = build_image
+        package_images.append(package_image)
+        package_images_by_block[block_name] = package_image
 
-        package_image = None
-        repo_rpm_files = tuple()
-        if block_packages:
-            package_image = _local_image(
-                local_prefix,
-                "cards",
-                f"{block_name}-{block_hash}-{cache_version}",
-            )
-            if _image_exists(podman, package_image):
-                log(f"Reusing card package image: {package_image}")
-            elif cache_only:
-                raise ConfigError(f"card package image is not cached: {package_image}")
-            else:
-                repo_rpm_files = _download_block_packages(bootstrap_dnf_base, block_packages)
-                log(f"Creating card package image: {package_image}")
-                _create_package_image(
-                    podman=podman,
-                    build_dir=oci_dir / "cards" / f"{block_name}-{block_hash}-{cache_version}",
-                    image=package_image,
-                    package_dir=package_dir,
-                    rpm_files=repo_rpm_files,
-                )
-            package_images.append(package_image)
-            package_images_by_block[block_name] = package_image
+    for block_name, block_packages in package_blocks:
+        if block_name not in card_builds:
+            continue
+        build_hash = _card_build_hash(
+            block_name,
+            block_packages,
+            card_hashes,
+            card_envs,
+            card_sources,
+        )
+        build_image = _local_image(
+            local_prefix,
+            "builds",
+            f"{block_name}-{build_hash}-{cache_version}",
+        )
+        if _image_exists(podman, build_image):
+            log(f"Reusing build output image: {build_image}")
+            build_images.append(build_image)
+            build_images_by_block[block_name] = build_image
+            continue
+        if cache_only:
+            raise ConfigError(f"build output image is not cached: {build_image}")
 
+        log(f"Running build for card: {block_name}")
+        build_output = _run_card_build(
+            podman=podman,
+            bootstrap=builder_images[block_name],
+            build_dir=build_dir / "build" / _identifier(block_name),
+            mock_dir=mock_cache_dir / _identifier(block_name),
+            mock_dnf_dir=mock_dnf_cache_dir,
+            mock_root_cache_dir=mock_root_cache_dir,
+            artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
+            card_name=block_name,
+            card_source=card_sources[block_name],
+            card_env=card_envs[block_name],
+            build_script=card_builds[block_name],
+        )
+        if not build_output.rpm_files and build_output.file_count == 0:
+            log(f"No build outputs found for card: {block_name}")
+            continue
+
+        log(f"Creating build output image: {build_image}")
+        _create_build_output_image(
+            podman=podman,
+            build_dir=oci_dir / "builds" / f"{block_name}-{build_hash}-{cache_version}",
+            image=build_image,
+            rpm_dir=build_output.rpm_dir,
+            files_dir=build_output.files_dir,
+        )
+        build_images.append(build_image)
+        build_images_by_block[block_name] = build_image
+
+    expanded_package_blocks = []
+    for block_name, block_packages in package_blocks:
         if block_name not in package_images_by_block and block_name not in build_images_by_block:
             log(f"No RPMs found for block, skipping install block: {block_name}")
             continue
