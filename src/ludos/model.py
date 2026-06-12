@@ -17,9 +17,13 @@ class ConfigError(ValueError):
 class Card:
     version: int
     priority: int = 1
+    env: dict[str, str | int] = field(default_factory=dict)
     packages: tuple[str, ...] = tuple()
+    build_deps: tuple[str, ...] = tuple()
     repos: tuple["RepoRef", ...] = tuple()
     files: tuple[str, ...] = tuple()
+    hash: str = ""
+    build: str = ""
     postprocess: str = ""
     source: Path | None = None
 
@@ -29,9 +33,13 @@ class Card:
         return cls(
             version=_required_version(data, path),
             priority=_optional_int(data, "priority", path, default=1),
+            env=_env_dict(data, path, include_default=False),
             packages=_string_tuple(data, "packages", path),
+            build_deps=_string_tuple(data, "build-deps", path),
             repos=_repo_refs_tuple(data, "repos", path),
             files=_string_tuple(data, "files", path),
+            hash=_optional_string(data, "hash", path),
+            build=_optional_string(data, "build", path),
             postprocess=_optional_string(data, "postprocess", path),
             source=path,
         )
@@ -232,8 +240,10 @@ def _default_env() -> dict[str, str | int]:
     return {"arch": platform.machine()}
 
 
-def _env_dict(data: dict[str, Any], path: Path) -> dict[str, str | int]:
-    env = _default_env()
+def _env_dict(
+    data: dict[str, Any], path: Path, *, include_default: bool = True
+) -> dict[str, str | int]:
+    env = _default_env() if include_default else {}
     value = data.get("env", {})
     if value is None:
         return env

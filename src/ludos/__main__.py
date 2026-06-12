@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--cache",
         action="store_true",
-        help="Only use cached repository and package images. Fail if any are missing.",
+        help="Only use cached repository and card images. Fail if any are missing.",
     )
     build.add_argument(
         "--cache-dir",

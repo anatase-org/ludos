@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as _datetime
+import fnmatch
 import hashlib
 import json
 import os
@@ -13,6 +14,9 @@ from pathlib import Path
 
 from .logging import log, stream
 from .model import ConfigError, validate_manifest
+
+
+HASH_LENGTH = 8
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,13 @@ class BuildResult:
     cache_version: str
     repo_images: tuple[str, ...]
     package_images: tuple[str, ...]
+    builder_images: tuple[str, ...] = tuple()
+
+
+@dataclass(frozen=True)
+class CardBuildOutput:
+    rpm_files: tuple[str, ...] = tuple()
+    file_count: int = 0
 
 
 def build_manifest(
@@ -85,9 +96,15 @@ def build_manifest(
     dnf_log_dir = dnf_dir / "log"
     oci_dir = build_dir / "oci"
     resolve_root_dir = build_dir / "resolve-root"
+    mock_cache_dir = cache_dir / "mock" / distro
+    mock_dnf_cache_dir = mock_cache_dir / "dnf"
+    mock_root_cache_dir = mock_cache_dir / "root"
 
     package_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
+    mock_cache_dir.mkdir(parents=True, exist_ok=True)
+    mock_dnf_cache_dir.mkdir(parents=True, exist_ok=True)
+    mock_root_cache_dir.mkdir(parents=True, exist_ok=True)
     repo_dir.mkdir(parents=True, exist_ok=True)
     dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     dnf_persist_dir.mkdir(parents=True, exist_ok=True)
@@ -181,21 +198,40 @@ def build_manifest(
     card_requests = []
     card_names = []
     card_file_sets = []
+    card_builds = {}
+    card_build_deps = {}
+    card_hashes = {}
+    card_envs = {}
+    card_sources = {}
     postprocess_blocks = []
+    inherited_env = dict(manifest_env)
     for _priority, _insertion_order, card_name, card in card_entries:
+        if card.source is None:
+            raise ConfigError(f"card '{card_name}' has no source path")
+        card_env = _card_env(inherited_env, card.env)
+        inherited_env.update(card_env)
         card_names.append(card_name)
+        card_envs[card_name] = card_env
+        card_sources[card_name] = card.source
         card_packages = []
         for package in card.packages:
             card_packages.append(package)
             requested_packages.append(package)
         card_requests.append(tuple(card_packages))
         card_file_sets.append((card_name, card.source, card.files))
+        if card.build.strip():
+            card_builds[card_name] = card.build.rstrip()
+            card_build_deps[card_name] = card.build_deps
+        if card.hash.strip():
+            card_hashes[card_name] = card.hash.strip()
         if card.postprocess.strip():
             postprocess_blocks.append((card_name, card.postprocess.rstrip()))
     requested_packages = tuple(requested_packages)
-    if not requested_packages:
+    if not requested_packages and not card_builds:
         raise ConfigError(f"{manifest_path}: no packages requested by cards")
     log(f"Collected {len(requested_packages)} requested packages from {len(card_entries)} cards")
+    if card_builds:
+        log(f"Collected {len(card_builds)} build cards")
 
     bootstrap_dnf_base = [
         podman,
@@ -227,7 +263,10 @@ def build_manifest(
     card_resolutions = []
     for card_name, card_packages in zip(card_names, card_requests):
         if not card_packages:
-            log(f"Skipping package resolution for empty card: {card_name}")
+            if card_name in card_builds:
+                log(f"Package resolution not needed for build-only card: {card_name}")
+            else:
+                log(f"Skipping package resolution for package-less card: {card_name}")
             card_resolutions.append(tuple())
             continue
 
@@ -308,9 +347,9 @@ def build_manifest(
         for card_request, card_resolution in zip(card_requests, card_resolutions):
             if any(package in common_package_set for package in card_resolution):
                 common_hash_inputs.extend(card_request)
-        package_block_hash_inputs = [tuple(common_hash_inputs)]
+        package_block_hashes = [_package_hash(tuple(common_hash_inputs))]
     else:
-        package_block_hash_inputs = []
+        package_block_hashes = []
 
     resolved_package_list = list(common_packages)
     selected_package_set = set(common_packages)
@@ -325,59 +364,123 @@ def build_manifest(
             if full_package != package and full_package in selected_package_set:
                 continue
             card_packages.append(package)
-        if not card_packages:
+        if not card_packages and card_name not in card_builds:
             continue
         card_packages = tuple(card_packages)
         package_blocks.append((card_name, card_packages))
-        package_block_hash_inputs.append(card_request)
+        package_block_hashes.append(
+            _card_package_hash(
+                card_name,
+                card_request,
+                card_hashes,
+                card_envs,
+                card_sources,
+            )
+        )
         resolved_package_list.extend(card_packages)
         selected_package_set.update(card_packages)
     package_blocks = tuple(package_blocks)
     resolved_packages = tuple(resolved_package_list)
     resolved_packages = _drop_minimal_provider_conflicts(resolved_packages)
-    if not resolved_packages:
+    if not resolved_packages and not package_blocks:
         raise ConfigError("dnf did not resolve any packages")
     log(f"Resolved {len(resolved_packages)} packages into {len(package_blocks)} install blocks")
+
+    builder_images = {}
+    for card_name in card_builds:
+        build_deps = _build_deps(card_build_deps.get(card_name, tuple()))
+        builder_hash = _package_hash(build_deps)
+        builder_image = _local_image(
+            local_prefix,
+            "builders",
+            f"{manifest_env['releasever']}-{builder_hash}-{cache_version}",
+        )
+        builder_images[card_name] = builder_image
+        if _image_exists(podman, builder_image):
+            log(f"Reusing builder image: {builder_image}")
+            continue
+        if cache_only:
+            raise ConfigError(f"builder image is not cached: {builder_image}")
+
+        log(f"Creating builder image: {builder_image}")
+        _create_builder_image(
+            podman=podman,
+            bootstrap=bootstrap,
+            root_dir=root_dir,
+            repo_dir=repo_dir,
+            dnf_cache_dir=dnf_cache_dir,
+            dnf_persist_dir=dnf_persist_dir,
+            dnf_log_dir=dnf_log_dir,
+            build_dir=oci_dir / "builders" / f"{manifest_env['releasever']}-{builder_hash}-{cache_version}",
+            image=builder_image,
+            releasever=manifest_env["releasever"],
+            build_deps=build_deps,
+        )
 
     package_images = []
     expanded_package_blocks = []
     shutil.rmtree(resolve_root_dir, ignore_errors=True)
     resolve_root_dir.mkdir(parents=True)
-    for (block_name, block_packages), hash_inputs in zip(
-        package_blocks, package_block_hash_inputs
+    for (block_name, block_packages), block_hash in zip(
+        package_blocks, package_block_hashes
     ):
-        block_hash = _package_hash(hash_inputs)
         package_image = _local_image(
             local_prefix,
-            "packages",
+            "cards",
             f"{block_name}-{block_hash}-{cache_version}",
         )
-        package_images.append(package_image)
         if _image_exists(podman, package_image):
-            log(f"Reusing package image: {package_image}")
+            log(f"Reusing card image: {package_image}")
+            package_images.append(package_image)
             expanded_package_blocks.append((block_name, block_packages))
             continue
         if cache_only:
-            raise ConfigError(f"package image is not cached: {package_image}")
+            raise ConfigError(f"card image is not cached: {package_image}")
+
+        build_output = CardBuildOutput()
+        if block_name in card_builds:
+            log(f"Running build for card: {block_name}")
+            build_output = _run_card_build(
+                podman=podman,
+                bootstrap=builder_images[block_name],
+                build_dir=build_dir / "build" / _identifier(block_name),
+                mock_dir=mock_cache_dir / _identifier(block_name),
+                mock_dnf_dir=mock_dnf_cache_dir,
+                mock_root_cache_dir=mock_root_cache_dir,
+                card_name=block_name,
+                card_source=card_sources[block_name],
+                card_env=card_envs[block_name],
+                build_script=card_builds[block_name],
+                package_dir=package_dir,
+            )
 
         log(f"Resolving local RPM closure for block: {block_name}")
-        block_packages = _resolve_local_install_block(
+        block_packages, rpm_files = _resolve_local_install_block(
             bootstrap_dnf_base,
             manifest_env,
             block_packages,
+            build_output.rpm_files,
         )
+        if not rpm_files and build_output.file_count == 0:
+            log(f"No RPMs found for block, skipping install block: {block_name}")
+            continue
+        package_images.append(package_image)
         expanded_package_blocks.append((block_name, block_packages))
-        log(f"Downloading RPMs for block: {block_name}")
-        rpm_files = _download_block_packages(bootstrap_dnf_base, block_packages)
-        log(f"Recording install state for block: {block_name}")
-        _install_resolved_block(bootstrap_dnf_base, manifest_env, rpm_files)
-        log(f"Creating package image: {package_image}")
+        if rpm_files:
+            log(f"Recording install state for block: {block_name}")
+            _install_resolved_block(bootstrap_dnf_base, manifest_env, rpm_files)
+        log(f"Creating card image: {package_image}")
         _create_package_image(
             podman=podman,
-            build_dir=oci_dir / "packages" / f"{block_name}-{block_hash}-{cache_version}",
+            build_dir=oci_dir / "cards" / f"{block_name}-{block_hash}-{cache_version}",
             image=package_image,
             package_dir=package_dir,
             rpm_files=rpm_files,
+            files_dir=(
+                build_dir / "build" / _identifier(block_name) / "files"
+                if build_output.file_count
+                else None
+            ),
         )
 
     package_blocks = tuple(expanded_package_blocks)
@@ -426,21 +529,27 @@ def build_manifest(
         log(f"Staged {staged_file_count} files for card: {card_name}")
 
     log(f"Generating Containerfile: {build_dir / 'Containerfile'}")
+    package_stage_names = {
+        block_name: f"cards_{_identifier(block_name)}"
+        for block_name, _block_packages in package_blocks
+    }
     package_stage_lines = "".join(
-        f"FROM {package_image} AS packages_{_identifier(block_name)}\n"
+        f"FROM {package_image} AS {package_stage_names[block_name]}\n"
         for (block_name, _block_packages), package_image in zip(
             package_blocks, package_images
         )
     )
     install_steps = []
     for block_name, block_packages in package_blocks:
+        if not block_packages:
+            continue
         package_lines = f"    /rpms/{block_name}/*.rpm \\\n"
         install_steps.append(
             f"""#
 # Install: {block_name}
 #
 
-COPY --from=packages_{_identifier(block_name)} / /rpms/{block_name}/
+COPY --from={package_stage_names[block_name]} /rpms/ /rpms/{block_name}/
 RUN /bin/sh <<'LUDOS_INSTALL_{block_name}'
 set -e
 dnf5 -y \\
@@ -465,9 +574,14 @@ LUDOS_INSTALL_{block_name}
     install_step_lines = "\n".join(install_steps)
     postprocess_steps = []
     for block_name, postprocess in postprocess_blocks:
-        file_step = ""
+        file_steps = []
+        if block_name in package_stage_names:
+            file_steps.append(
+                f"COPY --from={package_stage_names[block_name]} /files/ /files/\n"
+            )
         if block_name in card_file_cards:
-            file_step = f"COPY files/{_identifier(block_name)}/ /files/\n"
+            file_steps.append(f"COPY files/{_identifier(block_name)}/ /files/\n")
+        file_step = "".join(file_steps)
         set_command = "" if _starts_with_set_command(postprocess) else "set -e\n"
         postprocess_steps.append(
             f"""#
@@ -553,6 +667,7 @@ COPY --from=install /target /
         cache_version=cache_version,
         repo_images=tuple(repo_images),
         package_images=tuple(package_images),
+        builder_images=tuple(builder_images.values()),
     )
 
 
@@ -602,6 +717,70 @@ def _repo_id(rendered_repo: str, source: Path) -> str:
         if match:
             return match.group(1)
     raise ConfigError(f"{source}: repository definition does not contain a repo id")
+
+
+def _build_deps(card_build_deps: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(card_build_deps))
+
+
+def _create_builder_image(
+    *,
+    podman: str,
+    bootstrap: str,
+    root_dir: Path,
+    repo_dir: Path,
+    dnf_cache_dir: Path,
+    dnf_persist_dir: Path,
+    dnf_log_dir: Path,
+    build_dir: Path,
+    image: str,
+    releasever: str,
+    build_deps: tuple[str, ...],
+) -> None:
+    shutil.rmtree(build_dir, ignore_errors=True)
+    build_dir.mkdir(parents=True)
+    deps = " \\\n    ".join(build_deps)
+    containerfile = build_dir / "Containerfile"
+    containerfile.write_text(
+        f"""FROM {bootstrap}
+RUN dnf5 -y \\
+    --releasever={releasever} \\
+    --setopt=reposdir=/ludos/dnf/repos \\
+    --setopt=cachedir=/ludos/dnf/cache \\
+    --setopt=persistdir=/ludos/dnf/persist \\
+    --setopt=logdir=/ludos/dnf/log \\
+    --disable-repo='*' \\
+    --enable-repo='*' \\
+    install \\
+    {deps} \\
+    && dnf5 clean all
+""",
+        encoding="utf-8",
+    )
+    _run_container_build(
+        [
+            podman,
+            "build",
+            "--layers",
+            "--pull=missing",
+            "--tag",
+            image,
+            "--volume",
+            f"{root_dir / 'repos'}:/workspace/repos:ro",
+            "--volume",
+            f"{repo_dir}:/ludos/dnf/repos:ro",
+            "--volume",
+            f"{dnf_cache_dir}:/ludos/dnf/cache",
+            "--volume",
+            f"{dnf_persist_dir}:/ludos/dnf/persist",
+            "--volume",
+            f"{dnf_log_dir}:/ludos/dnf/log",
+            "--file",
+            str(containerfile),
+            str(build_dir),
+        ],
+        containerfile,
+    )
 
 
 def _create_repo_image(
@@ -735,6 +914,8 @@ def _package_rpm_files(
 def _download_block_packages(
     bootstrap_dnf_base: list[str], block_packages: tuple[str, ...]
 ) -> tuple[str, ...]:
+    if not block_packages:
+        return tuple()
     rpm_files = _package_rpm_files(bootstrap_dnf_base, block_packages)
     subprocess.run(
         [
@@ -760,21 +941,26 @@ def _resolve_local_install_block(
     bootstrap_dnf_base: list[str],
     manifest_env: dict[str, str],
     block_packages: tuple[str, ...],
-) -> tuple[str, ...]:
+    initial_rpm_files: tuple[str, ...] = tuple(),
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if not block_packages and not initial_rpm_files:
+        return tuple(), tuple()
+
     resolved = list(block_packages)
     seen = set(resolved)
     for _attempt in range(10):
         rpm_files = _download_block_packages(bootstrap_dnf_base, tuple(resolved))
+        all_rpm_files = tuple(dict.fromkeys((*initial_rpm_files, *rpm_files)))
         missing_dependencies = _preview_local_install_dependencies(
             bootstrap_dnf_base,
             manifest_env,
-            rpm_files,
+            all_rpm_files,
         )
         new_dependencies = [
             package for package in missing_dependencies if package not in seen
         ]
         if not new_dependencies:
-            return tuple(resolved)
+            return tuple(resolved), all_rpm_files
         resolved.extend(new_dependencies)
         seen.update(new_dependencies)
 
@@ -882,19 +1068,32 @@ def _create_package_image(
     image: str,
     package_dir: Path,
     rpm_files: tuple[str, ...],
+    files_dir: Path | None = None,
 ) -> None:
     image_root = build_dir / "root"
+    image_rpm_dir = image_root / "rpms"
+    image_files_dir = image_root / "files"
     shutil.rmtree(build_dir, ignore_errors=True)
-    image_root.mkdir(parents=True)
+    image_rpm_dir.mkdir(parents=True)
+    image_files_dir.mkdir(parents=True)
     for rpm_file in rpm_files:
         matches = list(package_dir.rglob(rpm_file))
         if not matches:
             raise ConfigError(f"downloaded RPM is missing from cache: {rpm_file}")
-        target = image_root / rpm_file
+        target = image_rpm_dir / rpm_file
         try:
             os.link(matches[0], target)
         except OSError:
             shutil.copy2(matches[0], target)
+
+    if files_dir is not None and files_dir.exists():
+        for source_path in files_dir.rglob("*"):
+            if source_path.is_dir():
+                continue
+            relative = source_path.relative_to(files_dir)
+            target = image_files_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target)
 
     containerfile = build_dir / "Containerfile"
     containerfile.write_text("FROM scratch\nCOPY root/ /\n", encoding="utf-8")
@@ -914,9 +1113,291 @@ def _create_package_image(
     )
 
 
+def _run_card_build(
+    *,
+    podman: str,
+    bootstrap: str,
+    build_dir: Path,
+    mock_dir: Path,
+    mock_dnf_dir: Path,
+    mock_root_cache_dir: Path,
+    card_name: str,
+    card_source: Path,
+    card_env: dict[str, str],
+    build_script: str,
+    package_dir: Path,
+) -> CardBuildOutput:
+    card_base_dir = _card_base_dir(card_source)
+    workspace_dir = build_dir / "workspace"
+    rpm_dir = build_dir / "rpms"
+    files_dir = build_dir / "files"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    workspace_dir.mkdir(parents=True)
+    rpm_dir.mkdir(parents=True)
+    files_dir.mkdir(parents=True)
+    mock_dir.mkdir(parents=True, exist_ok=True)
+    mock_dnf_dir.mkdir(parents=True, exist_ok=True)
+    mock_root_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    ignore_rules = _load_containerignore(card_base_dir)
+    _copy_build_context(card_base_dir, workspace_dir, ignore_rules)
+
+    command = [
+        podman,
+        "run",
+        "--rm",
+        "--interactive",
+        "--privileged",
+        "--volume",
+        f"{workspace_dir}:/workspace",
+        "--volume",
+        f"{rpm_dir}:/rpms",
+        "--volume",
+        f"{files_dir}:/files",
+        "--volume",
+        f"{mock_dir}:/workspace/build/MOCK",
+        "--volume",
+        f"{mock_dnf_dir}:/cache/dnf",
+        "--volume",
+        f"{mock_root_cache_dir}:/cache/mock",
+        "--workdir",
+        "/workspace",
+    ]
+    for key, value in sorted(card_env.items()):
+        command.extend(["--env", f"{key}={value}"])
+    command.extend(["--env", "PS4=+ "])
+    command.extend([bootstrap, "/bin/sh", "-ex", "-s"])
+    returncode, _output = _run_streamed_command(command, input_text=build_script + "\n")
+    if returncode != 0:
+        command_line = " ".join(shlex.quote(str(part)) for part in command)
+        raise ConfigError(f"card build failed with exit status {returncode}: {command_line}")
+
+    rpm_files = []
+    rpm_sources = sorted(rpm_dir.rglob("*.rpm"))
+    if not rpm_sources:
+        rpm_sources = sorted((workspace_dir / "build" / "RPMS").rglob("*.rpm"))
+    for rpm_path in rpm_sources:
+        if rpm_path.name.endswith(".src.rpm"):
+            continue
+        target = package_dir / rpm_path.name
+        try:
+            os.link(rpm_path, target)
+        except OSError:
+            shutil.copy2(rpm_path, target)
+        rpm_files.append(rpm_path.name)
+
+    log(f"Collected {len(rpm_files)} built RPMs for card: {card_name}")
+    file_count = sum(1 for path in files_dir.rglob("*") if path.is_file())
+    if file_count:
+        log(f"Collected {file_count} built files for card: {card_name}")
+    return CardBuildOutput(rpm_files=tuple(rpm_files), file_count=file_count)
+
+
 def _package_hash(packages: tuple[str, ...]) -> str:
     payload = "\n".join(sorted(packages)) + "\n"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:HASH_LENGTH]
+
+
+def _card_package_hash(
+    card_name: str,
+    card_packages: tuple[str, ...],
+    card_hashes: dict[str, str],
+    card_envs: dict[str, str],
+    card_sources: dict[str, Path],
+) -> str:
+    if card_name not in card_hashes:
+        return _package_hash(card_packages)
+    return _cache_name(
+        _expand_expression(
+            card_hashes[card_name],
+            card_envs[card_name],
+            _card_base_dir(card_sources[card_name]),
+        ),
+        f"{card_name} package hash",
+    )
+
+
+def _card_env(
+    manifest_env: dict[str, str], card_env: dict[str, str | int]
+) -> dict[str, str]:
+    values = dict(manifest_env)
+    for key, value in card_env.items():
+        values[key] = _expand_expression(str(value), values, None)
+    return values
+
+
+def _expand_expression(
+    value: str, variables: dict[str, str], base_dir: Path | None
+) -> str:
+    value = _substitute_variables(value, variables)
+
+    def replace_hash(match: re.Match[str]) -> str:
+        if base_dir is None:
+            raise ConfigError("@hash() requires a base directory")
+        paths = tuple(
+            item.strip()
+            for item in match.group(1).split(",")
+            if item.strip()
+        )
+        if not paths:
+            raise ConfigError("@hash() requires at least one path")
+        return _hash_paths(base_dir, paths)
+
+    return re.sub(r"@hash\(([^)]*)\)", replace_hash, value)
+
+
+def _hash_paths(base_dir: Path, paths: tuple[str, ...]) -> str:
+    digest = hashlib.sha256()
+    ignore_rules = _load_containerignore(base_dir)
+    files = []
+    for path_value in paths:
+        path = Path(path_value)
+        if path.is_absolute() or ".." in path.parts:
+            raise ConfigError(f"@hash path '{path_value}' must stay inside the card")
+        source = (base_dir / path).resolve()
+        try:
+            source.relative_to(base_dir.resolve())
+        except ValueError as exc:
+            raise ConfigError(f"@hash path '{path_value}' escapes the card") from exc
+        if not source.exists():
+            raise ConfigError(f"@hash path '{path_value}' does not exist")
+        if source.is_file():
+            relative = source.relative_to(base_dir).as_posix()
+            if not _ignored_by_containerignore(relative, False, ignore_rules):
+                files.append(source)
+            continue
+        for file_path in source.rglob("*"):
+            if not file_path.is_file():
+                continue
+            relative = file_path.relative_to(base_dir).as_posix()
+            if _ignored_by_containerignore(relative, False, ignore_rules):
+                continue
+            files.append(file_path)
+
+    for file_path in sorted(set(files), key=lambda item: item.relative_to(base_dir).as_posix()):
+        relative = file_path.relative_to(base_dir).as_posix()
+        try:
+            contents = file_path.read_bytes()
+        except FileNotFoundError:
+            continue
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(contents)
+        digest.update(b"\0")
+    return digest.hexdigest()[:HASH_LENGTH]
+
+
+def _copy_build_context(
+    source_dir: Path, destination_dir: Path, ignore_rules: tuple["_IgnoreRule", ...]
+) -> None:
+    destination_dir = destination_dir.resolve()
+    for source_path in source_dir.rglob("*"):
+        try:
+            source_path.resolve().relative_to(destination_dir)
+            continue
+        except ValueError:
+            pass
+        relative = source_path.relative_to(source_dir).as_posix()
+        is_dir = source_path.is_dir()
+        if _ignored_by_containerignore(relative, is_dir, ignore_rules):
+            if is_dir:
+                continue
+            continue
+        target_path = destination_dir / relative
+        if is_dir:
+            target_path.mkdir(parents=True, exist_ok=True)
+            continue
+        if source_path.is_file():
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target_path)
+
+
+@dataclass(frozen=True)
+class _IgnoreRule:
+    pattern: str
+    negated: bool
+    directory_only: bool
+    anchored: bool
+
+
+def _load_containerignore(base_dir: Path) -> tuple[_IgnoreRule, ...]:
+    path = base_dir / ".containerignore"
+    if not path.exists():
+        return tuple()
+    rules = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        negated = stripped.startswith("!")
+        if negated:
+            stripped = stripped[1:]
+        anchored = stripped.startswith("/")
+        stripped = stripped.lstrip("/")
+        directory_only = stripped.endswith("/")
+        stripped = stripped.rstrip("/")
+        if not stripped:
+            continue
+        rules.append(
+            _IgnoreRule(
+                pattern=stripped,
+                negated=negated,
+                directory_only=directory_only,
+                anchored=anchored,
+            )
+        )
+    return tuple(rules)
+
+
+def _ignored_by_containerignore(
+    relative_path: str, is_dir: bool, rules: tuple[_IgnoreRule, ...]
+) -> bool:
+    if (
+        relative_path == ".git"
+        or relative_path.startswith(".git/")
+        or relative_path.endswith("/.git")
+        or "/.git/" in relative_path
+    ):
+        return True
+    ignored = False
+    for rule in rules:
+        if _ignore_rule_matches(rule, relative_path, is_dir):
+            ignored = not rule.negated
+    return ignored
+
+
+def _ignore_rule_matches(rule: _IgnoreRule, relative_path: str, is_dir: bool) -> bool:
+    path = relative_path.rstrip("/")
+    pattern = rule.pattern
+    if rule.directory_only and is_dir:
+        return _ignore_path_matches(rule, path, pattern)
+    if rule.directory_only:
+        return _ignore_path_matches(rule, path, pattern) or any(
+            _ignore_path_matches(rule, parent, pattern)
+            for parent in _parent_paths(path)
+        )
+    return _ignore_path_matches(rule, path, pattern)
+
+
+def _ignore_path_matches(rule: _IgnoreRule, path: str, pattern: str) -> bool:
+    if rule.anchored or "/" in pattern:
+        return (
+            fnmatch.fnmatch(path, pattern)
+            or path == pattern
+            or path.startswith(f"{pattern}/")
+        )
+    return any(fnmatch.fnmatch(part, pattern) for part in path.split("/"))
+
+
+def _parent_paths(path: str) -> tuple[str, ...]:
+    parts = path.split("/")[:-1]
+    return tuple("/".join(parts[:index]) for index in range(1, len(parts) + 1))
+
+
+def _card_base_dir(source: Path) -> Path:
+    if source.name in ("card.yml", "card.yaml"):
+        return source.parent.resolve()
+    return source.parent.resolve()
 
 
 def _identifier(value: str) -> str:
@@ -933,28 +1414,38 @@ def _starts_with_set_command(script: str) -> bool:
 
 
 def _run_container_build(command: list[str], containerfile: Path) -> None:
+    returncode, output = _run_streamed_command(command)
+    if returncode == 0:
+        return
+
+    location = _containerfile_error_location(containerfile, output)
+    command_line = " ".join(shlex.quote(str(part)) for part in command)
+    message = f"command failed with exit status {returncode}: {command_line}"
+    if location is not None:
+        message = f"{message}\n\nThe error occurred in:\n{location}"
+    raise ConfigError(message)
+
+
+def _run_streamed_command(command: list[str], input_text: str | None = None) -> tuple[int, str]:
     process = subprocess.Popen(
         command,
+        stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
+    if input_text is not None:
+        assert process.stdin is not None
+        process.stdin.write(input_text)
+        process.stdin.close()
+
     output_lines = []
     assert process.stdout is not None
     for line in process.stdout:
         output_lines.append(line)
         stream(line)
 
-    returncode = process.wait()
-    if returncode == 0:
-        return
-
-    location = _containerfile_error_location(containerfile, "".join(output_lines))
-    command_line = " ".join(shlex.quote(str(part)) for part in command)
-    message = f"command failed with exit status {returncode}: {command_line}"
-    if location is not None:
-        message = f"{message}\n\nThe error occurred in:\n{location}"
-    raise ConfigError(message)
+    return process.wait(), "".join(output_lines)
 
 
 def _containerfile_error_location(containerfile: Path, output: str) -> str | None:

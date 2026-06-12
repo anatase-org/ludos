@@ -74,7 +74,7 @@ def error(message: object = "") -> None:
 
 
 def stream(message: str) -> None:
-    for line in message.splitlines():
+    for line in message.splitlines() or [""]:
         logger.info("| %s", line)
 
 
