@@ -1402,9 +1402,9 @@ def _run_streamed_command(
             stream(line)
 
         return process.wait(), "".join(output_lines)
-    except KeyboardInterrupt:
-        _terminate_process_group(process)
-        raise
+    finally:
+        if process.poll() is None:
+            _terminate_process_group(process)
 
 
 def _workspace_path_rewriter(
