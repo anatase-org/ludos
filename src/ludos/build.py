@@ -1388,9 +1388,12 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
     shutil.rmtree(source_dir, ignore_errors=True)
     source_dir.parent.mkdir(parents=True, exist_ok=True)
     log(f"Fetching git file source: {source}")
-    subprocess.run([git, "init", str(source_dir)], check=True)
-    subprocess.run([git, "-C", str(source_dir), "remote", "add", "origin", repo_url], check=True)
-    subprocess.run(
+    _run_logged_command([git, "init", str(source_dir)], "git file source init")
+    _run_logged_command(
+        [git, "-C", str(source_dir), "remote", "add", "origin", repo_url],
+        "git file source remote setup",
+    )
+    _run_logged_command(
         [
             git,
             "-C",
@@ -1401,9 +1404,9 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
             "origin",
             _git_fetch_ref(ref),
         ],
-        check=True,
+        "git file source fetch",
     )
-    subprocess.run(
+    _run_logged_command(
         [
             git,
             "-C",
@@ -1414,7 +1417,7 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
             "--detach",
             "FETCH_HEAD",
         ],
-        check=True,
+        "git file source checkout",
     )
     source_path = (source_dir / repo_path).resolve()
     try:
@@ -1427,6 +1430,14 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
         shutil.copy2(source_path, target)
     else:
         raise ConfigError(f"git files source '{source}' does not contain a file or directory")
+
+
+def _run_logged_command(command: list[str], description: str) -> None:
+    returncode, _output = _run_streamed_command(command)
+    if returncode == 0:
+        return
+    command_line = " ".join(shlex.quote(str(part)) for part in command)
+    raise ConfigError(f"{description} failed with exit status {returncode}: {command_line}")
 
 
 def _parse_git_file_source(source: str) -> tuple[str, tuple[str, str], Path]:
