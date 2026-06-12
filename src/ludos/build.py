@@ -170,6 +170,7 @@ def build_manifest(
     requested_packages = []
     card_requests = []
     card_names = []
+    card_file_sets = []
     postprocess_blocks = []
     for _priority, _insertion_order, card_name, card in card_entries:
         card_names.append(card_name)
@@ -178,6 +179,7 @@ def build_manifest(
             card_packages.append(package)
             requested_packages.append(package)
         card_requests.append(tuple(card_packages))
+        card_file_sets.append((card_name, card.source, card.files))
         if card.postprocess.strip():
             postprocess_blocks.append((card_name, card.postprocess.rstrip()))
     requested_packages = tuple(requested_packages)
@@ -382,6 +384,35 @@ def build_manifest(
         f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
         for key, value in validation.manifest.labels.items()
     )
+    card_files_dir = build_dir / "card-files"
+    shutil.rmtree(card_files_dir, ignore_errors=True)
+    card_file_cards = set()
+    for card_name, card_source, card_files in card_file_sets:
+        if not card_files:
+            continue
+        if card_source is None:
+            raise ConfigError(f"card '{card_name}' has files but no source path")
+        card_source_dir = card_source.parent.resolve()
+        card_context_dir = card_files_dir / _identifier(card_name)
+        for file_ref in card_files:
+            file_path = Path(file_ref)
+            if file_path.is_absolute() or ".." in file_path.parts:
+                raise ConfigError(
+                    f"{card_source}: files entry '{file_ref}' must be relative to the card"
+                )
+            source_path = (card_source_dir / file_path).resolve()
+            try:
+                source_path.relative_to(card_source_dir)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"{card_source}: files entry '{file_ref}' escapes the card directory"
+                ) from exc
+            if not source_path.is_file():
+                raise ConfigError(f"{card_source}: files entry '{file_ref}' is missing")
+            target_path = card_context_dir / file_path
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target_path)
+        card_file_cards.add(card_name)
     package_stage_lines = "".join(
         f"FROM {package_image} AS packages_{_identifier(block_name)}\n"
         for (block_name, _block_packages), package_image in zip(
@@ -421,14 +452,19 @@ LUDOS_INSTALL_{block_name}
     install_step_lines = "\n".join(install_steps)
     postprocess_steps = []
     for block_name, postprocess in postprocess_blocks:
+        file_step = ""
+        if block_name in card_file_cards:
+            file_step = f"COPY card-files/{_identifier(block_name)}/ /files/\n"
         postprocess_steps.append(
             f"""#
 # Postprocess: {block_name}
 #
 
+{file_step}\
 RUN /bin/sh <<'LUDOS_POSTPROCESS_{block_name}'
 set -e
 {postprocess}
+rm -rf /files
 LUDOS_POSTPROCESS_{block_name}
 """
         )
