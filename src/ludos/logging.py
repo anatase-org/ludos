@@ -32,14 +32,21 @@ class LudosHandler(logging.Handler):
         timestamp = _datetime.datetime.fromtimestamp(record.created).strftime("%H:%M")
         time_prefix = f"[{timestamp}]" if timestamp != self._last_timestamp else " " * 7
         self._last_timestamp = timestamp
-        level = f" {record.levelname}" if record.levelno >= logging.WARNING else ""
-        prefix = f"{time_prefix}{level} "
         target = error_console if record.levelno >= logging.WARNING else console
         message = record.getMessage()
         lines = message.splitlines() or [""]
         for index, line in enumerate(lines):
-            line_prefix = prefix if index == 0 else " " * len(prefix)
-            target.print(Text(line_prefix, no_wrap=True), line, sep="")
+            if index == 0:
+                line_prefix = Text(time_prefix, no_wrap=True)
+                if record.levelno >= logging.ERROR:
+                    line_prefix.append(f" {record.levelname}:", style="red")
+                elif record.levelno >= logging.WARNING:
+                    line_prefix.append(f" {record.levelname}:", style="yellow")
+                line_prefix.append(" ")
+            else:
+                width = 8 + (len(record.levelname) + 2 if record.levelno >= logging.WARNING else 0)
+                line_prefix = Text(" " * width, no_wrap=True)
+            target.print(line_prefix, line, sep="")
         target.file.flush()
 
 
