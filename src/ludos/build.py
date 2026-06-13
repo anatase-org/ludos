@@ -113,19 +113,21 @@ def build_manifest(
     else:
         cache_dir = cache_dir.expanduser().resolve()
     log(f"Preparing cache directories under {cache_dir}")
-    package_dir = cache_dir / "packages" / distro
-    dnf_dir = cache_dir / "dnf" / distro
-    build_dir = cache_dir / "build" / f"{image}-{distro}"
+    distro_cache_dir = cache_dir / distro
+    package_dir = distro_cache_dir / "packages"
+    dnf_dir = distro_cache_dir / "dnf"
+    build_dir = distro_cache_dir / "build" / image
     repo_dir = dnf_dir / "repos"
     dnf_cache_dir = dnf_dir / "cache"
     dnf_persist_dir = dnf_dir / "persist"
     dnf_log_dir = dnf_dir / "log"
     oci_dir = build_dir / "oci"
-    mock_cache_dir = cache_dir / "mock" / distro
+    mock_cache_dir = distro_cache_dir / "mock"
     mock_dnf_cache_dir = mock_cache_dir / "dnf"
     mock_root_cache_dir = mock_cache_dir / "root"
-    build_artifact_cache_dir = cache_dir / "build-artifacts" / distro
+    build_artifact_cache_dir = distro_cache_dir / "build-artifacts"
 
+    distro_cache_dir.mkdir(parents=True, exist_ok=True)
     package_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
     mock_cache_dir.mkdir(parents=True, exist_ok=True)
