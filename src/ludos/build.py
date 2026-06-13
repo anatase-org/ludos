@@ -496,6 +496,10 @@ def build_manifest(
         if cache_only:
             raise ConfigError(f"builder image is not cached: {builder_image}")
 
+        builder_rpm_files = _download_block_packages(
+            orchestrator_dnf_base,
+            builder_packages,
+        )
         log(f"Creating builder image: {builder_image}")
         _create_builder_image(
             podman=podman,
@@ -508,8 +512,9 @@ def build_manifest(
             dnf_log_dir=dnf_log_dir,
             build_dir=oci_dir / "builders" / f"{distro}-{builder_hash}",
             image=builder_image,
+            package_dir=package_dir,
+            rpm_files=builder_rpm_files,
             releasever=releasever,
-            build_packages=builder_packages,
         )
 
     package_images = []
@@ -1005,12 +1010,17 @@ def _create_builder_image(
     dnf_log_dir: Path,
     build_dir: Path,
     image: str,
+    package_dir: Path,
+    rpm_files: tuple[str, ...],
     releasever: str,
-    build_packages: tuple[str, ...],
 ) -> None:
     _remove_tree(build_dir, podman=podman)
     image_root = build_dir / "root"
+    rpm_dir = build_dir / "rpms"
     image_root.mkdir(parents=True)
+    rpm_dir.mkdir(parents=True)
+    _stage_rpm_files(package_dir, rpm_files, rpm_dir)
+    rpm_paths = tuple(f"/rpms/{rpm_file}" for rpm_file in rpm_files)
     _run_logged_command(
         [
             podman,
@@ -1028,6 +1038,8 @@ def _create_builder_image(
             f"{dnf_log_dir}:/ludos/dnf/log",
             "--volume",
             f"{image_root}:/target",
+            "--volume",
+            f"{rpm_dir}:/rpms:ro",
             "--workdir",
             "/workspace/repos",
             orchestrator,
@@ -1040,11 +1052,12 @@ def _create_builder_image(
             "--setopt=persistdir=/ludos/dnf/persist",
             "--setopt=logdir=/ludos/dnf/log",
             "--setopt=install_weak_deps=False",
+            "--cacheonly",
             "--disable-repo=*",
             "--enable-repo=*",
             "install",
             "--allowerasing",
-            *build_packages,
+            *rpm_paths,
         ],
         "builder root bootstrap",
     )
@@ -1266,6 +1279,20 @@ def _download_block_packages(
         "package download",
     )
     return rpm_files
+
+
+def _stage_rpm_files(
+    package_dir: Path, rpm_files: tuple[str, ...], destination_dir: Path
+) -> None:
+    for rpm_file in rpm_files:
+        matches = list(package_dir.rglob(rpm_file))
+        if not matches:
+            raise ConfigError(f"downloaded RPM is missing from cache: {rpm_file}")
+        target = destination_dir / rpm_file
+        try:
+            os.link(matches[0], target)
+        except OSError:
+            shutil.copy2(matches[0], target)
 
 
 def _create_package_image(
