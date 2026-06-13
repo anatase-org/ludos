@@ -64,6 +64,7 @@ class ResolvedRepo:
 class Manifest:
     version: int
     env: dict[str, str | int]
+    releasever: str
     distro: str
     orchestrator: str
     bootstrap: str
@@ -79,6 +80,7 @@ class Manifest:
         return cls(
             version=_required_version(data, path),
             env=_env_dict(data, path),
+            releasever=_required_string(data, "releasever", path),
             distro=_required_string(data, "distro", path),
             orchestrator=_required_string(data, "orchestrator", path),
             bootstrap=_required_string(data, "bootstrap", path),
@@ -127,8 +129,10 @@ def validate_manifest(
 
     repos = []
     missing_repos = []
+    manifest_env = dict(manifest.env)
+    manifest_env.setdefault("releasever", manifest.releasever)
     for repo_ref in manifest.repos:
-        _validate_repo_vars(repo_ref, manifest.env)
+        _validate_repo_vars(repo_ref, manifest_env)
         repo_path = _resolve_repo_path(repo_ref.repo, root_dir)
         if not repo_path.exists():
             missing_repos.append(repo_ref.repo)

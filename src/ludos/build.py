@@ -88,6 +88,11 @@ def build_manifest(
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
     local_prefix = _local_prefix(local_prefix)
     manifest_env.update(local_values)
+    releasever = _cache_name(
+        _substitute_variables(validation.manifest.releasever, manifest_env),
+        "releasever",
+    )
+    manifest_env["releasever"] = releasever
     distro = _cache_name(
         _substitute_variables(validation.manifest.distro, manifest_env),
         "distro",
@@ -140,7 +145,6 @@ def build_manifest(
     if buildah:
         log(f"Using Buildah: {buildah}")
 
-    releasever = _cache_name(manifest_env["releasever"], "releasever")
     orchestrator_image = _local_image(
         local_prefix,
         "orchestrator",
@@ -183,7 +187,11 @@ def build_manifest(
         repo_lines.append("metadata_expire=never")
         rendered_repo = "\n".join(repo_lines) + "\n"
         repo_id = _repo_id(rendered_repo, repo.source)
-        repo_image = _local_image(local_prefix, "repos", f"{repo.ref.repo}-{cache_version}")
+        repo_image = _local_image(
+            local_prefix,
+            "repos",
+            f"{distro}-{repo.ref.repo}-{cache_version}",
+        )
         repo_images.append(repo_image)
         if _image_exists(podman, repo_image):
             log(f"Reusing repository metadata image: {repo_image}")
@@ -207,7 +215,7 @@ def build_manifest(
             podman=podman,
             orchestrator=orchestrator,
             root_dir=root_dir,
-            build_dir=oci_dir / "repos" / f"{repo.ref.repo}-{cache_version}",
+            build_dir=oci_dir / "repos" / f"{distro}-{repo.ref.repo}-{cache_version}",
             image=repo_image,
             repo_name=repo.source.name,
             repo_id=repo_id,
@@ -339,7 +347,7 @@ def build_manifest(
     log("Resolving package transaction for bootstrap")
     bootstrap_resolved_packages = _resolve_packages(
         orchestrator_dnf_base,
-        manifest_env["releasever"],
+        releasever,
         tuple(bootstrap_card.packages),
     )
     if not bootstrap_resolved_packages:
@@ -359,7 +367,7 @@ def build_manifest(
         log(f"Resolving package transaction for card: {card_name}")
         card_resolved_package_list = _resolve_packages(
             orchestrator_dnf_base,
-            manifest_env["releasever"],
+            releasever,
             card_packages,
         )
         if not card_resolved_package_list:
@@ -375,7 +383,7 @@ def build_manifest(
         contextual_requests.extend(card_packages)
         contextual_resolved = _resolve_packages(
             orchestrator_dnf_base,
-            manifest_env["releasever"],
+            releasever,
             tuple(contextual_requests),
         )
         contextual_additions = tuple(
@@ -465,7 +473,7 @@ def build_manifest(
         builder_image = _local_image(
             local_prefix,
             "builders",
-            f"{manifest_env['releasever']}-{builder_hash}-{cache_version}",
+            f"{distro}-{builder_hash}-{cache_version}",
         )
         builder_images[card_name] = builder_image
         if resolve_only:
@@ -485,9 +493,9 @@ def build_manifest(
             dnf_cache_dir=dnf_cache_dir,
             dnf_persist_dir=dnf_persist_dir,
             dnf_log_dir=dnf_log_dir,
-            build_dir=oci_dir / "builders" / f"{manifest_env['releasever']}-{builder_hash}-{cache_version}",
+            build_dir=oci_dir / "builders" / f"{distro}-{builder_hash}-{cache_version}",
             image=builder_image,
-            releasever=manifest_env["releasever"],
+            releasever=releasever,
             build_deps=build_deps,
         )
 
@@ -503,7 +511,7 @@ def build_manifest(
         package_image = _local_image(
             local_prefix,
             "cards",
-            f"{block_name}-{block_hash}",
+            f"{distro}-{block_name}-{block_hash}",
         )
         if resolve_only:
             package_images.append(package_image)
@@ -521,7 +529,7 @@ def build_manifest(
             log(f"Creating card package image: {package_image}")
             _create_package_image(
                 buildah=_require_buildah(buildah),
-                build_dir=oci_dir / "cards" / f"{block_name}-{block_hash}",
+                build_dir=oci_dir / "cards" / f"{distro}-{block_name}-{block_hash}",
                 image=package_image,
                 package_dir=package_dir,
                 rpm_files=repo_rpm_files,
@@ -542,7 +550,7 @@ def build_manifest(
         build_image = _local_image(
             local_prefix,
             "builds",
-            f"{block_name}-{build_hash}",
+            f"{distro}-{block_name}-{build_hash}",
         )
         if resolve_only:
             build_images.append(build_image)
@@ -577,7 +585,7 @@ def build_manifest(
         log(f"Creating build output image: {build_image}")
         _create_build_output_image(
             buildah=_require_buildah(buildah),
-            build_dir=oci_dir / "builds" / f"{block_name}-{build_hash}",
+            build_dir=oci_dir / "builds" / f"{distro}-{block_name}-{build_hash}",
             image=build_image,
             rpm_dir=build_output.rpm_dir,
             files_dir=build_output.files_dir,
@@ -721,7 +729,7 @@ done
 [ -n "$rpm_args" ] || exit 0
 dnf5 -y \\
     --installroot=/target \\
-    --releasever={manifest_env["releasever"]} \\
+    --releasever={releasever} \\
     --setopt=reposdir=/ludos/dnf/repos \\
     --setopt=cachedir=/ludos/dnf/cache \\
     --setopt=persistdir=/ludos/dnf/persist \\
@@ -769,7 +777,7 @@ for rpm in {package_globs}; do
 done
 [ -n "$rpm_args" ] || exit 0
 dnf5 -y \\
-    --releasever={manifest_env["releasever"]} \\
+    --releasever={releasever} \\
     --setopt=reposdir=/ludos/dnf/repos \\
     --setopt=cachedir=/ludos/dnf/cache \\
     --setopt=persistdir=/ludos/dnf/persist \\
