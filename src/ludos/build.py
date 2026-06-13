@@ -556,7 +556,7 @@ def build_manifest(
         if cache_only:
             raise ConfigError(f"build output image is not cached: {build_image}")
 
-        log(f"Running build for card: {block_name}")
+        log(f"Running build for card: {block_name} (:{_image_tag(build_image)})")
         build_output = _run_card_build(
             podman=podman,
             orchestrator=builder_images[block_name],
@@ -935,6 +935,10 @@ def _local_prefix(value: str) -> str:
 
 def _local_image(local_prefix: str, repository: str, tag: str) -> str:
     return f"localhost/{local_prefix}{repository}:{tag}"
+
+
+def _image_tag(image: str) -> str:
+    return image.rsplit(":", 1)[-1]
 
 
 def _image_exists(podman: str, image: str) -> bool:
