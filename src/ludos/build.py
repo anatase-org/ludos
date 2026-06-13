@@ -606,18 +606,22 @@ def build_manifest(
         card_context_dir = card_files_dir / _identifier(card_name)
         staged_file_count = 0
         git_cache_dir = build_dir / "file-sources" / _identifier(card_name)
-        shutil.rmtree(git_cache_dir, ignore_errors=True)
         for file_ref in file_refs:
-            target_path = card_context_dir / _validate_relative_file_path(
+            target_relpath = _validate_relative_file_path(
                 file_ref.target,
                 card_source,
                 "files destination",
             )
+            target_path = card_context_dir / target_relpath
             target_path.parent.mkdir(parents=True, exist_ok=True)
             if _is_http_source(file_ref.source):
                 _download_file_source(file_ref.source, target_path)
             elif _is_git_source(file_ref.source):
-                _copy_git_file_source(file_ref.source, target_path, git_cache_dir)
+                _copy_git_file_source(
+                    file_ref.source,
+                    target_path,
+                    git_cache_dir / target_relpath,
+                )
             else:
                 source_relpath = _validate_relative_file_path(
                     file_ref.source,
@@ -1499,15 +1503,22 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
         raise ConfigError("git must be installed to use git files sources")
 
     repo_url, ref, repo_path = _parse_git_file_source(source)
-    source_dir = cache_dir / hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
-    shutil.rmtree(source_dir, ignore_errors=True)
+    source_dir = cache_dir
     source_dir.parent.mkdir(parents=True, exist_ok=True)
-    log(f"Fetching git file source: {source}")
-    _run_logged_command([git, "init", str(source_dir)], "git file source init")
-    _run_logged_command(
-        [git, "-C", str(source_dir), "remote", "add", "origin", repo_url],
-        "git file source remote setup",
-    )
+    if not _is_git_repository(git, source_dir):
+        shutil.rmtree(source_dir, ignore_errors=True)
+        log(f"Initializing git file source: {source}")
+        _run_logged_command([git, "init", str(source_dir)], "git file source init")
+        _run_logged_command(
+            [git, "-C", str(source_dir), "remote", "add", "origin", repo_url],
+            "git file source remote setup",
+        )
+    else:
+        log(f"Updating git file source: {source}")
+        _run_logged_command(
+            [git, "-C", str(source_dir), "remote", "set-url", "origin", repo_url],
+            "git file source remote update",
+        )
     _run_logged_command(
         [
             git,
@@ -1516,6 +1527,7 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
             "fetch",
             "--depth=1",
             "--filter=blob:none",
+            "--prune",
             "origin",
             _git_fetch_ref(ref),
         ],
@@ -1544,6 +1556,20 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
         ],
         "git file source checkout",
     )
+
+
+def _is_git_repository(git: str, path: Path) -> bool:
+    if not (path / ".git").is_dir():
+        return False
+    result = subprocess.run(
+        [git, "-C", str(path), "rev-parse", "--show-toplevel"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return False
+    return Path(result.stdout.strip()).resolve() == path.resolve()
 
 
 def _run_logged_command(command: list[str], description: str) -> None:
