@@ -1521,30 +1521,29 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
         ],
         "git file source fetch",
     )
+    if repo_path != Path("."):
+        raise ConfigError(f"git files source '{source}' does not support subpaths yet")
+    if target.exists():
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    target.mkdir(parents=True)
     _run_logged_command(
         [
             git,
             "-C",
             str(source_dir),
-            "-c",
-            "advice.detachedHead=false",
+            "--work-tree",
+            str(target),
             "checkout",
-            "--detach",
+            "--force",
             "FETCH_HEAD",
+            "--",
+            ".",
         ],
         "git file source checkout",
     )
-    source_path = (source_dir / repo_path).resolve()
-    try:
-        source_path.relative_to(source_dir.resolve())
-    except ValueError as exc:
-        raise ConfigError(f"git files source '{source}' escapes the repository") from exc
-    if source_path.is_dir():
-        shutil.copytree(source_path, target, dirs_exist_ok=True)
-    elif source_path.is_file():
-        shutil.copy2(source_path, target)
-    else:
-        raise ConfigError(f"git files source '{source}' does not contain a file or directory")
 
 
 def _run_logged_command(command: list[str], description: str) -> None:
