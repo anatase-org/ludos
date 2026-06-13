@@ -1048,7 +1048,7 @@ def _create_repo_image(
     (build_dir / "log").mkdir()
     (image_root / "repos" / repo_name).write_text(rendered_repo, encoding="utf-8")
 
-    subprocess.run(
+    _run_logged_command(
         [
             podman,
             "run",
@@ -1076,12 +1076,12 @@ def _create_repo_image(
             "makecache",
             "--refresh",
         ],
-        check=True,
+        "repository metadata refresh",
     )
 
     containerfile = build_dir / "Containerfile"
     containerfile.write_text("FROM scratch\nCOPY root/ /\n", encoding="utf-8")
-    subprocess.run(
+    _run_logged_command(
         [
             podman,
             "build",
@@ -1093,7 +1093,7 @@ def _create_repo_image(
             str(containerfile),
             str(build_dir),
         ],
-        check=True,
+        "repository metadata image build",
     )
 
 
