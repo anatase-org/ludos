@@ -43,6 +43,7 @@ class LudosHandler(logging.Handler):
         self._stream_lines: list[str] = []
         self._stream_created: float | None = None
         self._stream_rendered_lines = 0
+        self._stream_rendered_snapshot: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
         if getattr(record, "ludos_stream", False):
@@ -109,17 +110,53 @@ class LudosHandler(logging.Handler):
         return [STREAM_TRUNCATED_LINE, *self._stream_lines[-(limit - 1) :]]
 
     def _render_stream(self) -> None:
-        self._clear_stream_display()
         lines = self._stream_snapshot(self._stream_display_limit())
-        for line in lines:
-            console.print(
-                " " * INFO_MESSAGE_INDENT + line,
-                markup=False,
-                no_wrap=True,
-                overflow="crop",
-            )
+        if lines == self._stream_rendered_snapshot:
+            return
+
+        old_lines = self._stream_rendered_snapshot
+        shared_lines = self._shared_prefix_length(old_lines, lines)
+        output: list[str] = []
+
+        if old_lines:
+            output.append("\033[F" * (len(old_lines) - shared_lines))
+
+        rendered_suffix = self._render_stream_lines(lines[shared_lines:])
+        if rendered_suffix:
+            for rendered_line in rendered_suffix.splitlines(keepends=True):
+                output.append("\033[2K")
+                output.append(rendered_line)
+
+        stale_lines = len(old_lines) - len(lines)
+        if stale_lines > 0:
+            output.append("\033[2K\n" * stale_lines)
+            output.append("\033[F" * stale_lines)
+
+        console.file.write("".join(output))
+        self._stream_rendered_snapshot = lines
         self._stream_rendered_lines = len(lines)
         console.file.flush()
+
+    def _render_stream_lines(self, lines: list[str]) -> str:
+        if not lines:
+            return ""
+        with console.capture() as capture:
+            for line in lines:
+                console.print(
+                    " " * INFO_MESSAGE_INDENT + line,
+                    markup=False,
+                    no_wrap=True,
+                    overflow="crop",
+                )
+        return capture.get()
+
+    def _shared_prefix_length(self, old_lines: list[str], new_lines: list[str]) -> int:
+        shared_lines = 0
+        for old_line, new_line in zip(old_lines, new_lines):
+            if old_line != new_line:
+                break
+            shared_lines += 1
+        return shared_lines
 
     def _clear_stream_display(self) -> None:
         if self._stream_rendered_lines <= 0:
@@ -127,6 +164,7 @@ class LudosHandler(logging.Handler):
         console.file.write("\033[F\033[2K" * self._stream_rendered_lines)
         console.file.flush()
         self._stream_rendered_lines = 0
+        self._stream_rendered_snapshot = []
 
     def _bake_stream_history(self) -> None:
         if not self._stream_lines:
