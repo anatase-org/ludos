@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from .logging import log, stream
-from .model import ConfigError, validate_manifest
+from .model import ConfigError, SpecBuild, validate_manifest
 
 
 HASH_LENGTH = 8
@@ -60,6 +60,15 @@ class FileRef:
     target: str
 
 
+@dataclass(frozen=True)
+class StagedSpec:
+    spec: SpecBuild
+    spec_path: Path
+    source_dir: Path
+    packages: tuple[str, ...]
+    targets: tuple[str, ...]
+
+
 def build_manifest(
     manifest_path: Path,
     cards_dir: Path | None = None,
@@ -93,6 +102,11 @@ def build_manifest(
         "releasever",
     )
     manifest_env["releasever"] = releasever
+    arch = _cache_name(
+        _substitute_variables(str(manifest_env.get("arch", "")), manifest_env),
+        "arch",
+    )
+    manifest_env["arch"] = arch
     distro = _cache_name(
         _substitute_variables(validation.manifest.distro, manifest_env),
         "distro",
@@ -251,10 +265,13 @@ def build_manifest(
     card_names = []
     card_file_sets = []
     card_builds = {}
+    card_specs = {}
     card_build_deps = {}
     card_hashes = {}
+    card_spec_hashes = {}
     card_envs = {}
     card_sources = {}
+    card_prepare_scripts = {}
     postprocess_blocks = []
     bootstrap_card = validation.bootstrap
     if bootstrap_card is None:
@@ -265,6 +282,7 @@ def build_manifest(
         raise ConfigError(f"{bootstrap_card.source}: bootstrap card must define packages")
     if (
         bootstrap_card.files
+        or bootstrap_card.specs
         or bootstrap_card.build.strip()
         or bootstrap_card.postprocess.strip()
     ):
@@ -287,8 +305,10 @@ def build_manifest(
     for _priority, _insertion_order, card_name, card in card_entries:
         if card.source is None:
             raise ConfigError(f"card '{card_name}' has no source path")
+        if card.build.strip() and card.specs:
+            raise ConfigError(f"{card.source}: card cannot define both build and specs")
         card_env = _card_env(inherited_env, card.env)
-        if card.prepare.strip():
+        if card.prepare.strip() and not card.specs:
             log(f"Preparing card: {card_name}")
             prepared_env = _run_prepare_block(
                 card_source=card.source,
@@ -300,6 +320,8 @@ def build_manifest(
         card_names.append(card_name)
         card_envs[card_name] = card_env
         card_sources[card_name] = card.source
+        if card.prepare.strip():
+            card_prepare_scripts[card_name] = card.prepare.rstrip()
         card_packages = []
         for package in card.packages:
             card_packages.append(package)
@@ -310,19 +332,29 @@ def build_manifest(
         if card.build.strip():
             card_builds[card_name] = card.build.rstrip()
             card_build_deps[card_name] = card.build_deps
+        if card.specs:
+            card_specs[card_name] = card.specs
+            card_build_deps[card_name] = card.build_deps
+            card_spec_hashes[card_name] = _card_specs_hash(
+                card.source,
+                card.specs,
+                card_env,
+                card.prepare.rstrip(),
+            )
         if card.hash.strip():
             card_hashes[card_name] = card.hash.strip()
         if card.postprocess.strip():
             postprocess_blocks.append((card_name, card.postprocess.rstrip()))
+    build_card_names = set(card_builds) | set(card_specs)
     requested_packages = tuple(requested_packages)
-    if not requested_packages and not card_builds:
+    if not requested_packages and not build_card_names:
         raise ConfigError(f"{manifest_path}: no packages requested by cards")
     log(
         f"Collected {len(requested_packages)} requested packages from "
         f"bootstrap and {len(card_entries)} cards"
     )
-    if card_builds:
-        log(f"Collected {len(card_builds)} build cards")
+    if build_card_names:
+        log(f"Collected {len(build_card_names)} build cards")
 
     orchestrator_dnf_base = [
         podman,
@@ -359,7 +391,7 @@ def build_manifest(
     card_resolutions = []
     for card_name, card_packages in zip(card_names, card_requests):
         if not card_packages:
-            if card_name in card_builds:
+            if card_name in build_card_names:
                 log(f"Package resolution not needed for build-only card: {card_name}")
             else:
                 log(f"Skipping package resolution for package-less card: {card_name}")
@@ -447,7 +479,7 @@ def build_manifest(
             if full_package != package and full_package in selected_package_set:
                 continue
             card_packages.append(package)
-        if not card_packages and card_name not in card_builds:
+        if not card_packages and card_name not in build_card_names:
             continue
         card_packages = tuple(card_packages)
         package_blocks.append((card_name, card_packages))
@@ -469,18 +501,40 @@ def build_manifest(
     )
 
     builder_images = {}
-    for card_name in card_builds:
+    for card_name in card_names:
+        if card_name not in build_card_names:
+            continue
         build_deps = _build_deps(card_build_deps.get(card_name, tuple()))
         if not build_deps:
             raise ConfigError(f"build card '{card_name}' must define build-deps")
         log(f"Resolving builder packages for card: {card_name}")
-        builder_packages = _resolve_packages(
+        explicit_builder_packages = _resolve_packages(
             orchestrator_dnf_base,
             releasever,
             build_deps,
         )
-        if not builder_packages:
+        if not explicit_builder_packages:
             raise ConfigError(f"dnf did not resolve build-deps for {card_name}")
+        spec_builder_packages = tuple()
+        if card_name in card_specs:
+            spec_scan_dir = build_dir / "spec-scan" / _identifier(card_name)
+            staged_specs = _stage_card_specs(
+                card_source=card_sources[card_name],
+                specs=card_specs[card_name],
+                card_env=card_envs[card_name],
+                workspace_dir=spec_scan_dir,
+                arch=arch,
+            )
+            log(f"Resolving spec BuildRequires for card: {card_name}")
+            spec_builder_packages = _resolve_spec_build_requires(
+                orchestrator_dnf_base,
+                releasever,
+                spec_scan_dir,
+                tuple(staged.spec_path for staged in staged_specs),
+            )
+        builder_packages = _unique_packages(
+            (*explicit_builder_packages, *spec_builder_packages)
+        )
         builder_hash = _nevra_hash(builder_packages)
         builder_image = _local_image(
             local_prefix,
@@ -499,6 +553,9 @@ def build_manifest(
         builder_rpm_files = _download_block_packages(
             orchestrator_dnf_base,
             builder_packages,
+            package_dir=package_dir,
+            resolve_dependencies=True,
+            releasever=releasever,
         )
         log(f"Creating builder image: {builder_image}")
         _create_builder_image(
@@ -556,15 +613,18 @@ def build_manifest(
         package_images_by_block[block_name] = package_image
 
     for block_name, block_packages in package_blocks:
-        if block_name not in card_builds:
+        if block_name not in build_card_names:
             continue
-        build_hash = _card_build_hash(
-            block_name,
-            block_packages,
-            card_hashes,
-            card_envs,
-            card_sources,
-        )
+        if block_name in card_spec_hashes:
+            build_hash = card_spec_hashes[block_name]
+        else:
+            build_hash = _card_build_hash(
+                block_name,
+                block_packages,
+                card_hashes,
+                card_envs,
+                card_sources,
+            )
         build_image = _local_image(
             local_prefix,
             "builds",
@@ -583,19 +643,33 @@ def build_manifest(
             raise ConfigError(f"build output image is not cached: {build_image}")
 
         log(f"Running build for card: {block_name} (:{_image_tag(build_image)})")
-        build_output = _run_card_build(
-            podman=podman,
-            orchestrator=builder_images[block_name],
-            build_dir=build_dir / "build" / _identifier(block_name),
-            mock_dir=mock_cache_dir / _identifier(block_name),
-            mock_dnf_dir=mock_dnf_cache_dir,
-            mock_root_cache_dir=mock_root_cache_dir,
-            artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
-            card_name=block_name,
-            card_source=card_sources[block_name],
-            card_env=card_envs[block_name],
-            build_script=card_builds[block_name],
-        )
+        if block_name in card_specs:
+            build_output = _run_specs_build(
+                podman=podman,
+                orchestrator=builder_images[block_name],
+                build_dir=build_dir / "build" / _identifier(block_name),
+                artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
+                card_name=block_name,
+                card_source=card_sources[block_name],
+                card_env=card_envs[block_name],
+                specs=card_specs[block_name],
+                prepare_script=card_prepare_scripts.get(block_name, ""),
+                arch=arch,
+            )
+        else:
+            build_output = _run_card_build(
+                podman=podman,
+                orchestrator=builder_images[block_name],
+                build_dir=build_dir / "build" / _identifier(block_name),
+                mock_dir=mock_cache_dir / _identifier(block_name),
+                mock_dnf_dir=mock_dnf_cache_dir,
+                mock_root_cache_dir=mock_root_cache_dir,
+                artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
+                card_name=block_name,
+                card_source=card_sources[block_name],
+                card_env=card_envs[block_name],
+                build_script=card_builds[block_name],
+            )
         if not build_output.rpm_files and build_output.file_count == 0:
             log(f"No build outputs found for card: {block_name}")
             continue
@@ -998,6 +1072,10 @@ def _build_deps(card_build_deps: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(card_build_deps))
 
 
+def _unique_packages(packages: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(packages))
+
+
 def _create_builder_image(
     *,
     podman: str,
@@ -1257,11 +1335,97 @@ def _package_rpm_files(
 
 
 def _download_block_packages(
-    orchestrator_dnf_base: list[str], block_packages: tuple[str, ...]
+    orchestrator_dnf_base: list[str],
+    block_packages: tuple[str, ...],
+    *,
+    package_dir: Path | None = None,
+    resolve_dependencies: bool = False,
+    releasever: str | None = None,
 ) -> tuple[str, ...]:
     if not block_packages:
         return tuple()
-    rpm_files = _package_rpm_files(orchestrator_dnf_base, block_packages)
+    if resolve_dependencies:
+        if package_dir is None:
+            raise ConfigError("package_dir is required when resolving download dependencies")
+        if releasever is None:
+            raise ConfigError("releasever is required when resolving download dependencies")
+        download_id = _package_hash(block_packages)
+        verify_dir = package_dir / ".verify" / download_id
+        shutil.rmtree(verify_dir, ignore_errors=True)
+        verify_dir.mkdir(parents=True, exist_ok=True)
+        resolved_packages = block_packages
+    else:
+        rpm_files = _package_rpm_files(orchestrator_dnf_base, block_packages)
+        download_options = ["--destdir=/ludos/packages"]
+        _run_logged_command(
+            [
+                *orchestrator_dnf_base,
+                "-y",
+                "--setopt=reposdir=/ludos/dnf/repos",
+                "--setopt=cachedir=/ludos/dnf/cache",
+                "--setopt=persistdir=/ludos/dnf/persist",
+                "--setopt=logdir=/ludos/dnf/log",
+                "--disable-repo=*",
+                "--enable-repo=*",
+                "download",
+                *download_options,
+                *block_packages,
+            ],
+            "package download",
+        )
+        return rpm_files
+
+    if resolve_dependencies:
+        for _attempt in range(1, 6):
+            rpm_files = _package_rpm_files(orchestrator_dnf_base, resolved_packages)
+            if not _rpm_files_cached(package_dir, rpm_files):
+                _download_exact_packages(
+                    orchestrator_dnf_base,
+                    resolved_packages,
+                    "/ludos/packages",
+                )
+            _stage_rpm_files(package_dir, rpm_files, verify_dir)
+            missing_packages = _missing_cacheonly_install_packages(
+                orchestrator_dnf_base,
+                releasever,
+                verify_dir,
+            )
+            if not missing_packages:
+                break
+            shutil.rmtree(verify_dir, ignore_errors=True)
+            verify_dir.mkdir(parents=True, exist_ok=True)
+            log(
+                f"Adding {len(missing_packages)} transient builder packages "
+                f"from cache-only install check"
+            )
+            missing_resolved = _resolve_packages(
+                orchestrator_dnf_base,
+                releasever,
+                missing_packages,
+            )
+            if not missing_resolved:
+                raise ConfigError(
+                    "dnf did not resolve transient builder packages: "
+                    + ", ".join(missing_packages)
+                )
+            resolved_packages = _unique_packages((*resolved_packages, *missing_resolved))
+        else:
+            raise ConfigError("builder package transient closure did not converge")
+
+        rpm_files = tuple(sorted(path.name for path in verify_dir.glob("*.rpm")))
+        if not rpm_files:
+            raise ConfigError("dependency-resolved package download did not produce RPMs")
+        shutil.rmtree(verify_dir, ignore_errors=True)
+        return rpm_files
+
+    raise AssertionError("unreachable")
+
+
+def _download_exact_packages(
+    orchestrator_dnf_base: list[str],
+    packages: tuple[str, ...],
+    destdir: str,
+) -> None:
     _run_logged_command(
         [
             *orchestrator_dnf_base,
@@ -1273,12 +1437,84 @@ def _download_block_packages(
             "--disable-repo=*",
             "--enable-repo=*",
             "download",
-            "--destdir=/ludos/packages",
-            *block_packages,
+            f"--destdir={destdir}",
+            *packages,
         ],
         "package download",
     )
-    return rpm_files
+
+
+def _rpm_files_cached(package_dir: Path, rpm_files: tuple[str, ...]) -> bool:
+    return all((package_dir / rpm_file).is_file() for rpm_file in rpm_files)
+
+
+def _missing_cacheonly_install_packages(
+    orchestrator_dnf_base: list[str],
+    releasever: str,
+    rpm_dir: Path,
+) -> tuple[str, ...]:
+    rpm_paths = tuple(f"/rpms/{path.name}" for path in sorted(rpm_dir.glob("*.rpm")))
+    if not rpm_paths:
+        return tuple()
+    dnf_base = _dnf_base_with_volume(orchestrator_dnf_base, rpm_dir, "/rpms:ro")
+    transaction_preview = subprocess.run(
+        [
+            *dnf_base,
+            "--assumeno",
+            "--installroot=/ludos/verify-root",
+            f"--releasever={releasever}",
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--setopt=install_weak_deps=False",
+            "--cacheonly",
+            "--disable-repo=*",
+            "--enable-repo=*",
+            "install",
+            "--allowerasing",
+            *rpm_paths,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    output = transaction_preview.stdout + "\n" + transaction_preview.stderr
+    local_packages = {path.name.removesuffix(".rpm") for path in rpm_dir.glob("*.rpm")}
+    transaction_packages = _parse_resolved_packages(output)
+    missing_transaction_packages = tuple(
+        package
+        for package in transaction_packages
+        if _rpm_filename_nevra(package) not in local_packages
+    )
+    if missing_transaction_packages:
+        return missing_transaction_packages
+
+    missing_packages = tuple(
+        dict.fromkeys(
+            re.findall(
+                r'Cannot download the "([^"]+)" package, cacheonly option is activated',
+                output,
+            )
+        )
+    )
+    if missing_packages:
+        return missing_packages
+    if "Transaction Summary:" not in output and "Nothing to do." not in output:
+        detail = "\n".join(output.splitlines()[-20:])
+        raise ConfigError(f"dnf could not verify builder package closure:\n{detail}")
+    if transaction_preview.returncode not in (0, 1):
+        detail = "\n".join(output.splitlines()[-20:])
+        raise ConfigError(f"dnf could not verify builder package closure:\n{detail}")
+    return tuple()
+
+
+def _rpm_filename_nevra(nevra: str) -> str:
+    if ":" not in nevra:
+        return nevra
+    name_epoch, version_release_arch = nevra.split(":", 1)
+    name, _epoch = name_epoch.rsplit("-", 1)
+    return f"{name}-{version_release_arch}"
 
 
 def _stage_rpm_files(
@@ -1509,7 +1745,7 @@ def _run_card_build(
     )
     if returncode != 0:
         command_line = " ".join(shlex.quote(str(part)) for part in command)
-        raise ConfigError(f"card build failed with exit status {returncode}: {command_line}")
+        raise ConfigError(f"card build failed with exit status {returncode}")
 
     rpm_files = []
     rpm_sources = sorted(rpm_dir.rglob("*.rpm"))
@@ -1530,6 +1766,395 @@ def _run_card_build(
         rpm_dir=rpm_dir,
         files_dir=files_dir,
     )
+
+
+def _run_specs_build(
+    *,
+    podman: str,
+    orchestrator: str,
+    build_dir: Path,
+    artifact_cache_dir: Path,
+    card_name: str,
+    card_source: Path,
+    card_env: dict[str, str],
+    specs: tuple[SpecBuild, ...],
+    prepare_script: str,
+    arch: str,
+) -> CardBuildOutput:
+    workspace_dir = build_dir / "workspace"
+    rpm_dir = build_dir / "rpms"
+    files_dir = build_dir / "files"
+    _remove_tree(build_dir, podman=podman)
+    workspace_dir.mkdir(parents=True)
+    rpm_dir.mkdir(parents=True)
+    files_dir.mkdir(parents=True)
+    artifact_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    staged_specs = _stage_card_specs(
+        card_source=card_source,
+        specs=specs,
+        card_env=card_env,
+        workspace_dir=workspace_dir,
+        arch=arch,
+    )
+    if not staged_specs:
+        raise ConfigError(f"{card_source}: specs build has no specs")
+
+    if prepare_script.strip():
+        _run_specs_prepare(
+            podman=podman,
+            orchestrator=orchestrator,
+            workspace_dir=workspace_dir,
+            rpm_dir=rpm_dir,
+            files_dir=files_dir,
+            artifact_cache_dir=artifact_cache_dir,
+            card_env=card_env,
+            prepare_script=prepare_script,
+            card_source=card_source,
+        )
+
+    build_script = _specs_build_script(staged_specs, workspace_dir, arch)
+    command = [
+        podman,
+        "run",
+        "--rm",
+        "--interactive",
+        "--privileged",
+        "--volume",
+        f"{workspace_dir}:/workspace",
+        "--volume",
+        f"{rpm_dir}:/rpms",
+        "--volume",
+        f"{files_dir}:/files",
+        "--volume",
+        f"{artifact_cache_dir}:/cache/artifacts",
+        "--workdir",
+        "/workspace",
+    ]
+    for key, value in sorted(card_env.items()):
+        command.extend(["--env", f"{key}={value}"])
+    command.extend(["--env", "PS4=+ "])
+    command.extend([orchestrator, "/bin/sh", "-ex", "-s"])
+    returncode, _output = _run_streamed_command(
+        command,
+        input_text=build_script,
+        line_rewriter=_workspace_path_rewriter(
+            source_dir=_card_base_dir(card_source),
+            workspace_dir=workspace_dir,
+            root_dir=Path.cwd(),
+        ),
+    )
+    if returncode != 0:
+        command_line = " ".join(shlex.quote(str(part)) for part in command)
+        raise ConfigError(f"spec build failed with exit status {returncode}")
+
+    rpm_files = tuple(sorted(path.name for path in rpm_dir.rglob("*.rpm")))
+    log(f"Collected {len(rpm_files)} built RPMs for card: {card_name}")
+    file_count = sum(1 for path in files_dir.rglob("*") if path.is_file())
+    if file_count:
+        log(f"Collected {file_count} built files for card: {card_name}")
+    return CardBuildOutput(
+        rpm_files=rpm_files,
+        file_count=file_count,
+        rpm_dir=rpm_dir,
+        files_dir=files_dir,
+    )
+
+
+def _run_specs_prepare(
+    *,
+    podman: str,
+    orchestrator: str,
+    workspace_dir: Path,
+    rpm_dir: Path,
+    files_dir: Path,
+    artifact_cache_dir: Path,
+    card_env: dict[str, str],
+    prepare_script: str,
+    card_source: Path,
+) -> None:
+    command = [
+        podman,
+        "run",
+        "--rm",
+        "--interactive",
+        "--volume",
+        f"{workspace_dir}:/workspace",
+        "--volume",
+        f"{rpm_dir}:/rpms",
+        "--volume",
+        f"{files_dir}:/files",
+        "--volume",
+        f"{artifact_cache_dir}:/cache/artifacts",
+        "--workdir",
+        "/workspace",
+    ]
+    for key, value in sorted(card_env.items()):
+        command.extend(["--env", f"{key}={value}"])
+    command.extend(["--env", "PS4=+ "])
+    command.extend([orchestrator, "/bin/sh", "-ex", "-s"])
+    returncode, _output = _run_streamed_command(
+        command,
+        input_text=prepare_script + "\n",
+        line_rewriter=_workspace_path_rewriter(
+            source_dir=_card_base_dir(card_source),
+            workspace_dir=workspace_dir,
+            root_dir=Path.cwd(),
+        ),
+    )
+    if returncode != 0:
+        command_line = " ".join(shlex.quote(str(part)) for part in command)
+        raise ConfigError(
+            f"spec prepare failed with exit status {returncode}"
+        )
+
+
+def _stage_card_specs(
+    *,
+    card_source: Path,
+    specs: tuple[SpecBuild, ...],
+    card_env: dict[str, str],
+    workspace_dir: Path,
+    arch: str,
+) -> tuple[StagedSpec, ...]:
+    _remove_tree(workspace_dir)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    card_base_dir = _card_base_dir(card_source)
+    ignore_rules = _load_containerignore(card_base_dir)
+    staged = []
+    for spec in specs:
+        spec_relpath = _validate_relative_file_path(spec.spec, card_source, "spec")
+        spec_source = (card_base_dir / spec_relpath).resolve()
+        try:
+            spec_source.relative_to(card_base_dir)
+        except ValueError as exc:
+            raise ConfigError(f"{card_source}: spec '{spec.spec}' escapes the card") from exc
+        if not spec_source.is_file():
+            raise ConfigError(f"{card_source}: spec '{spec.spec}' is missing")
+
+        relative_dir = spec_source.parent.relative_to(card_base_dir)
+        staged_source_dir = workspace_dir / relative_dir
+        _copy_directory_contents(spec_source.parent, staged_source_dir, ignore_rules)
+        staged_spec_path = staged_source_dir / spec_source.name
+        _transform_staged_spec(
+            staged_spec_path,
+            spec.replace,
+            card_env,
+            arch,
+        )
+        packages = _spec_packages_for_arch(spec, arch)
+        if not packages:
+            raise ConfigError(f"{card_source}: spec '{spec.spec}' has no packages for {arch}")
+        staged.append(
+            StagedSpec(
+                spec=spec,
+                spec_path=staged_spec_path,
+                source_dir=staged_source_dir,
+                packages=packages,
+                targets=_spec_build_targets(packages, arch),
+            )
+        )
+    return tuple(staged)
+
+
+def _copy_directory_contents(
+    source_dir: Path,
+    destination_dir: Path,
+    ignore_rules: tuple["_IgnoreRule", ...],
+) -> None:
+    source_dir = source_dir.resolve()
+    shutil.rmtree(destination_dir, ignore_errors=True)
+    for source_path in source_dir.rglob("*"):
+        relative = source_path.relative_to(source_dir).as_posix()
+        is_dir = source_path.is_dir()
+        if _ignored_by_containerignore(relative, is_dir, ignore_rules):
+            if is_dir:
+                continue
+            continue
+        target_path = destination_dir / relative
+        if is_dir:
+            target_path.mkdir(parents=True, exist_ok=True)
+            continue
+        if source_path.is_file():
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target_path)
+
+
+def _transform_staged_spec(
+    spec_path: Path,
+    replacements: dict[str, str],
+    card_env: dict[str, str],
+    arch: str,
+) -> None:
+    text = spec_path.read_text(encoding="utf-8")
+    for field, value in replacements.items():
+        replacement = _expand_expression(value, card_env, None)
+        field_name = field.rstrip(":").strip()
+        pattern = re.compile(rf"^(\s*{re.escape(field_name)}\s*:\s*).*$", re.MULTILINE)
+        text, count = pattern.subn(rf"\g<1>{replacement}", text, count=1)
+        if count == 0:
+            raise ConfigError(f"{spec_path}: replacement field '{field}' was not found")
+    text = _prune_arch_sources(text, arch)
+    text = _drop_nvidia_kmod_runtime_requires(text)
+    spec_path.write_text(text, encoding="utf-8")
+
+
+def _prune_arch_sources(text: str, arch: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("Source"):
+            lines.append(line)
+            continue
+        if arch == "x86_64" and "-aarch64.tar.xz" in stripped:
+            continue
+        if arch == "aarch64" and (
+            "-x86_64.tar.xz" in stripped or "-i386.tar.xz" in stripped
+        ):
+            continue
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def _drop_nvidia_kmod_runtime_requires(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        if re.match(r"^\s*Requires:\s+nvidia-kmod\s+=", line):
+            continue
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def _spec_packages_for_arch(spec: SpecBuild, arch: str) -> tuple[str, ...]:
+    packages = list(spec.packages.get(arch, spec.packages.get("*", tuple())))
+    return tuple(dict.fromkeys(packages))
+
+
+def _spec_build_targets(packages: tuple[str, ...], arch: str) -> tuple[str, ...]:
+    targets = [arch]
+    if arch == "x86_64" and any(package.endswith(".i686") for package in packages):
+        targets.append("i686")
+    return tuple(dict.fromkeys(targets))
+
+
+def _resolve_spec_build_requires(
+    orchestrator_dnf_base: list[str],
+    releasever: str,
+    workspace_dir: Path,
+    spec_paths: tuple[Path, ...],
+) -> tuple[str, ...]:
+    if not spec_paths:
+        return tuple()
+    spec_args = []
+    for spec_path in spec_paths:
+        relative = spec_path.relative_to(workspace_dir).as_posix()
+        spec_args.append(f"/ludos/specs/{relative}")
+    dnf_base = _dnf_base_with_volume(
+        orchestrator_dnf_base,
+        workspace_dir,
+        "/ludos/specs:ro",
+    )
+    transaction_preview = subprocess.run(
+        [
+            *dnf_base,
+            "--assumeno",
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--setopt=install_weak_deps=False",
+            "--disable-repo=*",
+            "--enable-repo=*",
+            "--installroot=/ludos/resolve-root",
+            f"--releasever={releasever}",
+            "builddep",
+            "--spec",
+            *spec_args,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    output = transaction_preview.stdout + "\n" + transaction_preview.stderr
+    if transaction_preview.returncode not in (0, 1):
+        detail = "\n".join(output.splitlines()[-20:])
+        raise ConfigError(f"dnf did not resolve spec BuildRequires:\n{detail}")
+    return _parse_resolved_packages(output)
+
+
+def _dnf_base_with_volume(
+    orchestrator_dnf_base: list[str],
+    source: Path,
+    target: str,
+) -> list[str]:
+    return [
+        *orchestrator_dnf_base[:-2],
+        "--volume",
+        f"{source}:{target}",
+        *orchestrator_dnf_base[-2:],
+    ]
+
+
+def _specs_build_script(
+    staged_specs: tuple[StagedSpec, ...],
+    workspace_dir: Path,
+    arch: str,
+) -> str:
+    topdir = "/workspace/build/rpmbuild"
+    lines = [
+        "set -eux",
+        f"topdir={shlex.quote(topdir)}",
+        'mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}',
+    ]
+    wanted = tuple(
+        dict.fromkeys(package for staged in staged_specs for package in staged.packages)
+    )
+    lines.extend(
+        [
+            'cat > "$topdir/wanted.txt" <<\'LUDOS_WANTED_RPMS\'',
+            *wanted,
+            "LUDOS_WANTED_RPMS",
+        ]
+    )
+    for staged in staged_specs:
+        source_dir = f"/workspace/{staged.source_dir.relative_to(workspace_dir).as_posix()}"
+        spec_path = f"/workspace/{staged.spec_path.relative_to(workspace_dir).as_posix()}"
+        spec_name = staged.spec_path.name
+        targets = " ".join(shlex.quote(target) for target in staged.targets)
+        lines.extend(
+            [
+                f"find {shlex.quote(source_dir)} -maxdepth 1 -type f ! -name '*.spec' -exec cp -f -t \"$topdir/SOURCES\" {{}} +",
+                f"cp -f {shlex.quote(spec_path)} \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
+                f"if grep -Eq '^(Source|Patch)[0-9]*:[[:space:]]+https?://' \"$topdir/SPECS/{shlex.quote(spec_name)}\"; then",
+                f"  spectool -g -C \"$topdir/SOURCES\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
+                "fi",
+                f"for target in {targets}; do",
+                f"  rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"",
+                "done",
+            ]
+        )
+    lines.extend(
+        [
+            'find "$topdir/RPMS" -type f -name "*.rpm" | sort | while read -r rpm; do',
+            "  name=$(rpm -qp --queryformat '%{NAME}' \"$rpm\")",
+            "  rpm_arch=$(rpm -qp --queryformat '%{ARCH}' \"$rpm\")",
+            '  if grep -Fxq "$name.$rpm_arch" "$topdir/wanted.txt"; then',
+            '    cp -f "$rpm" /rpms/',
+            '    echo "$name.$rpm_arch" >> "$topdir/matched.txt"',
+            f"  elif [ \"$rpm_arch\" = {shlex.quote(arch)} ] || [ \"$rpm_arch\" = noarch ]; then",
+            '    if grep -Fxq "$name" "$topdir/wanted.txt"; then',
+            '      cp -f "$rpm" /rpms/',
+            '      echo "$name" >> "$topdir/matched.txt"',
+            "    fi",
+            "  fi",
+            "done",
+            'touch "$topdir/matched.txt"',
+            'while read -r wanted; do',
+            '  grep -Fxq "$wanted" "$topdir/matched.txt" || { echo "Missing built RPM for $wanted"; exit 1; }',
+            'done < "$topdir/wanted.txt"',
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _package_hash(packages: tuple[str, ...]) -> str:
@@ -1558,6 +2183,49 @@ def _card_build_hash(
         ),
         f"{card_name} build hash",
     )
+
+
+def _card_specs_hash(
+    card_source: Path,
+    specs: tuple[SpecBuild, ...],
+    card_env: dict[str, str],
+    prepare_script: str,
+) -> str:
+    card_base_dir = _card_base_dir(card_source)
+    digest = hashlib.sha256()
+    digest.update(card_source.name.encode("utf-8"))
+    digest.update(b"\0")
+    try:
+        digest.update(card_source.read_bytes())
+    except FileNotFoundError:
+        pass
+    digest.update(b"\0")
+    digest.update(prepare_script.encode("utf-8"))
+    digest.update(b"\0")
+    for key, value in sorted(card_env.items()):
+        digest.update(key.encode("utf-8"))
+        digest.update(b"=")
+        digest.update(str(value).encode("utf-8"))
+        digest.update(b"\0")
+    for spec in specs:
+        digest.update(spec.spec.encode("utf-8"))
+        digest.update(b"\0")
+        for key, value in sorted(spec.replace.items()):
+            digest.update(key.encode("utf-8"))
+            digest.update(b"=")
+            digest.update(_expand_expression(value, card_env, None).encode("utf-8"))
+            digest.update(b"\0")
+        for arch, packages in sorted(spec.packages.items()):
+            digest.update(arch.encode("utf-8"))
+            digest.update(b"\0")
+            for package in packages:
+                digest.update(package.encode("utf-8"))
+                digest.update(b"\0")
+        spec_path = card_base_dir / spec.spec
+        spec_dir = spec_path.parent
+        digest.update(_hash_paths(card_base_dir, (spec_dir.relative_to(card_base_dir).as_posix(),)).encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()[:HASH_LENGTH]
 
 
 def _parse_file_ref(value: str) -> FileRef:
@@ -1686,7 +2354,7 @@ def _run_logged_command(command: list[str], description: str) -> None:
     if returncode == 0:
         return
     command_line = " ".join(shlex.quote(str(part)) for part in command)
-    raise ConfigError(f"{description} failed with exit status {returncode}: {command_line}")
+    raise ConfigError(f"{description} failed with exit status {returncode}")
 
 
 def _parse_git_file_source(source: str) -> tuple[str, tuple[str, str], Path]:
@@ -1924,7 +2592,7 @@ def _run_container_build(command: list[str], containerfile: Path) -> None:
 
     location = _containerfile_error_location(containerfile, output)
     command_line = " ".join(shlex.quote(str(part)) for part in command)
-    message = f"command failed with exit status {returncode}: {command_line}"
+    message = f"command failed with exit status {returncode}"
     if location is not None:
         message = f"{message}\n\nThe error occurred in:\n{location}"
     raise ConfigError(message)

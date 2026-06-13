@@ -170,7 +170,7 @@ def main() -> int:
         return 1
     except subprocess.CalledProcessError as exc:
         command = " ".join(shlex.quote(str(part)) for part in exc.cmd)
-        error(f"command failed with exit status {exc.returncode}: {command}")
+        error(f"command failed with exit status {exc.returncode}")
         return 1
 
 

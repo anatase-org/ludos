@@ -14,12 +14,29 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class UpstreamRef:
+    type: str
+    url: str
+    branch: str = ""
+    ref: str = ""
+
+
+@dataclass(frozen=True)
+class SpecBuild:
+    spec: str
+    packages: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    replace: dict[str, str] = field(default_factory=dict)
+    upstream: UpstreamRef | None = None
+
+
+@dataclass(frozen=True)
 class Card:
     version: int
     priority: int = 1
     env: dict[str, str | int] = field(default_factory=dict)
     packages: tuple[str, ...] = tuple()
     build_deps: tuple[str, ...] = tuple()
+    specs: tuple[SpecBuild, ...] = tuple()
     repos: tuple["RepoRef", ...] = tuple()
     files: tuple[str, ...] = tuple()
     hash: str = ""
@@ -37,6 +54,7 @@ class Card:
             env=_env_dict(data, path, include_default=False),
             packages=_string_tuple(data, "packages", path),
             build_deps=_string_tuple(data, "build-deps", path),
+            specs=_spec_builds_tuple(data, "specs", path),
             repos=_repo_refs_tuple(data, "repos", path),
             files=_string_tuple(data, "files", path),
             hash=_optional_string(data, "hash", path),
@@ -331,6 +349,106 @@ def _repo_refs_tuple(data: dict[str, Any], key: str, path: Path) -> tuple[RepoRe
         repos.append(RepoRef(repo=repo, priority=priority, vars=repo_vars))
 
     return tuple(repos)
+
+
+def _spec_builds_tuple(
+    data: dict[str, Any], key: str, path: Path
+) -> tuple[SpecBuild, ...]:
+    value = data.get(key)
+    if value is None:
+        return tuple()
+    if not isinstance(value, list):
+        raise ConfigError(f"{path}: '{key}' must be a list of spec mappings")
+
+    specs = []
+    for index, item in enumerate(value):
+        label = f"{key}[{index}]"
+        if not isinstance(item, dict):
+            raise ConfigError(f"{path}: '{label}' must be a mapping")
+
+        spec = item.get("spec")
+        if not isinstance(spec, str) or not spec.strip():
+            raise ConfigError(f"{path}: '{label}.spec' must be a non-empty string")
+
+        packages = _spec_packages_dict(item, "packages", path, label)
+        replace = _spec_replace_dict(item, "replace", path, label)
+        upstream = _upstream_ref(item, "upstream", path, label)
+        specs.append(
+            SpecBuild(
+                spec=spec,
+                packages=packages,
+                replace=replace,
+                upstream=upstream,
+            )
+        )
+
+    return tuple(specs)
+
+
+def _spec_packages_dict(
+    data: dict[str, Any], key: str, path: Path, label: str
+) -> dict[str, tuple[str, ...]]:
+    value = data.get(key, {})
+    if value is None:
+        return {}
+    if isinstance(value, list):
+        if not all(isinstance(package, str) for package in value):
+            raise ConfigError(f"{path}: '{label}.{key}' must be a list of strings")
+        return {"*": tuple(value)}
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"{path}: '{label}.{key}' must be a list of strings or an arch mapping"
+        )
+
+    result = {}
+    for arch, packages in value.items():
+        if not isinstance(arch, str) or not arch.strip():
+            raise ConfigError(f"{path}: '{label}.{key}' arch keys must be strings")
+        if not isinstance(packages, list) or not all(
+            isinstance(package, str) for package in packages
+        ):
+            raise ConfigError(
+                f"{path}: '{label}.{key}.{arch}' must be a list of strings"
+            )
+        result[arch] = tuple(packages)
+    return result
+
+
+def _spec_replace_dict(
+    data: dict[str, Any], key: str, path: Path, label: str
+) -> dict[str, str]:
+    value = data.get(key, {})
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+    ):
+        raise ConfigError(f"{path}: '{label}.{key}' must be a mapping of strings")
+    return dict(value)
+
+
+def _upstream_ref(
+    data: dict[str, Any], key: str, path: Path, label: str
+) -> UpstreamRef | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path}: '{label}.{key}' must be a mapping")
+
+    upstream_type = value.get("type")
+    url = value.get("url")
+    branch = value.get("branch", "")
+    ref = value.get("ref", "")
+    if not isinstance(upstream_type, str) or not upstream_type.strip():
+        raise ConfigError(f"{path}: '{label}.{key}.type' must be a non-empty string")
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError(f"{path}: '{label}.{key}.url' must be a non-empty string")
+    if not isinstance(branch, str) or not isinstance(ref, str):
+        raise ConfigError(
+            f"{path}: '{label}.{key}.branch' and '{label}.{key}.ref' must be strings"
+        )
+    return UpstreamRef(type=upstream_type, url=url, branch=branch, ref=ref)
 
 
 def _string_dict(data: dict[str, Any], key: str, path: Path) -> dict[str, str]:
