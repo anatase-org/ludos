@@ -12,8 +12,8 @@ from .logging import log
 from .model import ConfigError
 
 
-VERSIONED_CLEANUP_REPOSITORIES = ("orchestrator", "repos", "builders")
-RESOLVED_CLEANUP_REPOSITORIES = ("cards", "builds")
+VERSIONED_CLEANUP_REPOSITORIES = ("orchestrator", "repos")
+RESOLVED_CLEANUP_REPOSITORIES = ("cards", "builds", "builders")
 CLEANUP_REPOSITORIES = (*VERSIONED_CLEANUP_REPOSITORIES, *RESOLVED_CLEANUP_REPOSITORIES)
 
 
@@ -109,10 +109,12 @@ def _manifest_cleanup_targets(manifest_path: Path, version: str) -> tuple[str, .
         *result.builder_images,
     )
     log(f"Keeping manifest image: {result.output_image}")
-    if result.package_images or result.build_images:
+    if result.package_images or result.build_images or result.builder_images:
         log(
             f"Keeping resolved cache images: "
-            f"{len(result.package_images)} cards, {len(result.build_images)} builds"
+            f"{len(result.package_images)} cards, "
+            f"{len(result.build_images)} builds, "
+            f"{len(result.builder_images)} builders"
         )
     return targets
 

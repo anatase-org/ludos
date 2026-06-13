@@ -471,11 +471,21 @@ def build_manifest(
     builder_images = {}
     for card_name in card_builds:
         build_deps = _build_deps(card_build_deps.get(card_name, tuple()))
-        builder_hash = _package_hash(build_deps)
+        if not build_deps:
+            raise ConfigError(f"build card '{card_name}' must define build-deps")
+        log(f"Resolving builder packages for card: {card_name}")
+        builder_packages = _resolve_packages(
+            orchestrator_dnf_base,
+            releasever,
+            build_deps,
+        )
+        if not builder_packages:
+            raise ConfigError(f"dnf did not resolve build-deps for {card_name}")
+        builder_hash = _nevra_hash(builder_packages)
         builder_image = _local_image(
             local_prefix,
             "builders",
-            f"{distro}-{builder_hash}-{cache_version}",
+            f"{distro}-{builder_hash}",
         )
         builder_images[card_name] = builder_image
         if resolve_only:
@@ -489,16 +499,17 @@ def build_manifest(
         log(f"Creating builder image: {builder_image}")
         _create_builder_image(
             podman=podman,
+            buildah=_require_buildah(buildah),
             orchestrator=orchestrator,
             root_dir=root_dir,
             repo_dir=repo_dir,
             dnf_cache_dir=dnf_cache_dir,
             dnf_persist_dir=dnf_persist_dir,
             dnf_log_dir=dnf_log_dir,
-            build_dir=oci_dir / "builders" / f"{distro}-{builder_hash}-{cache_version}",
+            build_dir=oci_dir / "builders" / f"{distro}-{builder_hash}",
             image=builder_image,
             releasever=releasever,
-            build_deps=build_deps,
+            build_packages=builder_packages,
         )
 
     package_images = []
@@ -985,6 +996,7 @@ def _build_deps(card_build_deps: tuple[str, ...]) -> tuple[str, ...]:
 def _create_builder_image(
     *,
     podman: str,
+    buildah: str,
     orchestrator: str,
     root_dir: Path,
     repo_dir: Path,
@@ -994,36 +1006,16 @@ def _create_builder_image(
     build_dir: Path,
     image: str,
     releasever: str,
-    build_deps: tuple[str, ...],
+    build_packages: tuple[str, ...],
 ) -> None:
-    shutil.rmtree(build_dir, ignore_errors=True)
-    build_dir.mkdir(parents=True)
-    deps = " \\\n    ".join(build_deps)
-    containerfile = build_dir / "Containerfile"
-    containerfile.write_text(
-        f"""FROM {orchestrator}
-RUN dnf5 -y \\
-    --releasever={releasever} \\
-    --setopt=reposdir=/ludos/dnf/repos \\
-    --setopt=cachedir=/ludos/dnf/cache \\
-    --setopt=persistdir=/ludos/dnf/persist \\
-    --setopt=logdir=/ludos/dnf/log \\
-    --disable-repo='*' \\
-    --enable-repo='*' \\
-    install \\
-    {deps} \\
-    && dnf5 clean all
-""",
-        encoding="utf-8",
-    )
-    _run_container_build(
+    _remove_tree(build_dir, podman=podman)
+    image_root = build_dir / "root"
+    image_root.mkdir(parents=True)
+    _run_logged_command(
         [
             podman,
-            "build",
-            "--layers",
-            "--pull=missing",
-            "--tag",
-            image,
+            "run",
+            "--rm",
             "--volume",
             f"{root_dir / 'repos'}:/workspace/repos:ro",
             "--volume",
@@ -1034,12 +1026,36 @@ RUN dnf5 -y \\
             f"{dnf_persist_dir}:/ludos/dnf/persist",
             "--volume",
             f"{dnf_log_dir}:/ludos/dnf/log",
-            "--file",
-            str(containerfile),
-            str(build_dir),
+            "--volume",
+            f"{image_root}:/target",
+            "--workdir",
+            "/workspace/repos",
+            orchestrator,
+            "dnf5",
+            "-y",
+            "--installroot=/target",
+            f"--releasever={releasever}",
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--setopt=install_weak_deps=False",
+            "--disable-repo=*",
+            "--enable-repo=*",
+            "install",
+            "--allowerasing",
+            *build_packages,
         ],
-        containerfile,
+        "builder root bootstrap",
     )
+    shutil.rmtree(image_root / "var/cache/dnf", ignore_errors=True)
+    for log_path in (image_root / "var/log").glob("dnf*"):
+        if log_path.is_dir():
+            shutil.rmtree(log_path, ignore_errors=True)
+        else:
+            log_path.unlink(missing_ok=True)
+    _create_scratch_image(buildah=buildah, image_root=image_root, image=image)
+    _remove_tree(build_dir, podman=podman)
 
 
 def _create_repo_image(
