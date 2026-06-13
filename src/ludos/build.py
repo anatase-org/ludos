@@ -28,7 +28,7 @@ HASH_LENGTH = 8
 class BuildResult:
     image: str
     distro: str
-    bootstrap: str
+    orchestrator: str
     output_image: str
     requested_packages: tuple[str, ...]
     resolved_packages: tuple[str, ...]
@@ -85,7 +85,7 @@ def build_manifest(
         _substitute_variables(validation.manifest.distro, manifest_env),
         "distro",
     )
-    bootstrap = _substitute_variables(validation.manifest.bootstrap, manifest_env)
+    orchestrator = _substitute_variables(validation.manifest.orchestrator, manifest_env)
     output_image = f"localhost/{local_prefix}{image}:{distro}"
     if cache_version is None:
         iso_today = _datetime.date.today().isocalendar()
@@ -135,23 +135,23 @@ def build_manifest(
         log(f"Using Buildah: {buildah}")
 
     releasever = _cache_name(manifest_env["releasever"], "releasever")
-    bootstrap_image = _local_image(
+    orchestrator_image = _local_image(
         local_prefix,
-        "bootstrap",
+        "orchestrator",
         f"{releasever}-{cache_version}",
     )
-    if _image_exists(podman, bootstrap_image):
-        log(f"Reusing bootstrap image: {bootstrap_image}")
+    if _image_exists(podman, orchestrator_image):
+        log(f"Reusing orchestrator image: {orchestrator_image}")
     elif load_only_version or cache_only:
-        raise ConfigError(f"bootstrap image is not cached: {bootstrap_image}")
+        raise ConfigError(f"orchestrator image is not cached: {orchestrator_image}")
     else:
-        log(f"Creating bootstrap image: {bootstrap_image}")
-        _create_bootstrap_image(
+        log(f"Creating orchestrator image: {orchestrator_image}")
+        _create_orchestrator_image(
             podman=podman,
-            source=bootstrap,
-            image=bootstrap_image,
+            source=orchestrator,
+            image=orchestrator_image,
         )
-    bootstrap = bootstrap_image
+    orchestrator = orchestrator_image
 
     log("Resetting DNF metadata workspace")
     for existing in repo_dir.glob("*.repo"):
@@ -199,7 +199,7 @@ def build_manifest(
         log(f"Creating repository metadata image: {repo_image}")
         _create_repo_image(
             podman=podman,
-            bootstrap=bootstrap,
+            orchestrator=orchestrator,
             root_dir=root_dir,
             build_dir=oci_dir / "repos" / f"{repo.ref.repo}-{cache_version}",
             image=repo_image,
@@ -279,7 +279,7 @@ def build_manifest(
     if card_builds:
         log(f"Collected {len(card_builds)} build cards")
 
-    bootstrap_dnf_base = [
+    orchestrator_dnf_base = [
         podman,
         "run",
         "--rm",
@@ -297,7 +297,7 @@ def build_manifest(
         f"{package_dir}:/ludos/packages",
         "--workdir",
         "/workspace/repos",
-        bootstrap,
+        orchestrator,
         "dnf5",
     ]
 
@@ -313,7 +313,7 @@ def build_manifest(
 
         log(f"Resolving package transaction for card: {card_name}")
         card_resolved_package_list = _resolve_packages(
-            bootstrap_dnf_base,
+            orchestrator_dnf_base,
             manifest_env["releasever"],
             card_packages,
         )
@@ -329,7 +329,7 @@ def build_manifest(
             continue
         contextual_requests.extend(card_packages)
         contextual_resolved = _resolve_packages(
-            bootstrap_dnf_base,
+            orchestrator_dnf_base,
             manifest_env["releasever"],
             tuple(contextual_requests),
         )
@@ -420,7 +420,7 @@ def build_manifest(
         log(f"Creating builder image: {builder_image}")
         _create_builder_image(
             podman=podman,
-            bootstrap=bootstrap,
+            orchestrator=orchestrator,
             root_dir=root_dir,
             repo_dir=repo_dir,
             dnf_cache_dir=dnf_cache_dir,
@@ -451,7 +451,10 @@ def build_manifest(
         elif cache_only:
             raise ConfigError(f"card package image is not cached: {package_image}")
         else:
-            repo_rpm_files = _download_block_packages(bootstrap_dnf_base, block_packages)
+            repo_rpm_files = _download_block_packages(
+                orchestrator_dnf_base,
+                block_packages,
+            )
             log(f"Creating card package image: {package_image}")
             _create_package_image(
                 buildah=_require_buildah(buildah),
@@ -489,7 +492,7 @@ def build_manifest(
         log(f"Running build for card: {block_name}")
         build_output = _run_card_build(
             podman=podman,
-            bootstrap=builder_images[block_name],
+            orchestrator=builder_images[block_name],
             build_dir=build_dir / "build" / _identifier(block_name),
             mock_dir=mock_cache_dir / _identifier(block_name),
             mock_dnf_dir=mock_dnf_cache_dir,
@@ -680,7 +683,7 @@ LUDOS_POSTPROCESS_{block_name}
     postprocess_step_lines = "\n".join(postprocess_steps)
     containerfile = build_dir / "Containerfile"
     containerfile.write_text(
-        f"""{package_stage_lines}{build_stage_lines}FROM {bootstrap} AS install
+        f"""{package_stage_lines}{build_stage_lines}FROM {orchestrator} AS install
 WORKDIR /workspace/repos
 RUN mkdir -p /target
 
@@ -737,7 +740,7 @@ COPY --from=install /target /
     return BuildResult(
         image=image,
         distro=distro,
-        bootstrap=bootstrap,
+        orchestrator=orchestrator,
         output_image=output_image,
         requested_packages=requested_packages,
         resolved_packages=resolved_packages,
@@ -799,10 +802,10 @@ def _require_buildah(buildah: str | None) -> str:
     return buildah
 
 
-def _create_bootstrap_image(*, podman: str, source: str, image: str) -> None:
+def _create_orchestrator_image(*, podman: str, source: str, image: str) -> None:
     returncode, _output = _run_streamed_command([podman, "pull", source])
     if returncode != 0:
-        raise ConfigError(f"failed to pull bootstrap image: {source}")
+        raise ConfigError(f"failed to pull orchestrator image: {source}")
     subprocess.run([podman, "tag", source, image], check=True)
 
 
@@ -821,7 +824,7 @@ def _build_deps(card_build_deps: tuple[str, ...]) -> tuple[str, ...]:
 def _create_builder_image(
     *,
     podman: str,
-    bootstrap: str,
+    orchestrator: str,
     root_dir: Path,
     repo_dir: Path,
     dnf_cache_dir: Path,
@@ -837,7 +840,7 @@ def _create_builder_image(
     deps = " \\\n    ".join(build_deps)
     containerfile = build_dir / "Containerfile"
     containerfile.write_text(
-        f"""FROM {bootstrap}
+        f"""FROM {orchestrator}
 RUN dnf5 -y \\
     --releasever={releasever} \\
     --setopt=reposdir=/ludos/dnf/repos \\
@@ -881,7 +884,7 @@ RUN dnf5 -y \\
 def _create_repo_image(
     *,
     podman: str,
-    bootstrap: str,
+    orchestrator: str,
     root_dir: Path,
     build_dir: Path,
     image: str,
@@ -914,7 +917,7 @@ def _create_repo_image(
             f"{build_dir / 'log'}:/ludos/dnf/log",
             "--workdir",
             "/workspace/repos",
-            bootstrap,
+            orchestrator,
             "dnf5",
             "--setopt=reposdir=/ludos/dnf/repos",
             "--setopt=cachedir=/ludos/dnf/cache",
@@ -972,13 +975,13 @@ def _extract_image_paths(
 
 
 def _resolve_packages(
-    bootstrap_dnf_base: list[str],
+    orchestrator_dnf_base: list[str],
     releasever: str,
     packages: tuple[str, ...],
 ) -> tuple[str, ...]:
     transaction_preview = subprocess.run(
         [
-            *bootstrap_dnf_base,
+            *orchestrator_dnf_base,
             "--assumeno",
             "--setopt=reposdir=/ludos/dnf/repos",
             "--setopt=cachedir=/ludos/dnf/cache",
@@ -1029,11 +1032,11 @@ def _parse_resolved_packages(output: str) -> tuple[str, ...]:
 
 
 def _package_rpm_files(
-    bootstrap_dnf_base: list[str], block_packages: tuple[str, ...]
+    orchestrator_dnf_base: list[str], block_packages: tuple[str, ...]
 ) -> tuple[str, ...]:
     query = subprocess.run(
         [
-            *bootstrap_dnf_base,
+            *orchestrator_dnf_base,
             "--setopt=reposdir=/ludos/dnf/repos",
             "--setopt=cachedir=/ludos/dnf/cache",
             "--setopt=persistdir=/ludos/dnf/persist",
@@ -1064,14 +1067,14 @@ def _package_rpm_files(
 
 
 def _download_block_packages(
-    bootstrap_dnf_base: list[str], block_packages: tuple[str, ...]
+    orchestrator_dnf_base: list[str], block_packages: tuple[str, ...]
 ) -> tuple[str, ...]:
     if not block_packages:
         return tuple()
-    rpm_files = _package_rpm_files(bootstrap_dnf_base, block_packages)
+    rpm_files = _package_rpm_files(orchestrator_dnf_base, block_packages)
     _run_logged_command(
         [
-            *bootstrap_dnf_base,
+            *orchestrator_dnf_base,
             "-y",
             "--setopt=reposdir=/ludos/dnf/repos",
             "--setopt=cachedir=/ludos/dnf/cache",
@@ -1233,7 +1236,7 @@ def _run_prepare_block(
 def _run_card_build(
     *,
     podman: str,
-    bootstrap: str,
+    orchestrator: str,
     build_dir: Path,
     mock_dir: Path,
     mock_dnf_dir: Path,
@@ -1290,7 +1293,7 @@ def _run_card_build(
     for key, value in sorted(card_env.items()):
         command.extend(["--env", f"{key}={value}"])
     command.extend(["--env", "PS4=+ "])
-    command.extend([bootstrap, "/bin/sh", "-ex", "-s"])
+    command.extend([orchestrator, "/bin/sh", "-ex", "-s"])
     returncode, _output = _run_streamed_command(
         command,
         input_text=build_script + "\n",

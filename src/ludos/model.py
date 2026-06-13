@@ -65,7 +65,7 @@ class Manifest:
     version: int
     env: dict[str, str | int]
     distro: str
-    bootstrap: str
+    orchestrator: str
     repos: tuple[RepoRef, ...]
     cards: tuple[str, ...]
     local_prefix: str = ""
@@ -79,7 +79,7 @@ class Manifest:
             version=_required_version(data, path),
             env=_env_dict(data, path),
             distro=_required_string(data, "distro", path),
-            bootstrap=_required_string(data, "bootstrap", path),
+            orchestrator=_required_string(data, "orchestrator", path),
             repos=_repo_refs_tuple(data, "repos", path),
             cards=_required_string_tuple(data, "cards", path),
             local_prefix=_optional_string(data, "local_prefix", path),

@@ -114,7 +114,7 @@ def build_command(args: argparse.Namespace) -> int:
     )
     log(
         f"Built {result.output_image} for {result.image} on {result.distro} "
-        f"with {Path(result.podman).name} using {result.bootstrap}"
+        f"with {Path(result.podman).name} using {result.orchestrator}"
     )
     blocks = ", ".join(
         f"{block_name}: {len(block_packages)}"
