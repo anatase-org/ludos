@@ -93,6 +93,10 @@ def show_logo(_args: argparse.Namespace) -> int:
 
 def validate_command(args: argparse.Namespace) -> int:
     result = validate_manifest(args.manifest, args.cards_dir)
+    if result.missing_bootstrap:
+        raise ConfigError(
+            f"{args.manifest}: missing bootstrap card: {result.missing_bootstrap}"
+        )
     if result.missing_repos:
         missing = ", ".join(result.missing_repos)
         raise ConfigError(f"{args.manifest}: missing repository definitions: {missing}")
@@ -100,7 +104,10 @@ def validate_command(args: argparse.Namespace) -> int:
         missing = ", ".join(result.missing_cards)
         raise ConfigError(f"{args.manifest}: missing card definitions: {missing}")
 
-    log(f"Manifest is valid: {len(result.repos)} repos, {len(result.cards)} cards")
+    log(
+        f"Manifest is valid: bootstrap, {len(result.repos)} repos, "
+        f"{len(result.cards)} cards"
+    )
     return 0
 
 

@@ -66,6 +66,7 @@ class Manifest:
     env: dict[str, str | int]
     distro: str
     orchestrator: str
+    bootstrap: str
     repos: tuple[RepoRef, ...]
     cards: tuple[str, ...]
     local_prefix: str = ""
@@ -80,6 +81,7 @@ class Manifest:
             env=_env_dict(data, path),
             distro=_required_string(data, "distro", path),
             orchestrator=_required_string(data, "orchestrator", path),
+            bootstrap=_required_string(data, "bootstrap", path),
             repos=_repo_refs_tuple(data, "repos", path),
             cards=_required_string_tuple(data, "cards", path),
             local_prefix=_optional_string(data, "local_prefix", path),
@@ -91,14 +93,20 @@ class Manifest:
 @dataclass(frozen=True)
 class ManifestValidation:
     manifest: Manifest
+    bootstrap: Card | None
     repos: tuple[ResolvedRepo, ...]
     cards: tuple[Card, ...]
+    missing_bootstrap: str
     missing_repos: tuple[str, ...]
     missing_cards: tuple[str, ...]
 
     @property
     def ok(self) -> bool:
-        return not self.missing_repos and not self.missing_cards
+        return (
+            not self.missing_bootstrap
+            and not self.missing_repos
+            and not self.missing_cards
+        )
 
 
 def validate_manifest(
@@ -108,6 +116,14 @@ def validate_manifest(
     manifest = Manifest.from_file(manifest_path)
     root_dir = manifest_path.parent
     cards_dir = cards_dir.resolve() if cards_dir else None
+
+    bootstrap_path = _resolve_card_path(manifest.bootstrap, root_dir, cards_dir)
+    bootstrap = None
+    missing_bootstrap = ""
+    if bootstrap_path.exists():
+        bootstrap = Card.from_file(bootstrap_path)
+    else:
+        missing_bootstrap = manifest.bootstrap
 
     repos = []
     missing_repos = []
@@ -131,8 +147,10 @@ def validate_manifest(
 
     return ManifestValidation(
         manifest=manifest,
+        bootstrap=bootstrap,
         repos=tuple(repos),
         cards=tuple(cards),
+        missing_bootstrap=missing_bootstrap,
         missing_repos=tuple(missing_repos),
         missing_cards=tuple(missing_cards),
     )

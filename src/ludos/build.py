@@ -22,6 +22,7 @@ from .model import ConfigError, validate_manifest
 
 
 HASH_LENGTH = 8
+BOOTSTRAP_BLOCK = "bootstrap"
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,10 @@ def build_manifest(
 ) -> BuildResult:
     log(f"Validating manifest: {manifest_path}")
     validation = validate_manifest(manifest_path, cards_dir)
+    if validation.missing_bootstrap:
+        raise ConfigError(
+            f"{manifest_path}: missing bootstrap card: {validation.missing_bootstrap}"
+        )
     if validation.missing_repos:
         missing = ", ".join(validation.missing_repos)
         raise ConfigError(f"{manifest_path}: missing repository definitions: {missing}")
@@ -231,7 +236,6 @@ def build_manifest(
         card_entries.append((card.priority, insertion_order, card_name, card))
 
     card_entries.sort(key=lambda entry: (entry[0], entry[1]))
-    requested_packages = []
     card_requests = []
     card_names = []
     card_file_sets = []
@@ -241,7 +245,34 @@ def build_manifest(
     card_envs = {}
     card_sources = {}
     postprocess_blocks = []
+    bootstrap_card = validation.bootstrap
+    if bootstrap_card is None:
+        raise ConfigError(f"{manifest_path}: missing bootstrap card")
+    if bootstrap_card.source is None:
+        raise ConfigError("bootstrap card has no source path")
+    if not bootstrap_card.packages:
+        raise ConfigError(f"{bootstrap_card.source}: bootstrap card must define packages")
+    if (
+        bootstrap_card.files
+        or bootstrap_card.build.strip()
+        or bootstrap_card.postprocess.strip()
+    ):
+        raise ConfigError(
+            f"{bootstrap_card.source}: bootstrap card may only define packages, env, and prepare"
+        )
+
+    bootstrap_env = _card_env(manifest_env, bootstrap_card.env)
+    if bootstrap_card.prepare.strip():
+        log("Preparing bootstrap card")
+        prepared_env = _run_prepare_block(
+            card_source=bootstrap_card.source,
+            card_env=bootstrap_env,
+            prepare_script=bootstrap_card.prepare.rstrip(),
+        )
+        bootstrap_env.update(prepared_env)
+
     inherited_env = dict(manifest_env)
+    requested_packages = list(bootstrap_card.packages)
     for _priority, _insertion_order, card_name, card in card_entries:
         if card.source is None:
             raise ConfigError(f"card '{card_name}' has no source path")
@@ -275,7 +306,10 @@ def build_manifest(
     requested_packages = tuple(requested_packages)
     if not requested_packages and not card_builds:
         raise ConfigError(f"{manifest_path}: no packages requested by cards")
-    log(f"Collected {len(requested_packages)} requested packages from {len(card_entries)} cards")
+    log(
+        f"Collected {len(requested_packages)} requested packages from "
+        f"bootstrap and {len(card_entries)} cards"
+    )
     if card_builds:
         log(f"Collected {len(card_builds)} build cards")
 
@@ -300,6 +334,16 @@ def build_manifest(
         orchestrator,
         "dnf5",
     ]
+
+    log("Resolving package transaction for bootstrap")
+    bootstrap_resolved_packages = _resolve_packages(
+        orchestrator_dnf_base,
+        manifest_env["releasever"],
+        tuple(bootstrap_card.packages),
+    )
+    if not bootstrap_resolved_packages:
+        raise ConfigError("dnf did not resolve packages for bootstrap")
+    bootstrap_package_set = set(bootstrap_resolved_packages)
 
     card_resolutions = []
     for card_name, card_packages in zip(card_names, card_requests):
@@ -359,6 +403,9 @@ def build_manifest(
         package for package, count in package_counts.items() if count > 1
     }
     common_package_set = _drop_minimal_provider_conflicts(common_package_set)
+    common_package_set = {
+        package for package in common_package_set if package not in bootstrap_package_set
+    }
     seen_common_packages = set()
     package_blocks = []
     common_packages = []
@@ -374,14 +421,16 @@ def build_manifest(
     else:
         package_block_hashes = []
 
-    resolved_package_list = list(common_packages)
-    selected_package_set = set(common_packages)
+    resolved_package_list = list(bootstrap_resolved_packages)
+    resolved_package_list.extend(common_packages)
+    selected_package_set = set(bootstrap_resolved_packages)
+    selected_package_set.update(common_packages)
     for card_name, card_request, card_resolution in zip(
         card_names, card_requests, card_resolutions
     ):
         card_packages = []
         for package in card_resolution:
-            if package in common_package_set:
+            if package in bootstrap_package_set or package in common_package_set:
                 continue
             full_package = _full_provider_package(package)
             if full_package != package and full_package in selected_package_set:
@@ -395,11 +444,18 @@ def build_manifest(
         resolved_package_list.extend(card_packages)
         selected_package_set.update(card_packages)
     package_blocks = tuple(package_blocks)
+    bootstrap_package_block = (BOOTSTRAP_BLOCK, tuple(bootstrap_resolved_packages))
+    bootstrap_package_block_hash = _package_hash(tuple(bootstrap_resolved_packages))
+    package_download_blocks = (bootstrap_package_block, *package_blocks)
+    package_download_hashes = (bootstrap_package_block_hash, *package_block_hashes)
     resolved_packages = tuple(resolved_package_list)
     resolved_packages = _drop_minimal_provider_conflicts(resolved_packages)
     if not resolved_packages and not package_blocks:
         raise ConfigError("dnf did not resolve any packages")
-    log(f"Resolved {len(resolved_packages)} packages into {len(package_blocks)} install blocks")
+    log(
+        f"Resolved {len(resolved_packages)} packages into "
+        f"{len(package_download_blocks)} install blocks"
+    )
 
     builder_images = {}
     for card_name in card_builds:
@@ -437,7 +493,7 @@ def build_manifest(
     build_images = []
     build_images_by_block = {}
     for (block_name, block_packages), block_hash in zip(
-        package_blocks, package_block_hashes
+        package_download_blocks, package_download_hashes
     ):
         if not block_packages:
             continue
@@ -526,9 +582,10 @@ def build_manifest(
         expanded_package_blocks.append((block_name, block_packages))
 
     package_blocks = tuple(expanded_package_blocks)
+    final_package_blocks = (bootstrap_package_block, *package_blocks)
     resolved_packages = tuple(
         package
-        for _block_name, block_packages in package_blocks
+        for _block_name, block_packages in final_package_blocks
         for package in block_packages
     )
 
@@ -586,7 +643,7 @@ def build_manifest(
     log(f"Generating Containerfile: {build_dir / 'Containerfile'}")
     package_stage_names = {
         block_name: f"cards_{_identifier(block_name)}"
-        for block_name, _block_packages in package_blocks
+        for block_name, _block_packages in final_package_blocks
         if block_name in package_images_by_block
     }
     build_stage_names = {
@@ -596,7 +653,7 @@ def build_manifest(
     }
     package_stage_lines = "".join(
         f"FROM {package_images_by_block[block_name]} AS {package_stage_names[block_name]}\n"
-        for block_name, _block_packages in package_blocks
+        for block_name, _block_packages in final_package_blocks
         if block_name in package_images_by_block
     )
     build_stage_lines = "".join(
@@ -605,6 +662,47 @@ def build_manifest(
         if block_name in build_images_by_block
     )
     install_steps = []
+    bootstrap_stage_name = package_stage_names[BOOTSTRAP_BLOCK]
+    bootstrap_copy_lines = (
+        f"COPY --from={bootstrap_stage_name} /rpms/ /rpms/{BOOTSTRAP_BLOCK}/packages/\n"
+    )
+    bootstrap_package_globs = f"/rpms/{BOOTSTRAP_BLOCK}/packages/*.rpm"
+    bootstrap_step = f"""FROM {orchestrator} AS bootstrap
+WORKDIR /workspace/repos
+RUN mkdir -p /target
+
+#
+# Bootstrap root
+#
+
+{bootstrap_copy_lines}\
+RUN /bin/sh <<'LUDOS_BOOTSTRAP'
+set -e
+rpm_args=
+for rpm in {bootstrap_package_globs}; do
+    [ -e "$rpm" ] || continue
+    rpm_args="$rpm_args $rpm"
+done
+[ -n "$rpm_args" ] || exit 0
+dnf5 -y \\
+    --installroot=/target \\
+    --releasever={manifest_env["releasever"]} \\
+    --setopt=reposdir=/ludos/dnf/repos \\
+    --setopt=cachedir=/ludos/dnf/cache \\
+    --setopt=persistdir=/ludos/dnf/persist \\
+    --setopt=logdir=/ludos/dnf/log \\
+    --setopt=install_weak_deps=False \\
+    --cacheonly \\
+    --disable-repo='*' \\
+    --enable-repo='*' \\
+    --nogpgcheck \\
+    install \\
+    --allowerasing \\
+    $rpm_args \\
+    && \\
+    rm -rf /target/var/cache/dnf /target/var/log/dnf*
+LUDOS_BOOTSTRAP
+"""
     for block_name, block_packages in package_blocks:
         rpm_sources = []
         if block_name in package_stage_names:
@@ -636,7 +734,6 @@ for rpm in {package_globs}; do
 done
 [ -n "$rpm_args" ] || exit 0
 dnf5 -y \\
-    --installroot=/target \\
     --releasever={manifest_env["releasever"]} \\
     --setopt=reposdir=/ludos/dnf/repos \\
     --setopt=cachedir=/ludos/dnf/cache \\
@@ -651,7 +748,7 @@ dnf5 -y \\
     --allowerasing \\
     $rpm_args \\
     && \\
-    rm -rf /target/var/cache/dnf /target/var/log/dnf*
+    rm -rf /var/cache/dnf /var/log/dnf*
 LUDOS_INSTALL_{block_name}
 """
         )
@@ -683,9 +780,10 @@ LUDOS_POSTPROCESS_{block_name}
     postprocess_step_lines = "\n".join(postprocess_steps)
     containerfile = build_dir / "Containerfile"
     containerfile.write_text(
-        f"""{package_stage_lines}{build_stage_lines}FROM {orchestrator} AS install
+        f"""{package_stage_lines}{build_stage_lines}{bootstrap_step}
+FROM scratch AS install
+COPY --from=bootstrap /target /
 WORKDIR /workspace/repos
-RUN mkdir -p /target
 
 #
 # Install packages
@@ -694,13 +792,10 @@ RUN mkdir -p /target
 {install_step_lines}
 
 #
-# Switch to real root
+# Normalize root
 #
 
-RUN rm -rf /target/etc/machine-id /target/var/lib/dbus/machine-id
-
-FROM scratch
-COPY --from=install /target /
+RUN rm -rf /etc/machine-id /var/lib/dbus/machine-id
 
 #
 # Run postprocessing
@@ -744,7 +839,7 @@ COPY --from=install /target /
         output_image=output_image,
         requested_packages=requested_packages,
         resolved_packages=resolved_packages,
-        package_blocks=package_blocks,
+        package_blocks=final_package_blocks,
         package_dir=package_dir,
         repo_dir=repo_dir,
         podman=str(podman),
