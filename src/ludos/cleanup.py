@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .build import resolve_manifest_images
+from .build import _run_logged_command, resolve_manifest_images
 from .logging import log
 from .model import ConfigError
 
@@ -23,6 +23,7 @@ class CleanupTarget:
     display: str
     size_bytes: int
     image_id: str
+    remove_containers: bool = True
 
 
 @dataclass(frozen=True)
@@ -57,24 +58,20 @@ def cleanup_local_images(
         return 0
 
     action = "Would remove" if dry_run else "Removing"
-    total_size = _estimated_total_size(stale_images)
     log(f"{action} {len(stale_images)} stale local cache images")
-    log(f"Estimated total saved: {_format_bytes(total_size)}")
     buildah = shutil.which("buildah")
     buildah_containers = _buildah_containers_by_image(buildah) if buildah else {}
-    protected_image_ids = _protected_image_ids(
-        podman, f"-{clean_version}", manifest_targets
-    )
-    stale_containers = _stale_buildah_containers(
-        stale_images, buildah_containers, protected_image_ids
-    )
+    stale_containers = _stale_buildah_containers(stale_images, buildah_containers)
     if dry_run:
         for container in stale_containers:
             log(f"Would remove build container: {container.name}")
     elif buildah:
         for container in stale_containers:
             log(f"Removing build container: {container.name}")
-            subprocess.run([buildah, "rm", container.id], check=True)
+            _run_logged_command(
+                [buildah, "rm", container.id],
+                "build container removal",
+            )
 
     for image in stale_images:
         display = f"{image.display} ({_format_bytes(image.size_bytes)})"
@@ -82,7 +79,7 @@ def cleanup_local_images(
             log(f"Would remove image: {display}")
         else:
             log(f"Removing image: {display}")
-            subprocess.run([podman, "rmi", image.ref], check=True)
+            _run_logged_command([podman, "rmi", image.ref], "image removal")
 
     return 0
 
@@ -177,11 +174,7 @@ def _stale_local_images(
                 stale.append(CleanupTarget(name, name, image_size, image_id))
                 seen.add(name)
 
-        if _is_stale_dangling_image(
-            image,
-            current_suffix,
-            manifest_keep_refs,
-        ):
+        if _is_manifest_dangling_image(image, manifest_keep_refs):
             if image_id and image_id not in seen:
                 history = ", ".join(_image_history(image)) or "<unknown>"
                 stale.append(
@@ -190,6 +183,7 @@ def _stale_local_images(
                         f"{image_id[:12]} ({history})",
                         image_size,
                         image_id,
+                        remove_containers=False,
                     )
                 )
                 seen.add(image_id)
@@ -206,77 +200,21 @@ def _image_size(image: dict[str, object]) -> int:
     return 0
 
 
-def _estimated_total_size(images: tuple[CleanupTarget, ...]) -> int:
-    total = 0
-    seen_ids = set()
-    for image in images:
-        key = image.image_id or image.ref
-        if key in seen_ids:
-            continue
-        total += image.size_bytes
-        seen_ids.add(key)
-    return total
-
-
 def _stale_buildah_containers(
     images: tuple[CleanupTarget, ...],
     containers_by_image: dict[str, tuple[BuildahContainer, ...]],
-    protected_image_ids: set[str],
 ) -> tuple[BuildahContainer, ...]:
     containers: list[BuildahContainer] = []
     seen_ids = set()
-    target_image_ids = {image.image_id for image in images if image.image_id}
     for image in images:
+        if not image.remove_containers:
+            continue
         for container in containers_by_image.get(image.image_id, ()):
             if container.id in seen_ids:
                 continue
             containers.append(container)
             seen_ids.add(container.id)
-    for image_id, image_containers in containers_by_image.items():
-        if image_id in target_image_ids or image_id in protected_image_ids:
-            continue
-        for container in image_containers:
-            if container.id in seen_ids:
-                continue
-            containers.append(container)
-            seen_ids.add(container.id)
     return tuple(containers)
-
-
-def _protected_image_ids(
-    podman: str, current_suffix: str, manifest_targets: tuple[str, ...]
-) -> set[str]:
-    result = subprocess.run(
-        [podman, "images", "--format", "json"],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    images = json.loads(result.stdout or "[]")
-    manifest_keep_refs = set(manifest_targets)
-    protected = set()
-    for image in images:
-        if not isinstance(image, dict):
-            continue
-        image_id = image.get("Id")
-        if not isinstance(image_id, str):
-            continue
-        refs = (*_image_names(image), *_image_history(image))
-        if any(_is_current_ref(ref, current_suffix, manifest_keep_refs) for ref in refs):
-            protected.add(image_id)
-    return protected
-
-
-def _is_current_ref(
-    ref: str, current_suffix: str, manifest_keep_refs: set[str]
-) -> bool:
-    if ref in manifest_keep_refs:
-        return True
-    parsed = _split_image_name(ref)
-    if parsed is None:
-        return False
-    _repository, tag = parsed
-    return tag.endswith(current_suffix)
 
 
 def _buildah_containers_by_image(
@@ -358,23 +296,14 @@ def _keep_named_image(
     return True
 
 
-def _is_stale_dangling_image(
-    image: dict[str, object],
-    current_suffix: str,
-    manifest_keep_refs: set[str],
+def _is_manifest_dangling_image(
+    image: dict[str, object], manifest_keep_refs: set[str]
 ) -> bool:
-    if _image_names(image) or not image.get("Dangling"):
-        return False
-    for history_name in _image_history(image):
-        if history_name in manifest_keep_refs:
-            return False
-        parsed = _split_image_name(history_name)
-        if parsed is None:
-            continue
-        _repository, tag = parsed
-        if tag.endswith(current_suffix):
-            return False
-    return True
+    return (
+        not _image_names(image)
+        and bool(image.get("Dangling"))
+        and any(history in manifest_keep_refs for history in _image_history(image))
+    )
 
 
 def _split_image_name(name: str) -> tuple[str, str] | None:
