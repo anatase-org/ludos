@@ -124,11 +124,24 @@ def build_command(args: argparse.Namespace) -> int:
         f"with {Path(result.podman).name} using {result.orchestrator}"
     )
     blocks = ", ".join(
-        f"{block_name}: {len(block_packages)}"
+        _package_block_summary(block_name, block_packages, result.build_blocks)
         for block_name, block_packages in result.package_blocks
     )
     log(f"Package blocks: {blocks}")
     return 0
+
+
+def _package_block_summary(
+    block_name: str,
+    block_packages: tuple[str, ...],
+    build_blocks: tuple[str, ...],
+) -> str:
+    package_count = len(block_packages)
+    if block_name in build_blocks:
+        if package_count:
+            return f"{block_name}: {package_count} + build"
+        return f"{block_name}: build"
+    return f"{block_name}: {package_count}"
 
 
 def cleanup_command(args: argparse.Namespace) -> int:

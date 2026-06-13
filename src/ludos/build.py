@@ -41,6 +41,7 @@ class BuildResult:
     repo_images: tuple[str, ...]
     package_images: tuple[str, ...]
     build_images: tuple[str, ...] = tuple()
+    build_blocks: tuple[str, ...] = tuple()
     builder_images: tuple[str, ...] = tuple()
 
 
@@ -615,6 +616,7 @@ def build_manifest(
             repo_images=tuple(repo_images),
             package_images=tuple(package_images),
             build_images=tuple(build_images),
+            build_blocks=tuple(build_images_by_block),
             builder_images=tuple(builder_images.values()),
         )
 
@@ -880,6 +882,7 @@ RUN rm -rf /etc/machine-id /var/lib/dbus/machine-id
         repo_images=tuple(repo_images),
         package_images=tuple(package_images),
         build_images=tuple(build_images),
+        build_blocks=tuple(build_images_by_block),
         builder_images=tuple(builder_images.values()),
     )
 
