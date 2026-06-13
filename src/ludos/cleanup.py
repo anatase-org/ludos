@@ -7,12 +7,14 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .build import _cache_name, _load_dotenv, _substitute_variables
+from .build import resolve_manifest_images
 from .logging import log
-from .model import ConfigError, Manifest
+from .model import ConfigError
 
 
-CLEANUP_REPOSITORIES = ("repos", "cards", "builds", "builders")
+VERSIONED_CLEANUP_REPOSITORIES = ("orchestrator", "repos", "builders")
+RESOLVED_CLEANUP_REPOSITORIES = ("cards", "builds")
+CLEANUP_REPOSITORIES = (*VERSIONED_CLEANUP_REPOSITORIES, *RESOLVED_CLEANUP_REPOSITORIES)
 
 
 @dataclass(frozen=True)
@@ -45,7 +47,7 @@ def cleanup_local_images(
     manifest_targets = tuple(
         target
         for manifest in manifests
-        for target in _manifest_cleanup_targets(manifest)
+        for target in _manifest_cleanup_targets(manifest, clean_version)
     )
     stale_images = _stale_local_images(
         podman, clean_version, clean_local_prefix, manifest_targets
@@ -100,22 +102,23 @@ def _cleanup_local_prefix(value: str) -> str:
     return value
 
 
-def _manifest_cleanup_targets(manifest_path: Path) -> tuple[str, ...]:
-    manifest = Manifest.from_file(manifest_path)
-    root_dir = manifest_path.resolve().parent
-    image = _cache_name(manifest_path.resolve().stem, "image")
-    manifest_env = {key: str(value) for key, value in manifest.env.items()}
-    local_values = _load_dotenv(root_dir / ".env")
-    local_prefix = local_values.pop("local_prefix", manifest.local_prefix)
-    local_prefix = _cleanup_local_prefix(local_prefix)
-    manifest_env.update(local_values)
-    distro = _cache_name(
-        _substitute_variables(manifest.distro, manifest_env),
-        "distro",
+def _manifest_cleanup_targets(manifest_path: Path, version: str) -> tuple[str, ...]:
+    result = resolve_manifest_images(manifest_path, cache_version=version)
+    targets = (
+        result.output_image,
+        result.orchestrator,
+        *result.repo_images,
+        *result.package_images,
+        *result.build_images,
+        *result.builder_images,
     )
-    current = f"localhost/{local_prefix}{image}:{distro}"
-    log(f"Keeping manifest image: {current}")
-    return (current,)
+    log(f"Keeping manifest image: {result.output_image}")
+    if result.package_images or result.build_images:
+        log(
+            f"Keeping resolved cache images: "
+            f"{len(result.package_images)} cards, {len(result.build_images)} builds"
+        )
+    return targets
 
 
 def _stale_local_images(
@@ -124,8 +127,13 @@ def _stale_local_images(
     local_prefix: str,
     manifest_targets: tuple[str, ...] = tuple(),
 ) -> tuple[CleanupTarget, ...]:
-    cache_repositories = {
-        f"localhost/{local_prefix}{repository}" for repository in CLEANUP_REPOSITORIES
+    versioned_cache_repositories = {
+        f"localhost/{local_prefix}{repository}"
+        for repository in VERSIONED_CLEANUP_REPOSITORIES
+    }
+    resolved_cache_repositories = {
+        f"localhost/{local_prefix}{repository}"
+        for repository in RESOLVED_CLEANUP_REPOSITORIES
     }
     manifest_keep_refs = set(manifest_targets)
     manifest_repositories = {
@@ -159,7 +167,8 @@ def _stale_local_images(
                 name,
                 repository,
                 tag,
-                cache_repositories,
+                versioned_cache_repositories,
+                resolved_cache_repositories,
                 manifest_repositories,
                 manifest_keep_refs,
                 current_suffix,
@@ -172,6 +181,7 @@ def _stale_local_images(
         if _is_stale_dangling_image(
             image,
             current_suffix,
+            manifest_keep_refs,
         ):
             if image_id and image_id not in seen:
                 history = ", ".join(_image_history(image)) or "<unknown>"
@@ -332,12 +342,17 @@ def _keep_named_image(
     name: str,
     repository: str,
     tag: str,
-    cache_repositories: set[str],
+    versioned_cache_repositories: set[str],
+    resolved_cache_repositories: set[str],
     manifest_repositories: set[str],
     manifest_keep_refs: set[str],
     current_suffix: str,
 ) -> bool:
-    if repository in cache_repositories:
+    if name in manifest_keep_refs:
+        return True
+    if repository in resolved_cache_repositories:
+        return False
+    if repository in versioned_cache_repositories:
         return tag.endswith(current_suffix)
     if repository in manifest_repositories:
         return name in manifest_keep_refs
@@ -347,10 +362,13 @@ def _keep_named_image(
 def _is_stale_dangling_image(
     image: dict[str, object],
     current_suffix: str,
+    manifest_keep_refs: set[str],
 ) -> bool:
     if _image_names(image) or not image.get("Dangling"):
         return False
     for history_name in _image_history(image):
+        if history_name in manifest_keep_refs:
+            return False
         parsed = _split_image_name(history_name)
         if parsed is None:
             continue

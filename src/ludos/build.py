@@ -65,6 +65,7 @@ def build_manifest(
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
+    resolve_only: bool = False,
 ) -> BuildResult:
     log(f"Validating manifest: {manifest_path}")
     validation = validate_manifest(manifest_path, cards_dir)
@@ -417,7 +418,7 @@ def build_manifest(
             common_packages.append(package)
     if common_packages:
         package_blocks.append(("common", tuple(common_packages)))
-        package_block_hashes = [_package_hash(tuple(common_packages))]
+        package_block_hashes = [_nevra_hash(tuple(common_packages))]
     else:
         package_block_hashes = []
 
@@ -440,12 +441,12 @@ def build_manifest(
             continue
         card_packages = tuple(card_packages)
         package_blocks.append((card_name, card_packages))
-        package_block_hashes.append(_package_hash(card_packages))
+        package_block_hashes.append(_nevra_hash(card_packages))
         resolved_package_list.extend(card_packages)
         selected_package_set.update(card_packages)
     package_blocks = tuple(package_blocks)
     bootstrap_package_block = (BOOTSTRAP_BLOCK, tuple(bootstrap_resolved_packages))
-    bootstrap_package_block_hash = _package_hash(tuple(bootstrap_resolved_packages))
+    bootstrap_package_block_hash = _nevra_hash(tuple(bootstrap_resolved_packages))
     package_download_blocks = (bootstrap_package_block, *package_blocks)
     package_download_hashes = (bootstrap_package_block_hash, *package_block_hashes)
     resolved_packages = tuple(resolved_package_list)
@@ -467,6 +468,8 @@ def build_manifest(
             f"{manifest_env['releasever']}-{builder_hash}-{cache_version}",
         )
         builder_images[card_name] = builder_image
+        if resolve_only:
+            continue
         if _image_exists(podman, builder_image):
             log(f"Reusing builder image: {builder_image}")
             continue
@@ -500,8 +503,12 @@ def build_manifest(
         package_image = _local_image(
             local_prefix,
             "cards",
-            f"{block_name}-{block_hash}-{cache_version}",
+            f"{block_name}-{block_hash}",
         )
+        if resolve_only:
+            package_images.append(package_image)
+            package_images_by_block[block_name] = package_image
+            continue
         if _image_exists(podman, package_image):
             log(f"Reusing card package image: {package_image}")
         elif cache_only:
@@ -514,7 +521,7 @@ def build_manifest(
             log(f"Creating card package image: {package_image}")
             _create_package_image(
                 buildah=_require_buildah(buildah),
-                build_dir=oci_dir / "cards" / f"{block_name}-{block_hash}-{cache_version}",
+                build_dir=oci_dir / "cards" / f"{block_name}-{block_hash}",
                 image=package_image,
                 package_dir=package_dir,
                 rpm_files=repo_rpm_files,
@@ -535,8 +542,12 @@ def build_manifest(
         build_image = _local_image(
             local_prefix,
             "builds",
-            f"{block_name}-{build_hash}-{cache_version}",
+            f"{block_name}-{build_hash}",
         )
+        if resolve_only:
+            build_images.append(build_image)
+            build_images_by_block[block_name] = build_image
+            continue
         if _image_exists(podman, build_image):
             log(f"Reusing build output image: {build_image}")
             build_images.append(build_image)
@@ -566,7 +577,7 @@ def build_manifest(
         log(f"Creating build output image: {build_image}")
         _create_build_output_image(
             buildah=_require_buildah(buildah),
-            build_dir=oci_dir / "builds" / f"{block_name}-{build_hash}-{cache_version}",
+            build_dir=oci_dir / "builds" / f"{block_name}-{build_hash}",
             image=build_image,
             rpm_dir=build_output.rpm_dir,
             files_dir=build_output.files_dir,
@@ -588,6 +599,25 @@ def build_manifest(
         for _block_name, block_packages in final_package_blocks
         for package in block_packages
     )
+
+    if resolve_only:
+        return BuildResult(
+            image=image,
+            distro=distro,
+            orchestrator=orchestrator,
+            output_image=output_image,
+            requested_packages=requested_packages,
+            resolved_packages=resolved_packages,
+            package_blocks=final_package_blocks,
+            package_dir=package_dir,
+            repo_dir=repo_dir,
+            podman=str(podman),
+            cache_version=cache_version,
+            repo_images=tuple(repo_images),
+            package_images=tuple(package_images),
+            build_images=tuple(build_images),
+            builder_images=tuple(builder_images.values()),
+        )
 
     label_lines = "".join(
         f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
@@ -852,6 +882,22 @@ RUN rm -rf /etc/machine-id /var/lib/dbus/machine-id
         package_images=tuple(package_images),
         build_images=tuple(build_images),
         builder_images=tuple(builder_images.values()),
+    )
+
+
+def resolve_manifest_images(
+    manifest_path: Path,
+    cards_dir: Path | None = None,
+    cache_dir: Path | None = None,
+    cache_version: str | None = None,
+) -> BuildResult:
+    return build_manifest(
+        manifest_path,
+        cards_dir=cards_dir,
+        cache_dir=cache_dir,
+        cache_version=cache_version,
+        cache_only=True,
+        resolve_only=True,
     )
 
 
@@ -1430,6 +1476,10 @@ def _run_card_build(
 def _package_hash(packages: tuple[str, ...]) -> str:
     payload = "\n".join(sorted(packages)) + "\n"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:HASH_LENGTH]
+
+
+def _nevra_hash(nevras: tuple[str, ...]) -> str:
+    return _package_hash(nevras)
 
 
 def _card_build_hash(
