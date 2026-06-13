@@ -89,8 +89,7 @@ def cleanup_local_images(
 
 def _cleanup_version(value: str | None) -> str:
     if value is None:
-        iso_today = _datetime.date.today().isocalendar()
-        return f"{iso_today.year}-{iso_today.week:02d}"
+        return _datetime.date.today().strftime("%Y%m%d")
     if "/" in value or value in ("", ".", ".."):
         raise ConfigError(f"invalid version cache name '{value}'")
     return value

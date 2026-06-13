@@ -94,8 +94,7 @@ def build_manifest(
     orchestrator = _substitute_variables(validation.manifest.orchestrator, manifest_env)
     output_image = f"localhost/{local_prefix}{image}:{distro}"
     if cache_version is None:
-        iso_today = _datetime.date.today().isocalendar()
-        cache_version = f"{iso_today.year}-{iso_today.week:02d}"
+        cache_version = _datetime.date.today().strftime("%Y%m%d")
         load_only_version = False
     else:
         cache_version = _cache_name(cache_version, "version")
