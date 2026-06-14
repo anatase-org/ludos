@@ -159,7 +159,7 @@ def build_manifest(
     orchestrator_image = _local_image(
         local_prefix,
         "orchestrator",
-        f"{releasever}-{cache_version}",
+        f"{distro}-{cache_version}",
     )
     if _image_exists(podman, orchestrator_image):
         log(f"Reusing orchestrator image: {orchestrator_image}")
