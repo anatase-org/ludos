@@ -78,6 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for update caches. Defaults to ./cache.",
     )
     update.add_argument(
+        "--patchwork-dir",
+        type=Path,
+        default=None,
+        help="Directory for update patchwork checkouts. Defaults to ./patchwork.",
+    )
+    update.add_argument(
         "--dry-run",
         action="store_true",
         help="Fetch and merge in the cache without copying files back or updating locks.",
@@ -186,7 +192,12 @@ def cleanup_command(args: argparse.Namespace) -> int:
 
 
 def update_command(args: argparse.Namespace) -> int:
-    return update_targets(tuple(args.targets), args.cache_dir, args.dry_run)
+    return update_targets(
+        tuple(args.targets),
+        cache_dir=args.cache_dir,
+        patchwork_dir=args.patchwork_dir,
+        dry_run=args.dry_run,
+    )
 
 
 def main() -> int:

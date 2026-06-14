@@ -22,12 +22,21 @@ class UpstreamRef:
 
 
 @dataclass(frozen=True)
+class PatchRef:
+    type: str
+    url: str
+    ref: str
+    file: str
+
+
+@dataclass(frozen=True)
 class SpecBuild:
     spec: str
     packages: dict[str, tuple[str, ...]] = field(default_factory=dict)
     replace: dict[str, str] = field(default_factory=dict)
     files: tuple[str, ...] = tuple()
     upstream: UpstreamRef | None = None
+    patch: PatchRef | None = None
 
 
 @dataclass(frozen=True)
@@ -377,6 +386,7 @@ def _spec_builds_tuple(
         replace = _spec_replace_dict(item, "replace", path, label)
         files = _string_tuple(item, "files", path)
         upstream = _upstream_ref(item, "upstream", path, label)
+        patch = _patch_ref(item, "patch", path, label)
         specs.append(
             SpecBuild(
                 spec=spec,
@@ -384,6 +394,7 @@ def _spec_builds_tuple(
                 replace=replace,
                 files=files,
                 upstream=upstream,
+                patch=patch,
             )
         )
 
@@ -455,6 +466,30 @@ def _upstream_ref(
             f"{path}: '{label}.{key}.branch' and '{label}.{key}.ref' must be strings"
         )
     return UpstreamRef(type=upstream_type, url=url, branch=branch, ref=ref)
+
+
+def _patch_ref(
+    data: dict[str, Any], key: str, path: Path, label: str
+) -> PatchRef | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path}: '{label}.{key}' must be a mapping")
+
+    patch_type = value.get("type")
+    url = value.get("url")
+    ref = value.get("ref")
+    file = value.get("file")
+    if not isinstance(patch_type, str) or not patch_type.strip():
+        raise ConfigError(f"{path}: '{label}.{key}.type' must be a non-empty string")
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError(f"{path}: '{label}.{key}.url' must be a non-empty string")
+    if not isinstance(ref, str) or not ref.strip():
+        raise ConfigError(f"{path}: '{label}.{key}.ref' must be a non-empty string")
+    if not isinstance(file, str) or not file.strip():
+        raise ConfigError(f"{path}: '{label}.{key}.file' must be a non-empty string")
+    return PatchRef(type=patch_type, url=url, ref=ref, file=file)
 
 
 def _string_dict(data: dict[str, Any], key: str, path: Path) -> dict[str, str]:

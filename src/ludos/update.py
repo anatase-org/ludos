@@ -1,22 +1,28 @@
 from __future__ import annotations
 
 import os
+import re
+import signal
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .logging import log
-from .model import Card, ConfigError, SpecBuild, UpstreamRef, validate_manifest
+from .logging import log, stream
+from .model import Card, ConfigError, PatchRef, SpecBuild, UpstreamRef, validate_manifest
 
 
 DEFAULT_CACHE_DIR = Path("cache")
+DEFAULT_PATCHWORK_DIR = Path("patchwork")
 DIST_GIT_CACHE = "dist-git"
 UPSTREAM_SHA = "upstream-sha"
+PATCH_SHA = "patch-sha"
 SHORT_SHA_LENGTH = 12
+LUDOS_BRANCH = "ludos"
 
 
 @dataclass(frozen=True)
@@ -35,6 +41,14 @@ class UpstreamSource:
 
 
 @dataclass(frozen=True)
+class PatchSource:
+    key: str
+    source_dir: Path
+    spec: SpecBuild
+    patch: PatchRef
+
+
+@dataclass(frozen=True)
 class UpstreamHead:
     sha: str
     label: str
@@ -43,13 +57,20 @@ class UpstreamHead:
 def update_targets(
     targets: tuple[Path, ...],
     cache_dir: Path | None = None,
+    patchwork_dir: Path | None = None,
     dry_run: bool = False,
 ) -> int:
     cache_dir = _cache_dir(cache_dir)
+    patchwork_dir = _patchwork_dir(patchwork_dir)
     cards = _target_cards(targets)
     totals = CardUpdateResult()
     for card in cards:
-        result = update_card(card, cache_dir, dry_run=dry_run)
+        result = update_card(
+            card,
+            cache_dir,
+            patchwork_dir,
+            dry_run=dry_run,
+        )
         totals = CardUpdateResult(
             initialized=totals.initialized + result.initialized,
             skipped=totals.skipped + result.skipped,
@@ -67,12 +88,14 @@ def update_targets(
 def update_card(
     card: Card,
     cache_dir: Path,
+    patchwork_dir: Path,
     *,
     dry_run: bool = False,
 ) -> CardUpdateResult:
     card_source = _card_source(card)
     sources = _upstream_sources(card)
-    if not sources:
+    patch_sources = _patch_sources(card)
+    if not sources and not patch_sources:
         return CardUpdateResult()
 
     log(f"Updating card: {_display_path(card_source)}")
@@ -81,7 +104,7 @@ def update_card(
     lock_data = _read_lock(lock_path)
     result = CardUpdateResult()
     for source in sources:
-        old_sha = _locked_sha(lock_data, source.key)
+        old_sha = _locked_sha(lock_data, source.key, UPSTREAM_SHA)
         repo_dir = _ensure_dist_git_repo(
             cache_dir,
             card_label,
@@ -94,7 +117,7 @@ def update_card(
             action = "Would initialize" if dry_run else "Initializing"
             log(f"{action} upstream lock for {source.key}: {upstream_head.sha}")
             if not dry_run:
-                _set_locked_sha(lock_data, source.key, upstream_head.sha)
+                _set_locked_sha(lock_data, source.key, UPSTREAM_SHA, upstream_head.sha)
                 _write_lock(lock_path, lock_data)
             result = CardUpdateResult(
                 initialized=result.initialized + 1,
@@ -125,7 +148,7 @@ def update_card(
         )
         if not dry_run:
             _copy_merged_source(repo_dir, source)
-            _set_locked_sha(lock_data, source.key, upstream_head.sha)
+            _set_locked_sha(lock_data, source.key, UPSTREAM_SHA, upstream_head.sha)
             _write_lock(lock_path, lock_data)
 
         if conflict_paths:
@@ -144,6 +167,22 @@ def update_card(
             initialized=result.initialized,
             skipped=result.skipped,
             updated=result.updated + 1,
+        )
+
+    for source in patch_sources:
+        patch_result = _update_patch_source(
+            source=source,
+            card_label=card_label,
+            card_source=card_source,
+            patchwork_dir=patchwork_dir,
+            lock_path=lock_path,
+            lock_data=lock_data,
+            dry_run=dry_run,
+        )
+        result = CardUpdateResult(
+            initialized=result.initialized + patch_result.initialized,
+            skipped=result.skipped + patch_result.skipped,
+            updated=result.updated + patch_result.updated,
         )
 
     return result
@@ -224,6 +263,38 @@ def _upstream_sources(card: Card) -> tuple[UpstreamSource, ...]:
     return tuple(sources)
 
 
+def _patch_sources(card: Card) -> tuple[PatchSource, ...]:
+    card_source = _card_source(card)
+    card_base = _card_base_dir(card_source)
+    sources: list[PatchSource] = []
+    seen: set[str] = set()
+    for spec in card.specs:
+        if spec.patch is None:
+            continue
+        if spec.patch.type != "git":
+            raise ConfigError(
+                f"{card_source}: unsupported patch type "
+                f"'{spec.patch.type}' for spec '{spec.spec}'"
+            )
+        spec_path = _spec_source_path(card_source, card_base, spec)
+        source_dir = spec_path.parent
+        key = source_dir.relative_to(card_base).as_posix()
+        if key == ".":
+            key = card_base.name
+        if key in seen:
+            raise ConfigError(f"{card_source}: duplicate patch source '{key}'")
+        seen.add(key)
+        sources.append(
+            PatchSource(
+                key=key,
+                source_dir=source_dir,
+                spec=spec,
+                patch=spec.patch,
+            )
+        )
+    return tuple(sources)
+
+
 def _ensure_dist_git_repo(
     cache_dir: Path,
     card_label: str,
@@ -284,7 +355,7 @@ def _merge_dist_git_update(
 ) -> tuple[str, ...]:
     _reset_worktree(repo_dir)
     _rev_parse(repo_dir, old_sha)
-    _run_git(repo_dir, ["checkout", "-B", "ludos-update", old_sha], capture=True)
+    _run_git(repo_dir, ["checkout", "-B", LUDOS_BRANCH, old_sha], capture=True)
     if source.spec.files:
         _overlay_spec_files(repo_dir, source)
     else:
@@ -336,6 +407,354 @@ def _merge_dist_git_update(
     raise ConfigError(
         f"{repo_dir}: git merge failed with exit status {merge.returncode}"
     )
+
+
+def _update_patch_source(
+    *,
+    source: PatchSource,
+    card_label: str,
+    card_source: Path,
+    patchwork_dir: Path,
+    lock_path: Path,
+    lock_data: dict[str, Any],
+    dry_run: bool,
+) -> CardUpdateResult:
+    repo_dir = _ensure_patchwork_repo(patchwork_dir, card_label, source)
+    ref = _render_patch_ref(source, card_source)
+    new_sha = _rev_parse(repo_dir, ref)
+    old_sha = _locked_sha(lock_data, source.key, PATCH_SHA)
+    patch_file = _patch_file_path(card_source, source)
+
+    if not old_sha:
+        action = "Would initialize" if dry_run else "Initializing"
+        log(f"{action} patch lock for {source.key}: {new_sha}")
+        if not dry_run:
+            _set_locked_sha(lock_data, source.key, PATCH_SHA, new_sha)
+            _write_lock(lock_path, lock_data)
+        return CardUpdateResult(initialized=1)
+
+    if old_sha == new_sha:
+        log(f"No patch updates for '{ref}' ('{_short_sha(new_sha)}')")
+        return CardUpdateResult(skipped=1)
+
+    if _finish_clean_patch_rebase(
+        repo_dir=repo_dir,
+        source=source,
+        card_label=card_label,
+        ref=ref,
+        new_sha=new_sha,
+        patch_file=patch_file,
+        lock_path=lock_path,
+        lock_data=lock_data,
+        dry_run=dry_run,
+    ):
+        return CardUpdateResult(updated=1)
+
+    _guard_ludos_branch_clean(repo_dir)
+    _rev_parse(repo_dir, old_sha)
+    log(
+        f"Rebasing patch series for '{card_label}:{source.key}' "
+        f"onto '{ref}' ({_short_sha(old_sha)}...{_short_sha(new_sha)})"
+    )
+
+    _reset_patchwork(repo_dir)
+    _run_git(repo_dir, ["checkout", "-B", LUDOS_BRANCH, old_sha], capture=True)
+    am_code = _apply_patch_series(repo_dir, patch_file)
+    if am_code != 0:
+        raise ConfigError(
+            f"git am failed for '{card_label}:{source.key}' while applying in {_display_path(repo_dir)}"
+        )
+
+    rebase_code, _rebase_output = _run_git_streamed(
+        repo_dir,
+        ["rebase", "--onto", new_sha, old_sha],
+    )
+    if rebase_code != 0:
+        conflicts = _conflicted_paths(repo_dir)
+        conflict_text = (
+            "\nConflicts:\n" + "\n".join(f" - {_display_path(repo_dir / path)}" for path in conflicts)
+            if conflicts
+            else ""
+        )
+        raise ConfigError(
+            f"patch rebase failed for '{card_label}:{source.key}'. "
+            f"Resolve it in {_display_path(repo_dir)} and run update again."
+            f"{conflict_text}"
+        )
+
+    if not dry_run:
+        _write_patch_series(repo_dir, new_sha, patch_file)
+        _set_locked_sha(lock_data, source.key, PATCH_SHA, new_sha)
+        _write_lock(lock_path, lock_data)
+
+    log(f"Updated patch series for '{card_label}:{source.key}' to '{_short_sha(new_sha)}'")
+    return CardUpdateResult(updated=1)
+
+
+def _finish_clean_patch_rebase(
+    *,
+    repo_dir: Path,
+    source: PatchSource,
+    card_label: str,
+    ref: str,
+    new_sha: str,
+    patch_file: Path,
+    lock_path: Path,
+    lock_data: dict[str, Any],
+    dry_run: bool,
+) -> bool:
+    if _current_branch(repo_dir) != LUDOS_BRANCH:
+        return False
+    if not _git_tree_clean(repo_dir):
+        raise ConfigError(
+            f"{repo_dir}: patch rebase is still dirty. "
+            "Resolve conflicts or clean the ludos branch before running update again."
+        )
+    if not _is_ancestor(repo_dir, new_sha, "HEAD"):
+        return False
+
+    action = "Would apply" if dry_run else "Applying"
+    log(
+        f"{action} clean rebase for '{card_label}:{source.key}' "
+        f"onto '{ref}' ('{_short_sha(new_sha)}')"
+    )
+    if not dry_run:
+        _write_patch_series(repo_dir, new_sha, patch_file)
+        _set_locked_sha(lock_data, source.key, PATCH_SHA, new_sha)
+        _write_lock(lock_path, lock_data)
+    return True
+
+
+def _ensure_patchwork_repo(
+    patchwork_dir: Path,
+    card_label: str,
+    source: PatchSource,
+) -> Path:
+    repo_dir = (patchwork_dir / source.key).resolve()
+    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+    git_dir = repo_dir / ".git"
+    if not repo_dir.exists():
+        log(
+            f"Cloning patchwork for '{card_label}:{source.key}' "
+            f"into {_display_path(repo_dir)}"
+        )
+        _run(["git", "clone", "--origin", "upstream", source.patch.url, str(repo_dir)])
+    elif not git_dir.exists():
+        raise ConfigError(f"{repo_dir}: patchwork path exists but is not a git repository")
+    else:
+        log(f"Fetching patchwork for '{card_label}:{source.key}'")
+        remotes = _run_git(repo_dir, ["remote"], capture=True).stdout.splitlines()
+        if "upstream" in remotes:
+            _run_git(repo_dir, ["remote", "set-url", "upstream", source.patch.url])
+        else:
+            _run_git(repo_dir, ["remote", "add", "upstream", source.patch.url])
+        _run_git(repo_dir, ["fetch", "--prune", "--tags", "upstream"])
+    return repo_dir
+
+
+def _render_patch_ref(source: PatchSource, card_source: Path) -> str:
+    spec_path = source.source_dir / Path(source.spec.spec).name
+    spec_values = _spec_values(spec_path)
+
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        value = spec_values.get(key)
+        if value is None:
+            raise ConfigError(
+                f"{card_source}: spec field '{key}' is not available for patch ref "
+                f"'{source.patch.ref}'"
+            )
+        return value
+
+    return re.sub(r"\$\{spec:([A-Za-z][A-Za-z0-9_]*)\}", replace, source.patch.ref)
+
+
+def _spec_values(spec_path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    pattern = re.compile(r"^([A-Za-z][A-Za-z0-9_]*):\s*(.*?)\s*$")
+    for line in spec_path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line)
+        if match:
+            values[match.group(1)] = match.group(2)
+    return values
+
+
+def _patch_file_path(card_source: Path, source: PatchSource) -> Path:
+    patch_path = Path(source.patch.file)
+    if patch_path.is_absolute() or ".." in patch_path.parts:
+        raise ConfigError(
+            f"{card_source}: patch file '{source.patch.file}' must stay inside the spec directory"
+        )
+    path = (source.source_dir / patch_path).resolve()
+    try:
+        path.relative_to(source.source_dir)
+    except ValueError as exc:
+        raise ConfigError(
+            f"{card_source}: patch file '{source.patch.file}' escapes the spec directory"
+        ) from exc
+    if not path.is_file():
+        raise ConfigError(f"{card_source}: patch file '{source.patch.file}' is missing")
+    return path
+
+
+def _guard_ludos_branch_clean(repo_dir: Path) -> None:
+    if _current_branch(repo_dir) != LUDOS_BRANCH:
+        return
+    if _git_tree_clean(repo_dir):
+        return
+    raise ConfigError(
+        f"{repo_dir}: refusing to replace dirty '{LUDOS_BRANCH}' patchwork branch. "
+        "Resolve or clean it before running update again."
+    )
+
+
+def _reset_patchwork(repo_dir: Path) -> None:
+    _run_git(repo_dir, ["am", "--abort"], check=False, capture=True)
+    _run_git(repo_dir, ["rebase", "--abort"], check=False, capture=True)
+    _reset_worktree(repo_dir)
+
+
+def _write_patch_series(repo_dir: Path, base_sha: str, patch_file: Path) -> None:
+    result = _run_git(
+        repo_dir,
+        [
+            "format-patch",
+            "--stdout",
+            "--zero-commit",
+            "--no-renames",
+            "-k",
+            base_sha,
+        ],
+        capture=True,
+    )
+    patch_file.write_text(
+        _strip_patch_series_format_signatures(result.stdout),
+        encoding="utf-8",
+    )
+
+
+def _apply_patch_series(repo_dir: Path, patch_file: Path) -> int:
+    with tempfile.TemporaryDirectory(prefix="ludos-am-") as temp_dir:
+        mail_dir = Path(temp_dir)
+        _run(["git", "mailsplit", f"-o{mail_dir}", str(patch_file)], capture=True)
+        for mail in sorted(mail_dir.iterdir()):
+            am_code, _am_output = _run_git_streamed(
+                repo_dir,
+                ["am", "-k", "--empty=keep", str(mail)],
+            )
+            if am_code != 0:
+                return am_code
+            _strip_empty_commit_format_patch_signature(repo_dir)
+    return 0
+
+
+def _strip_empty_commit_format_patch_signature(repo_dir: Path) -> None:
+    if not _head_is_empty_commit(repo_dir):
+        return
+    result = _run_git(repo_dir, ["log", "-1", "--format=%B"], capture=True)
+    message = result.stdout
+    stripped = _strip_format_patch_signature(message)
+    if stripped == message:
+        return
+    _run_git_input(
+        repo_dir,
+        [
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--amend",
+            "--allow-empty",
+            "-F",
+            "-",
+        ],
+        stripped,
+    )
+
+
+def _head_is_empty_commit(repo_dir: Path) -> bool:
+    result = _run_git(
+        repo_dir,
+        ["diff", "--quiet", "HEAD^", "HEAD"],
+        check=False,
+        capture=True,
+    )
+    return result.returncode == 0
+
+
+def _strip_format_patch_signature(message: str) -> str:
+    lines = message.rstrip("\n").splitlines()
+    if len(lines) < 2:
+        return message
+    if lines[-2].strip() != "--":
+        return message
+    if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", lines[-1].strip()):
+        return message
+    lines = lines[:-2]
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def _strip_patch_series_format_signatures(text: str) -> str:
+    mails = _split_patch_mbox(text)
+    if not mails:
+        return text
+    stripped = [_strip_format_patch_signature(mail).rstrip("\n") for mail in mails]
+    return "\n\n".join(stripped) + "\n"
+
+
+def _split_patch_mbox(text: str) -> list[str]:
+    mails: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if current and _is_patch_mail_boundary(line):
+            mails.append("".join(current))
+            current = [line]
+            continue
+        current.append(line)
+    if current:
+        mails.append("".join(current))
+    return mails
+
+
+def _is_patch_mail_boundary(line: str) -> bool:
+    return bool(re.match(r"^From [0-9a-f]{40} Mon Sep 17 00:00:00 2001$", line.rstrip("\n")))
+
+
+def _current_branch(repo_dir: Path) -> str:
+    result = _run_git(
+        repo_dir,
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _is_ancestor(repo_dir: Path, ancestor: str, descendant: str) -> bool:
+    result = _run_git(
+        repo_dir,
+        ["merge-base", "--is-ancestor", ancestor, descendant],
+        check=False,
+        capture=True,
+    )
+    return result.returncode == 0
+
+
+def _conflicted_paths(repo_dir: Path) -> tuple[str, ...]:
+    conflicts = _run_git(
+        repo_dir,
+        ["diff", "--name-only", "--diff-filter=U"],
+        capture=True,
+        check=False,
+    )
+    if conflicts.returncode != 0 or not conflicts.stdout.strip():
+        return tuple()
+    return tuple(conflicts.stdout.splitlines())
 
 
 def _conflict_summary(
@@ -501,6 +920,59 @@ def _run_git(
     )
 
 
+def _run_git_streamed(repo_dir: Path, args: list[str]) -> tuple[int, str]:
+    return _run_streamed(["git", *args], cwd=repo_dir)
+
+
+def _run_git_input(
+    repo_dir: Path,
+    args: list[str],
+    input_text: str,
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_dir,
+        input=input_text,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            ["git", *args],
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    if result.stderr:
+        log(result.stderr.rstrip())
+    return result
+
+
+def _run_streamed(command: list[str], *, cwd: Path | None = None) -> tuple[int, str]:
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        text=True,
+    )
+    output_lines: list[str] = []
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            output_lines.append(line)
+            stream(line)
+        return process.wait(), "".join(output_lines)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+
+
 def _run(
     command: list[str],
     *,
@@ -537,24 +1009,24 @@ def _read_lock(path: Path) -> dict[str, Any]:
 
 def _write_lock(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.safe_dump(data, sort_keys=True)
+    text = yaml.safe_dump(data, sort_keys=False)
     path.write_text(text, encoding="utf-8")
 
 
-def _locked_sha(data: dict[str, Any], key: str) -> str:
+def _locked_sha(data: dict[str, Any], key: str, field: str) -> str:
     value = data.get(key)
     if not isinstance(value, dict):
         return ""
-    sha = value.get(UPSTREAM_SHA, "")
+    sha = value.get(field, "")
     return sha if isinstance(sha, str) else ""
 
 
-def _set_locked_sha(data: dict[str, Any], key: str, sha: str) -> None:
+def _set_locked_sha(data: dict[str, Any], key: str, field: str, sha: str) -> None:
     value = data.get(key)
     if not isinstance(value, dict):
         value = {}
         data[key] = value
-    value[UPSTREAM_SHA] = sha
+    value[field] = sha
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:
@@ -624,6 +1096,12 @@ def _cache_dir(cache_dir: Path | None) -> Path:
     if cache_dir is None:
         cache_dir = DEFAULT_CACHE_DIR
     return cache_dir.expanduser().resolve()
+
+
+def _patchwork_dir(patchwork_dir: Path | None) -> Path:
+    if patchwork_dir is None:
+        patchwork_dir = DEFAULT_PATCHWORK_DIR
+    return patchwork_dir.expanduser().resolve()
 
 
 def _short_sha(sha: str) -> str:
