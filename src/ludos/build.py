@@ -136,18 +136,12 @@ def build_manifest(
     dnf_cache_dir = dnf_dir / "cache"
     dnf_persist_dir = dnf_dir / "persist"
     dnf_log_dir = dnf_dir / "log"
-    mock_cache_dir = distro_cache_dir / "mock"
-    mock_dnf_cache_dir = mock_cache_dir / "dnf"
-    mock_root_cache_dir = mock_cache_dir / "root"
     build_artifact_cache_dir = distro_cache_dir / "build-artifacts"
 
     distro_cache_dir.mkdir(parents=True, exist_ok=True)
     package_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
     card_build_dir.mkdir(parents=True, exist_ok=True)
-    mock_cache_dir.mkdir(parents=True, exist_ok=True)
-    mock_dnf_cache_dir.mkdir(parents=True, exist_ok=True)
-    mock_root_cache_dir.mkdir(parents=True, exist_ok=True)
     build_artifact_cache_dir.mkdir(parents=True, exist_ok=True)
     repo_dir.mkdir(parents=True, exist_ok=True)
     dnf_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -660,9 +654,6 @@ def build_manifest(
                 podman=podman,
                 orchestrator=builder_images[block_name],
                 build_dir=card_build_dir / _identifier(block_name),
-                mock_dir=mock_cache_dir / _identifier(block_name),
-                mock_dnf_dir=mock_dnf_cache_dir,
-                mock_root_cache_dir=mock_root_cache_dir,
                 artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
                 card_name=block_name,
                 card_source=card_sources[block_name],
@@ -1659,9 +1650,6 @@ def _run_card_build(
     podman: str,
     orchestrator: str,
     build_dir: Path,
-    mock_dir: Path,
-    mock_dnf_dir: Path,
-    mock_root_cache_dir: Path,
     artifact_cache_dir: Path,
     card_name: str,
     card_source: Path,
@@ -1676,9 +1664,6 @@ def _run_card_build(
     workspace_dir.mkdir(parents=True)
     rpm_dir.mkdir(parents=True)
     files_dir.mkdir(parents=True)
-    mock_dir.mkdir(parents=True, exist_ok=True)
-    mock_dnf_dir.mkdir(parents=True, exist_ok=True)
-    mock_root_cache_dir.mkdir(parents=True, exist_ok=True)
     artifact_cache_dir.mkdir(parents=True, exist_ok=True)
     podman_cache_dir = artifact_cache_dir / "podman"
     podman_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1698,12 +1683,6 @@ def _run_card_build(
         f"{rpm_dir}:/rpms",
         "--volume",
         f"{files_dir}:/files",
-        "--volume",
-        f"{mock_dir}:/workspace/build/MOCK",
-        "--volume",
-        f"{mock_dnf_dir}:/cache/dnf",
-        "--volume",
-        f"{mock_root_cache_dir}:/cache/mock",
         "--volume",
         f"{artifact_cache_dir}:/cache/artifacts",
         "--volume",
