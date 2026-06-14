@@ -73,7 +73,6 @@ def update_card(
     card_source = _card_source(card)
     sources = _upstream_sources(card)
     if not sources:
-        log(f"No upstream-backed specs in {card_source}")
         return CardUpdateResult()
 
     log(f"Updating card: {_display_path(card_source)}")
@@ -105,7 +104,7 @@ def update_card(
             continue
 
         if old_sha == upstream_head.sha:
-            log(f"Upstream unchanged for {source.key}: {upstream_head.sha}")
+            log(f"No updates for '{upstream_head.label}' ('{_short_sha(upstream_head.sha)}')")
             result = CardUpdateResult(
                 initialized=result.initialized,
                 skipped=result.skipped + 1,
@@ -114,7 +113,7 @@ def update_card(
             continue
 
         log(
-            f"Merging {source.key} to {upstream_head.label} ({_short_sha(old_sha)}...{_short_sha(upstream_head.sha)}):\n"
+            f"Merging '{source.key}' to '{upstream_head.label}' ({_short_sha(old_sha)}...{_short_sha(upstream_head.sha)}):\n"
             f"Commits:\n"
             f"{_commit_summary(repo_dir, old_sha, upstream_head.sha)}"
         )
@@ -140,7 +139,7 @@ def update_card(
                 f"{_conflict_summary(repo_dir, source, conflict_paths, dry_run=dry_run)}"
             )
 
-        log(f"Updated '{card_label}:{source.key}' to '{upstream_head.sha}'")
+        log(f"Updated '{card_label}:{source.key}' to '{_short_sha(upstream_head.sha)}'")
         result = CardUpdateResult(
             initialized=result.initialized,
             skipped=result.skipped,
