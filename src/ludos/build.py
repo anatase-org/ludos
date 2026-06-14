@@ -343,6 +343,13 @@ def build_manifest(
         if card.postprocess.strip():
             postprocess_blocks.append((card_name, card.postprocess.rstrip()))
     build_card_names = set(card_builds) | set(card_specs)
+    locally_built_package_names_by_card = _locally_built_package_names_by_card(
+        card_specs,
+        arch,
+    )
+    locally_built_package_names = set().union(
+        *locally_built_package_names_by_card.values()
+    ) if locally_built_package_names_by_card else set()
     requested_packages = tuple(requested_packages)
     if not requested_packages and not build_card_names:
         raise ConfigError(f"{manifest_path}: no packages requested by cards")
@@ -432,6 +439,41 @@ def build_manifest(
                 *contextual_additions,
             )
         previous_contextual_resolved = set(contextual_resolved)
+
+    if previous_contextual_resolved:
+        pruned_count = 0
+        filtered_card_resolutions = []
+        for card_resolution in card_resolutions:
+            filtered_resolution = tuple(
+                package
+                for package in card_resolution
+                if package in previous_contextual_resolved
+            )
+            pruned_count += len(card_resolution) - len(filtered_resolution)
+            filtered_card_resolutions.append(filtered_resolution)
+        card_resolutions = filtered_card_resolutions
+        if pruned_count:
+            log(
+                f"Pruned {pruned_count} replaced packages from package transactions"
+            )
+
+    if locally_built_package_names:
+        stubbed_count = 0
+        filtered_card_resolutions = []
+        for card_resolution in card_resolutions:
+            filtered_resolution = tuple(
+                package
+                for package in card_resolution
+                if _package_name_from_nevra(package) not in locally_built_package_names
+            )
+            stubbed_count += len(card_resolution) - len(filtered_resolution)
+            filtered_card_resolutions.append(filtered_resolution)
+        card_resolutions = filtered_card_resolutions
+        if stubbed_count:
+            log(
+                f"Stubbed {stubbed_count} packages provided by build cards from "
+                "package transactions"
+            )
 
     log("Grouping resolved packages into install blocks")
     package_counts = {}
@@ -820,7 +862,6 @@ def build_manifest(
         for block_name, _block_packages in package_blocks
         if block_name in build_images_by_block
     )
-    install_steps = []
     bootstrap_stage_name = package_stage_names[BOOTSTRAP_BLOCK]
     bootstrap_copy_lines = (
         f"COPY --from={bootstrap_stage_name} /rpms/ /rpms/{BOOTSTRAP_BLOCK}/packages/\n"
@@ -862,7 +903,8 @@ dnf5 -y \\
     rm -rf /target/var/cache/dnf /target/var/log/dnf*
 LUDOS_BOOTSTRAP
 """
-    for block_name, block_packages in package_blocks:
+    install_copy_lines = []
+    for block_name, _block_packages in package_blocks:
         rpm_sources = []
         if block_name in package_stage_names:
             rpm_sources.append(("packages", package_stage_names[block_name]))
@@ -870,27 +912,21 @@ LUDOS_BOOTSTRAP
             rpm_sources.append(("build", build_stage_names[block_name]))
         if not rpm_sources:
             continue
-        copy_lines = "".join(
-            f"COPY --from={stage_name} /rpms/ /rpms/{block_name}/{source_name}/\n"
+        install_copy_lines.extend(
+            f"COPY --from={stage_name} /rpms/ /rpms/install/{block_name}/{source_name}/\n"
             for source_name, stage_name in rpm_sources
         )
-        package_globs = " ".join(
-            f"/rpms/{block_name}/{source_name}/*.rpm"
-            for source_name, _stage_name in rpm_sources
-        )
-        install_steps.append(
-            f"""#
-# Install: {block_name}
-#
-
-{copy_lines}\
-RUN /bin/sh <<'LUDOS_INSTALL_{block_name}'
+    install_copy_lines = "".join(install_copy_lines)
+    install_step_lines = f"""{install_copy_lines}\
+RUN /bin/sh <<'LUDOS_INSTALL'
 set -e
+mkdir -p /rpms/install
 rpm_args=
-for rpm in {package_globs}; do
-    [ -e "$rpm" ] || continue
+find /rpms/install -type f -name '*.rpm' | sort > /tmp/ludos-install-rpms
+while read -r rpm; do
+    [ -n "$rpm" ] || continue
     rpm_args="$rpm_args $rpm"
-done
+done < /tmp/ludos-install-rpms
 [ -n "$rpm_args" ] || exit 0
 dnf5 -y \\
     --releasever={releasever} \\
@@ -908,10 +944,8 @@ dnf5 -y \\
     $rpm_args \\
     && \\
     rm -rf /var/cache/dnf /var/log/dnf*
-LUDOS_INSTALL_{block_name}
+LUDOS_INSTALL
 """
-        )
-    install_step_lines = "\n".join(install_steps)
     postprocess_steps = []
     for block_name, postprocess in postprocess_blocks:
         file_steps = []
@@ -2163,6 +2197,21 @@ def _drop_nvidia_kmod_runtime_requires(text: str) -> str:
 def _spec_packages_for_arch(spec: SpecBuild, arch: str) -> tuple[str, ...]:
     packages = list(spec.packages.get(arch, spec.packages.get("*", tuple())))
     return tuple(dict.fromkeys(packages))
+
+
+def _locally_built_package_names_by_card(
+    card_specs: dict[str, tuple[SpecBuild, ...]],
+    arch: str,
+) -> dict[str, set[str]]:
+    names_by_card = {}
+    for card_name, specs in card_specs.items():
+        names = set()
+        for spec in specs:
+            for package in _spec_packages_for_arch(spec, arch):
+                names.add(_package_name_from_nevra(package))
+        if names:
+            names_by_card[card_name] = names
+    return names_by_card
 
 
 def _spec_build_targets(packages: tuple[str, ...], arch: str) -> tuple[str, ...]:
