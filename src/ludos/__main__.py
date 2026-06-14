@@ -10,6 +10,7 @@ from .build import build_manifest
 from .cleanup import cleanup_local_images
 from .logging import LOGO_STR, configure_tracebacks, error, log
 from .model import ConfigError, validate_manifest
+from .update import update_targets
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +55,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory containing card YAML files. Defaults to ./cards next to the manifest.",
     )
     validate.set_defaults(func=validate_command)
+
+    update = subcommands.add_parser(
+        "update",
+        help="Update upstream-backed card sources.",
+    )
+    update.add_argument(
+        "targets",
+        nargs="+",
+        type=Path,
+        help="Manifest or card YAML files to update.",
+    )
+    update.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Directory for update caches. Defaults to ./cache.",
+    )
+    update.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fetch and merge in the cache without copying files back or updating locks.",
+    )
+    update.set_defaults(func=update_command)
 
     cleanup = subcommands.add_parser(
         "cleanup",
@@ -151,6 +175,10 @@ def cleanup_command(args: argparse.Namespace) -> int:
         manifests=tuple(args.manifests),
         dry_run=args.dry_run,
     )
+
+
+def update_command(args: argparse.Namespace) -> int:
+    return update_targets(tuple(args.targets), args.cache_dir, args.dry_run)
 
 
 def main() -> int:
