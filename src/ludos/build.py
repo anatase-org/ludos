@@ -131,11 +131,11 @@ def build_manifest(
     package_dir = distro_cache_dir / "packages"
     dnf_dir = distro_cache_dir / "dnf"
     build_dir = distro_cache_dir / "build" / image
+    card_build_dir = distro_cache_dir / "cards"
     repo_dir = dnf_dir / "repos"
     dnf_cache_dir = dnf_dir / "cache"
     dnf_persist_dir = dnf_dir / "persist"
     dnf_log_dir = dnf_dir / "log"
-    oci_dir = build_dir / "oci"
     mock_cache_dir = distro_cache_dir / "mock"
     mock_dnf_cache_dir = mock_cache_dir / "dnf"
     mock_root_cache_dir = mock_cache_dir / "root"
@@ -144,6 +144,7 @@ def build_manifest(
     distro_cache_dir.mkdir(parents=True, exist_ok=True)
     package_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
+    card_build_dir.mkdir(parents=True, exist_ok=True)
     mock_cache_dir.mkdir(parents=True, exist_ok=True)
     mock_dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     mock_root_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -229,9 +230,9 @@ def build_manifest(
         log(f"Creating repository metadata image: {repo_image}")
         _create_repo_image(
             podman=podman,
+            buildah=_require_buildah(buildah),
             orchestrator=orchestrator,
             root_dir=root_dir,
-            build_dir=oci_dir / "repos" / f"{distro}-{repo.ref.repo}-{cache_version}",
             image=repo_image,
             repo_name=repo.source.name,
             repo_id=repo_id,
@@ -517,7 +518,7 @@ def build_manifest(
             raise ConfigError(f"dnf did not resolve build-deps for {card_name}")
         spec_builder_packages = tuple()
         if card_name in card_specs:
-            spec_scan_dir = build_dir / "spec-scan" / _identifier(card_name)
+            spec_scan_dir = card_build_dir / _identifier(card_name) / "spec-scan"
             staged_specs = _stage_card_specs(
                 card_source=card_sources[card_name],
                 specs=card_specs[card_name],
@@ -567,7 +568,6 @@ def build_manifest(
             dnf_cache_dir=dnf_cache_dir,
             dnf_persist_dir=dnf_persist_dir,
             dnf_log_dir=dnf_log_dir,
-            build_dir=oci_dir / "builders" / f"{distro}-{builder_hash}",
             image=builder_image,
             package_dir=package_dir,
             rpm_files=builder_rpm_files,
@@ -604,7 +604,6 @@ def build_manifest(
             log(f"Creating card package image: {package_image}")
             _create_package_image(
                 buildah=_require_buildah(buildah),
-                build_dir=oci_dir / "cards" / f"{distro}-{block_name}-{block_hash}",
                 image=package_image,
                 package_dir=package_dir,
                 rpm_files=repo_rpm_files,
@@ -647,7 +646,7 @@ def build_manifest(
             build_output = _run_specs_build(
                 podman=podman,
                 orchestrator=builder_images[block_name],
-                build_dir=build_dir / "build" / _identifier(block_name),
+                build_dir=card_build_dir / _identifier(block_name),
                 artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
                 card_name=block_name,
                 card_source=card_sources[block_name],
@@ -660,7 +659,7 @@ def build_manifest(
             build_output = _run_card_build(
                 podman=podman,
                 orchestrator=builder_images[block_name],
-                build_dir=build_dir / "build" / _identifier(block_name),
+                build_dir=card_build_dir / _identifier(block_name),
                 mock_dir=mock_cache_dir / _identifier(block_name),
                 mock_dnf_dir=mock_dnf_cache_dir,
                 mock_root_cache_dir=mock_root_cache_dir,
@@ -677,7 +676,6 @@ def build_manifest(
         log(f"Creating build output image: {build_image}")
         _create_build_output_image(
             buildah=_require_buildah(buildah),
-            build_dir=oci_dir / "builds" / f"{distro}-{block_name}-{build_hash}",
             image=build_image,
             rpm_dir=build_output.rpm_dir,
             files_dir=build_output.files_dir,
@@ -1086,135 +1084,112 @@ def _create_builder_image(
     dnf_cache_dir: Path,
     dnf_persist_dir: Path,
     dnf_log_dir: Path,
-    build_dir: Path,
     image: str,
     package_dir: Path,
     rpm_files: tuple[str, ...],
     releasever: str,
 ) -> None:
-    _remove_tree(build_dir, podman=podman)
-    image_root = build_dir / "root"
-    rpm_dir = build_dir / "rpms"
-    image_root.mkdir(parents=True)
-    rpm_dir.mkdir(parents=True)
-    _stage_rpm_files(package_dir, rpm_files, rpm_dir)
-    rpm_paths = tuple(f"/rpms/{rpm_file}" for rpm_file in rpm_files)
-    _run_logged_command(
-        [
-            podman,
-            "run",
-            "--rm",
-            "--volume",
-            f"{root_dir / 'repos'}:/workspace/repos:ro",
-            "--volume",
-            f"{repo_dir}:/ludos/dnf/repos:ro",
-            "--volume",
-            f"{dnf_cache_dir}:/ludos/dnf/cache",
-            "--volume",
-            f"{dnf_persist_dir}:/ludos/dnf/persist",
-            "--volume",
-            f"{dnf_log_dir}:/ludos/dnf/log",
-            "--volume",
-            f"{image_root}:/target",
-            "--volume",
-            f"{rpm_dir}:/rpms:ro",
-            "--workdir",
-            "/workspace/repos",
-            orchestrator,
-            "dnf5",
-            "-y",
-            "--installroot=/target",
-            f"--releasever={releasever}",
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--setopt=install_weak_deps=False",
-            "--cacheonly",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            "install",
-            "--allowerasing",
-            *rpm_paths,
-        ],
-        "builder root bootstrap",
+    rpm_copy_lines = _copy_files_to_shell_dir_lines(
+        (_cached_rpm_path(package_dir, rpm_file) for rpm_file in rpm_files),
+        "$rpm_dir",
     )
-    shutil.rmtree(image_root / "var/cache/dnf", ignore_errors=True)
-    for log_path in (image_root / "var/log").glob("dnf*"):
-        if log_path.is_dir():
-            shutil.rmtree(log_path, ignore_errors=True)
-        else:
-            log_path.unlink(missing_ok=True)
-    _create_scratch_image(buildah=buildah, image_root=image_root, image=image)
-    _remove_tree(build_dir, podman=podman)
+    rpm_paths = " ".join(shlex.quote(f"/rpms/{rpm_file}") for rpm_file in rpm_files)
+    body = [
+        "rpm_dir=$(mktemp -d)",
+        'cleanup_dirs="$rpm_dir"',
+        *rpm_copy_lines,
+        _shell_command(
+            [
+                podman,
+                "run",
+                "--rm",
+                "--volume",
+                f"{root_dir / 'repos'}:/workspace/repos:ro",
+                "--volume",
+                f"{repo_dir}:/ludos/dnf/repos:ro",
+                "--volume",
+                f"{dnf_cache_dir}:/ludos/dnf/cache",
+                "--volume",
+                f"{dnf_persist_dir}:/ludos/dnf/persist",
+                "--volume",
+                f"{dnf_log_dir}:/ludos/dnf/log",
+                "--volume",
+                "$mount_path:/target",
+                "--volume",
+                "$rpm_dir:/rpms:ro",
+                "--workdir",
+                "/workspace/repos",
+                orchestrator,
+                "dnf5",
+                "-y",
+                "--installroot=/target",
+                f"--releasever={releasever}",
+                "--setopt=reposdir=/ludos/dnf/repos",
+                "--setopt=cachedir=/ludos/dnf/cache",
+                "--setopt=persistdir=/ludos/dnf/persist",
+                "--setopt=logdir=/ludos/dnf/log",
+                "--setopt=install_weak_deps=False",
+                "--cacheonly",
+                "--disable-repo=*",
+                "--enable-repo=*",
+                "install",
+                "--allowerasing",
+            ],
+            raw_suffix=f" {rpm_paths}",
+        ),
+        'rm -rf "$mount_path/var/cache/dnf"',
+        'find "$mount_path/var/log" -maxdepth 1 -name "dnf*" -exec rm -rf {} + 2>/dev/null || true',
+    ]
+    _create_scratch_image(buildah=buildah, image=image, body=body)
 
 
 def _create_repo_image(
     *,
     podman: str,
+    buildah: str,
     orchestrator: str,
     root_dir: Path,
-    build_dir: Path,
     image: str,
     repo_name: str,
     repo_id: str,
     rendered_repo: str,
 ) -> None:
-    image_root = build_dir / "root"
-    shutil.rmtree(build_dir, ignore_errors=True)
-    (image_root / "repos").mkdir(parents=True)
-    (image_root / "cache").mkdir()
-    (image_root / "persist").mkdir()
-    (build_dir / "log").mkdir()
-    (image_root / "repos" / repo_name).write_text(rendered_repo, encoding="utf-8")
-
-    _run_logged_command(
-        [
-            podman,
-            "run",
-            "--rm",
-            "--volume",
-            f"{root_dir / 'repos'}:/workspace/repos:ro",
-            "--volume",
-            f"{image_root / 'repos'}:/ludos/dnf/repos:ro",
-            "--volume",
-            f"{image_root / 'cache'}:/ludos/dnf/cache",
-            "--volume",
-            f"{image_root / 'persist'}:/ludos/dnf/persist",
-            "--volume",
-            f"{build_dir / 'log'}:/ludos/dnf/log",
-            "--workdir",
-            "/workspace/repos",
-            orchestrator,
-            "dnf5",
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--disable-repo=*",
-            f"--enable-repo={repo_id}",
-            "makecache",
-            "--refresh",
-        ],
-        "repository metadata refresh",
-    )
-
-    containerfile = build_dir / "Containerfile"
-    containerfile.write_text("FROM scratch\nCOPY root/ /\n", encoding="utf-8")
-    _run_logged_command(
-        [
-            podman,
-            "build",
-            "--layers",
-            "--pull=missing",
-            "--tag",
-            image,
-            "--file",
-            str(containerfile),
-            str(build_dir),
-        ],
-        "repository metadata image build",
-    )
+    body = [
+        'mkdir -p "$mount_path/repos" "$mount_path/cache" "$mount_path/persist"',
+        f"printf %s {shlex.quote(rendered_repo)} > \"$mount_path/repos/{shlex.quote(repo_name)}\"",
+        "log_dir=$(mktemp -d)",
+        'cleanup_dirs="$log_dir"',
+        _shell_command(
+            [
+                podman,
+                "run",
+                "--rm",
+                "--volume",
+                f"{root_dir / 'repos'}:/workspace/repos:ro",
+                "--volume",
+                "$mount_path/repos:/ludos/dnf/repos:ro",
+                "--volume",
+                "$mount_path/cache:/ludos/dnf/cache",
+                "--volume",
+                "$mount_path/persist:/ludos/dnf/persist",
+                "--volume",
+                "$log_dir:/ludos/dnf/log",
+                "--workdir",
+                "/workspace/repos",
+                orchestrator,
+                "dnf5",
+                "--setopt=reposdir=/ludos/dnf/repos",
+                "--setopt=cachedir=/ludos/dnf/cache",
+                "--setopt=persistdir=/ludos/dnf/persist",
+                "--setopt=logdir=/ludos/dnf/log",
+                "--disable-repo=*",
+                f"--enable-repo={repo_id}",
+                "makecache",
+                "--refresh",
+            ],
+        ),
+    ]
+    _create_scratch_image(buildah=buildah, image=image, body=body)
 
 
 def _extract_image_paths(
@@ -1521,127 +1496,133 @@ def _stage_rpm_files(
     package_dir: Path, rpm_files: tuple[str, ...], destination_dir: Path
 ) -> None:
     for rpm_file in rpm_files:
-        matches = list(package_dir.rglob(rpm_file))
-        if not matches:
-            raise ConfigError(f"downloaded RPM is missing from cache: {rpm_file}")
+        source = _cached_rpm_path(package_dir, rpm_file)
         target = destination_dir / rpm_file
         try:
-            os.link(matches[0], target)
+            os.link(source, target)
         except OSError:
-            shutil.copy2(matches[0], target)
+            shutil.copy2(source, target)
+
+
+def _cached_rpm_path(package_dir: Path, rpm_file: str) -> Path:
+    matches = list(package_dir.rglob(rpm_file))
+    if not matches:
+        raise ConfigError(f"downloaded RPM is missing from cache: {rpm_file}")
+    return matches[0]
 
 
 def _create_package_image(
     *,
     buildah: str,
-    build_dir: Path,
     image: str,
     package_dir: Path,
     rpm_files: tuple[str, ...],
     files_dir: Path | None = None,
 ) -> None:
-    image_root = build_dir / "root"
-    image_rpm_dir = image_root / "rpms"
-    image_files_dir = image_root / "files"
-    shutil.rmtree(build_dir, ignore_errors=True)
-    image_rpm_dir.mkdir(parents=True)
-    image_files_dir.mkdir(parents=True)
-    for rpm_file in rpm_files:
-        matches = list(package_dir.rglob(rpm_file))
-        if not matches:
-            raise ConfigError(f"downloaded RPM is missing from cache: {rpm_file}")
-        target = image_rpm_dir / rpm_file
-        try:
-            os.link(matches[0], target)
-        except OSError:
-            shutil.copy2(matches[0], target)
-
+    body = ['mkdir -p "$mount_path/rpms" "$mount_path/files"']
+    body.extend(
+        _copy_files_to_shell_dir_lines(
+            (_cached_rpm_path(package_dir, rpm_file) for rpm_file in rpm_files),
+            "$mount_path/rpms",
+        )
+    )
     if files_dir is not None and files_dir.exists():
-        for source_path in files_dir.rglob("*"):
-            if source_path.is_dir():
-                continue
-            relative = source_path.relative_to(files_dir)
-            target = image_files_dir / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, target)
+        body.extend(_copy_tree_to_shell_dir_lines(files_dir, "$mount_path/files"))
 
-    _create_scratch_image(buildah=buildah, image_root=image_root, image=image)
-    _remove_tree(build_dir)
+    _create_scratch_image(buildah=buildah, image=image, body=body)
 
 
 def _create_build_output_image(
     *,
     buildah: str,
-    build_dir: Path,
     image: str,
     rpm_dir: Path | None,
     files_dir: Path | None,
 ) -> None:
-    image_root = build_dir / "root"
-    image_rpm_dir = image_root / "rpms"
-    image_files_dir = image_root / "files"
-    shutil.rmtree(build_dir, ignore_errors=True)
-    image_rpm_dir.mkdir(parents=True)
-    image_files_dir.mkdir(parents=True)
-
+    body = ['mkdir -p "$mount_path/rpms" "$mount_path/files"']
     if rpm_dir is not None and rpm_dir.exists():
-        for source_path in rpm_dir.rglob("*.rpm"):
-            if source_path.name.endswith(".src.rpm"):
-                continue
-            target = image_rpm_dir / source_path.name
-            try:
-                os.link(source_path, target)
-            except OSError:
-                shutil.copy2(source_path, target)
-
-    if files_dir is not None and files_dir.exists():
-        for source_path in files_dir.rglob("*"):
-            if source_path.is_dir():
-                continue
-            relative = source_path.relative_to(files_dir)
-            target = image_files_dir / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, target)
-
-    _create_scratch_image(buildah=buildah, image_root=image_root, image=image)
-    _remove_tree(build_dir)
-
-
-def _create_scratch_image(*, buildah: str, image_root: Path, image: str) -> None:
-    container = subprocess.run(
-        [buildah, "from", "--quiet", "scratch"],
-        check=True,
-        text=True,
-        capture_output=True,
-    ).stdout.strip()
-    try:
-        subprocess.run(
-            [buildah, "copy", "--quiet", container, f"{image_root}/.", "/"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            [
-                buildah,
-                "commit",
-                "--rm",
-                "--quiet",
-                "--format",
-                "oci",
-                container,
-                image,
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-        container = ""
-    finally:
-        if container:
-            subprocess.run(
-                [buildah, "rm", container],
-                check=False,
-                stdout=subprocess.DEVNULL,
+        body.extend(
+            _copy_files_to_shell_dir_lines(
+                (
+                    source_path
+                    for source_path in rpm_dir.rglob("*.rpm")
+                    if not source_path.name.endswith(".src.rpm")
+                ),
+                "$mount_path/rpms",
             )
+        )
+    if files_dir is not None and files_dir.exists():
+        body.extend(_copy_tree_to_shell_dir_lines(files_dir, "$mount_path/files"))
+
+    _create_scratch_image(buildah=buildah, image=image, body=body)
+
+
+def _copy_files_to_shell_dir_lines(
+    source_paths, destination_expr: str
+) -> list[str]:
+    lines = [f"mkdir -p {destination_expr}"]
+    for source_path in source_paths:
+        source_path = Path(source_path)
+        lines.append(
+            f"cp -a -- {shlex.quote(str(source_path))} {destination_expr}/{shlex.quote(source_path.name)}"
+        )
+    return lines
+
+
+def _copy_tree_to_shell_dir_lines(source_dir: Path, destination_expr: str) -> list[str]:
+    lines = []
+    for source_path in source_dir.rglob("*"):
+        if source_path.is_dir():
+            continue
+        relative = source_path.relative_to(source_dir).as_posix()
+        lines.append(f"target={destination_expr}/{shlex.quote(relative)}")
+        lines.append('mkdir -p "$(dirname "$target")"')
+        lines.append(f"cp -a -- {shlex.quote(str(source_path))} \"$target\"")
+    return lines
+
+
+def _shell_command(command: list[str], raw_suffix: str = "") -> str:
+    return " ".join(_shell_arg(str(part)) for part in command) + raw_suffix
+
+
+def _shell_arg(value: str) -> str:
+    if value.startswith("$") or value.startswith('"$'):
+        return value
+    return shlex.quote(value)
+
+
+def _create_scratch_image(*, buildah: str, image: str, body: list[str]) -> None:
+    buildah_command = shlex.quote(buildah)
+    script = "\n".join(
+        [
+            "set -eu",
+            "container=",
+            "mounted=0",
+            "cleanup_dirs=",
+            "cleanup() {",
+            '  if [ "$mounted" = 1 ]; then '
+            f"{buildah_command} unmount \"$container\" >/dev/null 2>&1 || true; fi",
+            '  if [ -n "$container" ]; then '
+            f"{buildah_command} rm \"$container\" >/dev/null 2>&1 || true; fi",
+            '  if [ -n "$cleanup_dirs" ]; then rm -rf $cleanup_dirs; fi',
+            "}",
+            "trap cleanup EXIT INT TERM",
+            f"container=$({buildah_command} from --quiet scratch)",
+            f"mount_path=$({buildah_command} mount \"$container\")",
+            "mounted=1",
+            *body,
+            f"{buildah_command} unmount \"$container\" >/dev/null",
+            "mounted=0",
+            f"{buildah_command} commit --rm --quiet --format oci \"$container\" {shlex.quote(image)} >/dev/null",
+            "container=",
+        ]
+    )
+    returncode, _output = _run_streamed_command(
+        [buildah, "unshare", "/bin/sh", "-s"],
+        input_text=script + "\n",
+    )
+    if returncode != 0:
+        raise ConfigError(f"scratch image build failed with exit status {returncode}")
 
 
 def _run_prepare_block(
@@ -2100,7 +2081,7 @@ def _specs_build_script(
     workspace_dir: Path,
     arch: str,
 ) -> str:
-    topdir = "/workspace/build/rpmbuild"
+    topdir = "/workspace/rpmbuild"
     lines = [
         "set -eux",
         f"topdir={shlex.quote(topdir)}",
@@ -2129,6 +2110,7 @@ def _specs_build_script(
                 f"  spectool -g -C \"$topdir/SOURCES\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
                 "fi",
                 f"for target in {targets}; do",
+                f"  echo {shlex.quote(f'Building packages from {topdir}/SPECS/{spec_name}')}",
                 f"  rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"",
                 "done",
             ]
