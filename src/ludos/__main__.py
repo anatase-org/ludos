@@ -44,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Repository/package cache version to load. Defaults to the current YYYYMMDD and creates missing cache images.",
     )
+    build.add_argument(
+        "--ci",
+        action="store_true",
+        help="Build the final image with combined package and postprocess layers.",
+    )
     build.set_defaults(func=build_command)
 
     validate = subcommands.add_parser("validate", help="Validate Ludos config files.")
@@ -144,6 +149,7 @@ def build_command(args: argparse.Namespace) -> int:
         args.cache_dir,
         args.version,
         args.cache,
+        args.ci,
     )
     log(
         f"Built {result.output_image} for {result.image} on {result.distro} "

@@ -23,7 +23,6 @@ from .model import ConfigError, SpecBuild, validate_manifest
 
 
 HASH_LENGTH = 8
-BOOTSTRAP_BLOCK = "bootstrap"
 
 
 @dataclass(frozen=True)
@@ -44,6 +43,74 @@ class BuildResult:
     build_images: tuple[str, ...] = tuple()
     build_blocks: tuple[str, ...] = tuple()
     builder_images: tuple[str, ...] = tuple()
+
+
+@dataclass(frozen=True)
+class PackageImagePlan:
+    block: str
+    packages: tuple[str, ...]
+    image: str
+
+
+@dataclass(frozen=True)
+class BuildImagePlan:
+    block: str
+    image: str
+    builder_image: str
+    builder_packages: tuple[str, ...]
+    declared_packages: tuple[str, ...] = tuple()
+
+
+@dataclass(frozen=True)
+class BuildImageOutputs:
+    images_by_block: tuple[tuple[str, str], ...] = tuple()
+    rpm_files_by_block: tuple[tuple[str, tuple[str, ...]], ...] = tuple()
+    file_blocks: tuple[str, ...] = tuple()
+
+
+@dataclass(frozen=True)
+class ResolvedBuildMetadata:
+    image: str
+    distro: str
+    releasever: str
+    arch: str
+    root_dir: str
+    local_prefix: str
+    orchestrator: str
+    output_image: str
+    manifest_labels: tuple[tuple[str, str], ...]
+    manifest_env: tuple[tuple[str, str], ...]
+    requested_packages: tuple[str, ...]
+    resolved_packages: tuple[str, ...]
+    common_packages: tuple[str, ...]
+    bootstrap_packages: tuple[str, ...]
+    card_order: tuple[str, ...]
+    card_packages: tuple[tuple[str, tuple[str, ...]], ...]
+    card_resolutions: tuple[tuple[str, tuple[str, ...]], ...]
+    package_images: tuple[PackageImagePlan, ...]
+    build_images: tuple[BuildImagePlan, ...]
+    package_dir: str
+    repo_dir: str
+    cache_dir: str
+    build_dir: str
+    card_build_dir: str
+    build_artifact_cache_dir: str
+    dnf_cache_dir: str
+    dnf_persist_dir: str
+    dnf_log_dir: str
+    podman: str
+    buildah: str | None
+    cache_version: str
+    repo_images: tuple[str, ...]
+    orchestrator_dnf_base: tuple[str, ...]
+    package_blocks: tuple[tuple[str, tuple[str, ...]], ...]
+    card_file_sets: tuple[tuple[str, str, tuple[FileRef, ...]], ...]
+    postprocess_blocks: tuple[tuple[str, str], ...]
+    card_envs: tuple[tuple[str, tuple[tuple[str, str], ...]], ...]
+    card_sources: tuple[tuple[str, str], ...]
+    card_prepare_scripts: tuple[tuple[str, str], ...]
+    card_builds: tuple[tuple[str, str], ...]
+    card_specs: tuple[tuple[str, tuple[SpecBuild, ...]], ...]
 
 
 @dataclass(frozen=True)
@@ -76,8 +143,53 @@ def build_manifest(
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
-    resolve_only: bool = False,
+    ci: bool = False,
 ) -> BuildResult:
+    metadata = resolve_build_manifests(
+        (manifest_path,),
+        cards_dir=cards_dir,
+        cache_dir=cache_dir,
+        cache_version=cache_version,
+        cache_only=cache_only,
+    )
+    build_package_card_images(metadata, cache_only=cache_only)
+    build_outputs = build_build_images(metadata, cache_only=cache_only)
+    return build_final_manifest_images(
+        metadata,
+        build_outputs=build_outputs,
+        mode="combined" if ci else "separated",
+    )[0]
+
+
+def resolve_build_manifests(
+    manifest_paths: tuple[Path, ...],
+    cards_dir: Path | None = None,
+    cache_dir: Path | None = None,
+    cache_version: str | None = None,
+    cache_only: bool = False,
+) -> tuple[ResolvedBuildMetadata, ...]:
+    if not manifest_paths:
+        raise ConfigError("at least one manifest is required")
+    metadata = tuple(
+        _resolve_manifest_metadata(
+            manifest_path,
+            cards_dir=cards_dir,
+            cache_dir=cache_dir,
+            cache_version=cache_version,
+            cache_only=cache_only,
+        )
+        for manifest_path in manifest_paths
+    )
+    return _merge_common_packages(metadata)
+
+
+def _resolve_manifest_metadata(
+    manifest_path: Path,
+    cards_dir: Path | None = None,
+    cache_dir: Path | None = None,
+    cache_version: str | None = None,
+    cache_only: bool = False,
+) -> ResolvedBuildMetadata:
     log(f"Validating manifest: {manifest_path}")
     validation = validate_manifest(manifest_path, cards_dir)
     if validation.missing_bootstrap:
@@ -459,24 +571,6 @@ def build_manifest(
                 f"Pruned {pruned_count} replaced packages from package transactions"
             )
 
-    if locally_built_package_names:
-        stubbed_count = 0
-        filtered_card_resolutions = []
-        for card_resolution in card_resolutions:
-            filtered_resolution = tuple(
-                package
-                for package in card_resolution
-                if _package_name_from_nevra(package) not in locally_built_package_names
-            )
-            stubbed_count += len(card_resolution) - len(filtered_resolution)
-            filtered_card_resolutions.append(filtered_resolution)
-        card_resolutions = filtered_card_resolutions
-        if stubbed_count:
-            log(
-                f"Stubbed {stubbed_count} packages provided by build cards from "
-                "package transactions"
-            )
-
     log("Grouping resolved packages into install blocks")
     package_counts = {}
     for card_resolution in card_resolutions:
@@ -498,22 +592,18 @@ def build_manifest(
                 continue
             seen_common_packages.add(package)
             common_packages.append(package)
-    if common_packages:
-        package_blocks.append(("common", tuple(common_packages)))
-        package_block_hashes = [_nevra_hash(tuple(common_packages))]
-    else:
-        package_block_hashes = []
+    common_block_packages = tuple((*bootstrap_resolved_packages, *common_packages))
+    package_blocks.append(("common", common_block_packages))
+    package_block_hashes = [_nevra_hash(common_block_packages)]
 
     resolved_package_list = list(bootstrap_resolved_packages)
     resolved_package_list.extend(common_packages)
-    selected_package_set = set(bootstrap_resolved_packages)
-    selected_package_set.update(common_packages)
-    for card_name, card_request, card_resolution in zip(
-        card_names, card_requests, card_resolutions
-    ):
+    for card_name, card_resolution in zip(card_names, card_resolutions):
         card_packages = []
         for package in card_resolution:
             if package in bootstrap_package_set or package in common_package_set:
+                continue
+            if _package_name_from_nevra(package) in locally_built_package_names:
                 continue
             card_packages.append(package)
         if not card_packages and card_name not in build_card_names:
@@ -522,21 +612,19 @@ def build_manifest(
         package_blocks.append((card_name, card_packages))
         package_block_hashes.append(_nevra_hash(card_packages))
         resolved_package_list.extend(card_packages)
-        selected_package_set.update(card_packages)
     package_blocks = tuple(package_blocks)
-    bootstrap_package_block = (BOOTSTRAP_BLOCK, tuple(bootstrap_resolved_packages))
-    bootstrap_package_block_hash = _nevra_hash(tuple(bootstrap_resolved_packages))
-    package_download_blocks = (bootstrap_package_block, *package_blocks)
-    package_download_hashes = (bootstrap_package_block_hash, *package_block_hashes)
+    package_block_hashes = tuple(package_block_hashes)
     resolved_packages = tuple(resolved_package_list)
     if not resolved_packages and not package_blocks:
         raise ConfigError("dnf did not resolve any packages")
     log(
         f"Resolved {len(resolved_packages)} packages into "
-        f"{len(package_download_blocks)} install blocks"
+        f"{len(package_blocks)} install blocks"
     )
 
     builder_images = {}
+    builder_package_map = {}
+    build_declared_package_map = {}
     for card_name in card_names:
         if card_name not in build_card_names:
             continue
@@ -599,6 +687,14 @@ def build_manifest(
         )
         if not builder_packages:
             raise ConfigError(f"dnf did not resolve builder packages for {card_name}")
+        builder_package_map[card_name] = builder_packages
+        if card_name in card_specs:
+            declared_packages = []
+            for spec in card_specs[card_name]:
+                declared_packages.extend(_spec_packages_for_arch(spec, arch))
+            build_declared_package_map[card_name] = _unique_packages(
+                tuple(declared_packages)
+            )
         builder_hash = _nevra_hash(builder_packages)
         builder_image = _local_image(
             local_prefix,
@@ -606,43 +702,11 @@ def build_manifest(
             f"{distro}-{builder_hash}",
         )
         builder_images[card_name] = builder_image
-        if resolve_only:
-            continue
-        if _image_exists(podman, builder_image):
-            log(f"Reusing builder image: {builder_image}")
-            continue
-        if cache_only:
-            raise ConfigError(f"builder image is not cached: {builder_image}")
 
-        builder_rpm_files = _download_block_packages(
-            orchestrator_dnf_base,
-            builder_packages,
-            package_dir=package_dir,
-            resolve_dependencies=True,
-            releasever=releasever,
-        )
-        log(f"Creating builder image: {builder_image}")
-        _create_builder_image(
-            podman=podman,
-            buildah=_require_buildah(buildah),
-            orchestrator=orchestrator,
-            root_dir=root_dir,
-            repo_dir=repo_dir,
-            dnf_cache_dir=dnf_cache_dir,
-            dnf_persist_dir=dnf_persist_dir,
-            dnf_log_dir=dnf_log_dir,
-            image=builder_image,
-            package_dir=package_dir,
-            rpm_files=builder_rpm_files,
-            releasever=releasever,
-        )
-
-    package_images = []
     package_images_by_block = {}
-    build_images = []
     build_images_by_block = {}
     for (block_name, block_packages), block_hash in zip(
-        package_download_blocks, package_download_hashes
+        package_blocks, package_block_hashes
     ):
         if not block_packages:
             continue
@@ -651,27 +715,6 @@ def build_manifest(
             "cards",
             f"{distro}-{block_name}-{block_hash}",
         )
-        if resolve_only:
-            package_images.append(package_image)
-            package_images_by_block[block_name] = package_image
-            continue
-        if _image_exists(podman, package_image):
-            log(f"Reusing card package image: {package_image}")
-        elif cache_only:
-            raise ConfigError(f"card package image is not cached: {package_image}")
-        else:
-            repo_rpm_files = _download_block_packages(
-                orchestrator_dnf_base,
-                block_packages,
-            )
-            log(f"Creating card package image: {package_image}")
-            _create_package_image(
-                buildah=_require_buildah(buildah),
-                image=package_image,
-                package_dir=package_dir,
-                rpm_files=repo_rpm_files,
-            )
-        package_images.append(package_image)
         package_images_by_block[block_name] = package_image
 
     for block_name, block_packages in package_blocks:
@@ -692,65 +735,6 @@ def build_manifest(
             "builds",
             f"{distro}-{block_name}-{build_hash}",
         )
-        if resolve_only:
-            build_images.append(build_image)
-            build_images_by_block[block_name] = build_image
-            continue
-        if _image_exists(podman, build_image):
-            log(f"Reusing build output image: {build_image}")
-            build_images.append(build_image)
-            build_images_by_block[block_name] = build_image
-            continue
-        if cache_only:
-            raise ConfigError(f"build output image is not cached: {build_image}")
-
-        if block_name in card_prepare_scripts and block_name not in card_specs:
-            log(f"Preparing build for card: {block_name}")
-            prepared_env = _run_prepare_block(
-                card_source=card_sources[block_name],
-                card_env=card_envs[block_name],
-                prepare_script=card_prepare_scripts[block_name],
-            )
-            if prepared_env:
-                card_envs[block_name].update(prepared_env)
-
-        log(f"Running build for card: {block_name} (:{_image_tag(build_image)})")
-        if block_name in card_specs:
-            build_output = _run_specs_build(
-                podman=podman,
-                orchestrator=builder_images[block_name],
-                build_dir=card_build_dir / _identifier(block_name),
-                artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
-                card_name=block_name,
-                card_source=card_sources[block_name],
-                card_env=card_envs[block_name],
-                specs=card_specs[block_name],
-                prepare_script=card_prepare_scripts.get(block_name, ""),
-                arch=arch,
-            )
-        else:
-            build_output = _run_card_build(
-                podman=podman,
-                orchestrator=builder_images[block_name],
-                build_dir=card_build_dir / _identifier(block_name),
-                artifact_cache_dir=build_artifact_cache_dir / _identifier(block_name),
-                card_name=block_name,
-                card_source=card_sources[block_name],
-                card_env=card_envs[block_name],
-                build_script=card_builds[block_name],
-            )
-        if not build_output.rpm_files and build_output.file_count == 0:
-            log(f"No build outputs found for card: {block_name}")
-            continue
-
-        log(f"Creating build output image: {build_image}")
-        _create_build_output_image(
-            buildah=_require_buildah(buildah),
-            image=build_image,
-            rpm_dir=build_output.rpm_dir,
-            files_dir=build_output.files_dir,
-        )
-        build_images.append(build_image)
         build_images_by_block[block_name] = build_image
 
     expanded_package_blocks = []
@@ -761,46 +745,332 @@ def build_manifest(
         expanded_package_blocks.append((block_name, block_packages))
 
     package_blocks = tuple(expanded_package_blocks)
-    final_package_blocks = (bootstrap_package_block, *package_blocks)
     resolved_packages = tuple(
         package
-        for _block_name, block_packages in final_package_blocks
+        for _block_name, block_packages in package_blocks
         for package in block_packages
     )
 
-    if resolve_only:
-        return BuildResult(
-            image=image,
-            distro=distro,
-            orchestrator=orchestrator,
-            output_image=output_image,
-            requested_packages=requested_packages,
-            resolved_packages=resolved_packages,
-            package_blocks=final_package_blocks,
-            package_dir=package_dir,
-            repo_dir=repo_dir,
-            podman=str(podman),
-            cache_version=cache_version,
-            repo_images=tuple(repo_images),
-            package_images=tuple(package_images),
-            build_images=tuple(build_images),
-            build_blocks=tuple(build_images_by_block),
-            builder_images=tuple(builder_images.values()),
-        )
-
-    label_lines = "".join(
-        f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
-        for key, value in validation.manifest.labels.items()
+    return ResolvedBuildMetadata(
+        image=image,
+        distro=distro,
+        releasever=releasever,
+        arch=arch,
+        root_dir=str(root_dir),
+        local_prefix=local_prefix,
+        orchestrator=orchestrator,
+        output_image=output_image,
+        manifest_labels=tuple(validation.manifest.labels.items()),
+        manifest_env=tuple(sorted(manifest_env.items())),
+        requested_packages=requested_packages,
+        resolved_packages=resolved_packages,
+        common_packages=tuple(common_packages),
+        bootstrap_packages=tuple(bootstrap_resolved_packages),
+        card_order=tuple(card_names),
+        card_packages=tuple(
+            (block_name, block_packages)
+            for block_name, block_packages in package_blocks
+            if block_name != "common"
+        ),
+        card_resolutions=tuple(zip(card_names, card_resolutions)),
+        package_images=tuple(
+            PackageImagePlan(
+                block=block_name,
+                packages=block_packages,
+                image=package_images_by_block[block_name],
+            )
+            for block_name, block_packages in package_blocks
+            if block_name in package_images_by_block
+        ),
+        build_images=tuple(
+            BuildImagePlan(
+                block=block_name,
+                image=build_images_by_block[block_name],
+                builder_image=builder_images[block_name],
+                builder_packages=builder_package_map[block_name],
+                declared_packages=build_declared_package_map.get(
+                    block_name, tuple()
+                ),
+            )
+            for block_name in build_images_by_block
+        ),
+        package_dir=str(package_dir),
+        repo_dir=str(repo_dir),
+        cache_dir=str(distro_cache_dir),
+        build_dir=str(build_dir),
+        card_build_dir=str(card_build_dir),
+        build_artifact_cache_dir=str(build_artifact_cache_dir),
+        dnf_cache_dir=str(dnf_cache_dir),
+        dnf_persist_dir=str(dnf_persist_dir),
+        dnf_log_dir=str(dnf_log_dir),
+        podman=str(podman),
+        buildah=buildah,
+        cache_version=cache_version,
+        repo_images=tuple(repo_images),
+        orchestrator_dnf_base=tuple(orchestrator_dnf_base),
+        package_blocks=package_blocks,
+        card_file_sets=tuple(
+            (
+                card_name,
+                str(card_source),
+                file_refs,
+            )
+            for card_name, card_source, file_refs in card_file_sets
+        ),
+        postprocess_blocks=tuple(postprocess_blocks),
+        card_envs=tuple(
+            (card_name, tuple(sorted(card_env.items())))
+            for card_name, card_env in card_envs.items()
+        ),
+        card_sources=tuple(
+            (card_name, str(card_source))
+            for card_name, card_source in card_sources.items()
+        ),
+        card_prepare_scripts=tuple(card_prepare_scripts.items()),
+        card_builds=tuple(card_builds.items()),
+        card_specs=tuple(card_specs.items()),
     )
+
+
+def resolve_manifest_images(
+    manifest_path: Path,
+    cards_dir: Path | None = None,
+    cache_dir: Path | None = None,
+    cache_version: str | None = None,
+) -> BuildResult:
+    metadata = resolve_build_manifests(
+        (manifest_path,),
+        cards_dir=cards_dir,
+        cache_dir=cache_dir,
+        cache_version=cache_version,
+        cache_only=True,
+    )[0]
+    return _metadata_build_result(metadata)
+
+
+def _merge_common_packages(
+    metadata: tuple[ResolvedBuildMetadata, ...],
+) -> tuple[ResolvedBuildMetadata, ...]:
+    if len(metadata) <= 1:
+        return metadata
+
+    contexts = {
+        (
+            item.root_dir,
+            item.distro,
+            item.releasever,
+            item.arch,
+            item.local_prefix,
+            item.orchestrator,
+            item.repo_images,
+        )
+        for item in metadata
+    }
+    if len(contexts) != 1:
+        raise ConfigError(
+            "multi-manifest resolution requires compatible root, distro, "
+            "releasever, arch, orchestrator, and repository metadata"
+        )
+    return metadata
+
+
+def build_package_card_images(
+    metadata: tuple[ResolvedBuildMetadata, ...],
+    *,
+    cache_only: bool = False,
+) -> None:
+    created: set[str] = set()
+    for manifest in metadata:
+        for plan in manifest.package_images:
+            if not plan.packages or plan.image in created:
+                continue
+            if _image_exists(manifest.podman, plan.image):
+                log(f"Reusing card package image: {plan.image}")
+                created.add(plan.image)
+                continue
+            if cache_only:
+                raise ConfigError(f"card package image is not cached: {plan.image}")
+
+            rpm_files = _download_block_packages(
+                list(manifest.orchestrator_dnf_base),
+                plan.packages,
+            )
+            log(f"Creating card package image: {plan.image}")
+            _create_package_image(
+                buildah=_require_buildah(manifest.buildah),
+                image=plan.image,
+                package_dir=Path(manifest.package_dir),
+                rpm_files=rpm_files,
+            )
+            created.add(plan.image)
+
+
+def build_build_images(
+    metadata: tuple[ResolvedBuildMetadata, ...],
+    *,
+    targets: tuple[str, ...] = tuple(),
+    cache_only: bool = False,
+) -> BuildImageOutputs:
+    target_set = set(targets)
+    images_by_block: dict[str, str] = {}
+    rpm_files_by_block: dict[str, tuple[str, ...]] = {}
+    file_blocks: set[str] = set()
+    built_builders: set[str] = set()
+
+    for manifest in metadata:
+        card_envs = {
+            name: dict(values)
+            for name, values in manifest.card_envs
+        }
+        card_sources = {name: Path(source) for name, source in manifest.card_sources}
+        card_prepare_scripts = dict(manifest.card_prepare_scripts)
+        card_builds = dict(manifest.card_builds)
+        card_specs = dict(manifest.card_specs)
+
+        for plan in manifest.build_images:
+            if target_set and plan.block not in target_set and plan.image not in target_set:
+                continue
+
+            if plan.builder_image not in built_builders:
+                if _image_exists(manifest.podman, plan.builder_image):
+                    log(f"Reusing builder image: {plan.builder_image}")
+                elif cache_only:
+                    raise ConfigError(
+                        f"builder image is not cached: {plan.builder_image}"
+                    )
+                else:
+                    builder_rpm_files = _download_block_packages(
+                        list(manifest.orchestrator_dnf_base),
+                        plan.builder_packages,
+                        package_dir=Path(manifest.package_dir),
+                        resolve_dependencies=True,
+                        releasever=manifest.releasever,
+                    )
+                    log(f"Creating builder image: {plan.builder_image}")
+                    _create_builder_image(
+                        podman=manifest.podman,
+                        buildah=_require_buildah(manifest.buildah),
+                        orchestrator=manifest.orchestrator,
+                        root_dir=Path(manifest.root_dir),
+                        repo_dir=Path(manifest.repo_dir),
+                        dnf_cache_dir=Path(manifest.dnf_cache_dir),
+                        dnf_persist_dir=Path(manifest.dnf_persist_dir),
+                        dnf_log_dir=Path(manifest.dnf_log_dir),
+                        image=plan.builder_image,
+                        package_dir=Path(manifest.package_dir),
+                        rpm_files=builder_rpm_files,
+                        releasever=manifest.releasever,
+                    )
+                built_builders.add(plan.builder_image)
+
+            if _image_exists(manifest.podman, plan.image):
+                log(f"Reusing build output image: {plan.image}")
+                images_by_block[plan.block] = plan.image
+                rpm_files_by_block[plan.block] = _rpm_files_in_image(
+                    manifest.podman, plan.image
+                )
+                if _image_has_files(manifest.podman, plan.image, "/files"):
+                    file_blocks.add(plan.block)
+                continue
+            if cache_only:
+                raise ConfigError(f"build output image is not cached: {plan.image}")
+
+            card_env = dict(card_envs[plan.block])
+            if plan.block in card_prepare_scripts and plan.block not in card_specs:
+                log(f"Preparing build for card: {plan.block}")
+                prepared_env = _run_prepare_block(
+                    card_source=card_sources[plan.block],
+                    card_env=card_env,
+                    prepare_script=card_prepare_scripts[plan.block],
+                )
+                card_env.update(prepared_env)
+
+            log(f"Running build for card: {plan.block} (:{_image_tag(plan.image)})")
+            if plan.block in card_specs:
+                build_output = _run_specs_build(
+                    podman=manifest.podman,
+                    orchestrator=plan.builder_image,
+                    build_dir=Path(manifest.card_build_dir) / _identifier(plan.block),
+                    artifact_cache_dir=Path(manifest.build_artifact_cache_dir)
+                    / _identifier(plan.block),
+                    card_name=plan.block,
+                    card_source=card_sources[plan.block],
+                    card_env=card_env,
+                    specs=card_specs[plan.block],
+                    prepare_script=card_prepare_scripts.get(plan.block, ""),
+                    arch=manifest.arch,
+                )
+            else:
+                build_output = _run_card_build(
+                    podman=manifest.podman,
+                    orchestrator=plan.builder_image,
+                    build_dir=Path(manifest.card_build_dir) / _identifier(plan.block),
+                    artifact_cache_dir=Path(manifest.build_artifact_cache_dir)
+                    / _identifier(plan.block),
+                    card_name=plan.block,
+                    card_source=card_sources[plan.block],
+                    card_env=card_env,
+                    build_script=card_builds[plan.block],
+                )
+            if not build_output.rpm_files and build_output.file_count == 0:
+                log(f"No build outputs found for card: {plan.block}")
+                continue
+
+            log(f"Creating build output image: {plan.image}")
+            _create_build_output_image(
+                buildah=_require_buildah(manifest.buildah),
+                image=plan.image,
+                rpm_dir=build_output.rpm_dir,
+                files_dir=build_output.files_dir,
+            )
+            images_by_block[plan.block] = plan.image
+            rpm_files_by_block[plan.block] = build_output.rpm_files
+            if build_output.file_count:
+                file_blocks.add(plan.block)
+
+    return BuildImageOutputs(
+        images_by_block=tuple(sorted(images_by_block.items())),
+        rpm_files_by_block=tuple(sorted(rpm_files_by_block.items())),
+        file_blocks=tuple(sorted(file_blocks)),
+    )
+
+
+def build_final_manifest_images(
+    metadata: tuple[ResolvedBuildMetadata, ...],
+    *,
+    build_outputs: BuildImageOutputs | None = None,
+    mode: str = "separated",
+) -> tuple[BuildResult, ...]:
+    if mode not in ("separated", "combined"):
+        raise ConfigError(f"unknown final image build mode: {mode}")
+    build_outputs = build_outputs or BuildImageOutputs()
+    results = []
+    for manifest in metadata:
+        results.append(
+            _build_final_manifest_image(
+                manifest,
+                build_outputs=build_outputs,
+                mode=mode,
+            )
+        )
+    return tuple(results)
+
+
+def _build_final_manifest_image(
+    metadata: ResolvedBuildMetadata,
+    *,
+    build_outputs: BuildImageOutputs,
+    mode: str,
+) -> BuildResult:
+    build_dir = Path(metadata.build_dir)
     card_files_dir = build_dir / "files"
     log("Staging card files")
     shutil.rmtree(card_files_dir, ignore_errors=True)
-    card_file_cards = set()
-    for card_name, card_source, file_refs in card_file_sets:
+    card_file_cards: set[str] = set()
+    for card_name, card_source_text, file_refs in metadata.card_file_sets:
         if not file_refs:
             continue
-        if card_source is None:
-            raise ConfigError(f"card '{card_name}' has files but no source path")
+        card_source = Path(card_source_text)
         card_source_dir = card_source.parent.resolve()
         card_context_dir = card_files_dir / _identifier(card_name)
         staged_file_count = 0
@@ -843,33 +1113,109 @@ def build_manifest(
         card_file_cards.add(card_name)
         log(f"Staged {staged_file_count} files for card: {card_name}")
 
+    package_images_by_block = {
+        plan.block: plan.image for plan in metadata.package_images
+    }
+    build_images_by_block = dict(build_outputs.images_by_block)
+    build_rpm_files_by_block = dict(build_outputs.rpm_files_by_block)
+    build_file_blocks = set(build_outputs.file_blocks)
+    package_blocks = tuple(
+        (block_name, block_packages)
+        for block_name, block_packages in metadata.package_blocks
+        if block_name == "common"
+        or block_name in package_images_by_block
+        or block_name in build_images_by_block
+    )
+
     log(f"Generating Containerfile: {build_dir / 'Containerfile'}")
+    containerfile = build_dir / "Containerfile"
+    containerfile.write_text(
+        _render_final_containerfile(
+            metadata,
+            mode=mode,
+            package_blocks=package_blocks,
+            package_images_by_block=package_images_by_block,
+            build_images_by_block=build_images_by_block,
+            build_rpm_files_by_block=build_rpm_files_by_block,
+            card_file_cards=card_file_cards,
+            build_file_blocks=build_file_blocks,
+        ),
+        encoding="utf-8",
+    )
+
+    log(f"Building final image: {metadata.output_image}")
+    _run_container_build(
+        [
+            metadata.podman,
+            "build",
+            "--layers",
+            "--pull=missing",
+            "--tag",
+            metadata.output_image,
+            "--volume",
+            f"{Path(metadata.root_dir) / 'repos'}:/workspace/repos:ro",
+            "--volume",
+            f"{metadata.repo_dir}:/ludos/dnf/repos:ro",
+            "--volume",
+            f"{metadata.dnf_cache_dir}:/ludos/dnf/cache",
+            "--volume",
+            f"{metadata.dnf_persist_dir}:/ludos/dnf/persist",
+            "--volume",
+            f"{metadata.dnf_log_dir}:/ludos/dnf/log",
+            "--file",
+            str(containerfile),
+            str(build_dir),
+        ],
+        containerfile,
+    )
+
+    return _metadata_build_result(
+        metadata,
+        package_blocks=package_blocks,
+        build_outputs=build_outputs,
+    )
+
+
+def _render_final_containerfile(
+    metadata: ResolvedBuildMetadata,
+    *,
+    mode: str,
+    package_blocks: tuple[tuple[str, tuple[str, ...]], ...],
+    package_images_by_block: dict[str, str],
+    build_images_by_block: dict[str, str],
+    build_rpm_files_by_block: dict[str, tuple[str, ...]],
+    card_file_cards: set[str],
+    build_file_blocks: set[str],
+) -> str:
     package_stage_names = {
         block_name: f"cards_{_identifier(block_name)}"
-        for block_name, _block_packages in final_package_blocks
+        for block_name, _block_packages in package_blocks
         if block_name in package_images_by_block
     }
     build_stage_names = {
         block_name: f"builds_{_identifier(block_name)}"
-        for block_name, _block_packages in package_blocks
-        if block_name in build_images_by_block
+        for block_name in build_images_by_block
     }
-    package_stage_lines = "".join(
+    stage_lines = "".join(
         f"FROM {package_images_by_block[block_name]} AS {package_stage_names[block_name]}\n"
-        for block_name, _block_packages in final_package_blocks
-        if block_name in package_images_by_block
-    )
-    build_stage_lines = "".join(
-        f"FROM {build_images_by_block[block_name]} AS {build_stage_names[block_name]}\n"
         for block_name, _block_packages in package_blocks
-        if block_name in build_images_by_block
+        if block_name in package_stage_names
     )
-    bootstrap_stage_name = package_stage_names[BOOTSTRAP_BLOCK]
-    bootstrap_copy_lines = (
-        f"COPY --from={bootstrap_stage_name} /rpms/ /rpms/{BOOTSTRAP_BLOCK}/packages/\n"
+    stage_lines += "".join(
+        f"FROM {image} AS {build_stage_names[block_name]}\n"
+        for block_name, image in build_images_by_block.items()
     )
-    bootstrap_package_globs = f"/rpms/{BOOTSTRAP_BLOCK}/packages/*.rpm"
-    bootstrap_step = f"""FROM {orchestrator} AS bootstrap
+
+    label_lines = "".join(
+        f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
+        for key, value in metadata.manifest_labels
+    )
+    common_stage = package_stage_names["common"]
+    bootstrap_paths = _rpm_paths_for_packages(
+        "/rpms/common",
+        metadata.bootstrap_packages,
+    )
+    bootstrap_step = f"""FROM {metadata.orchestrator} AS bootstrap
 WORKDIR /workspace/repos
 RUN mkdir -p /target
 
@@ -877,105 +1223,171 @@ RUN mkdir -p /target
 # Bootstrap root
 #
 
-{bootstrap_copy_lines}\
-RUN /bin/sh <<'LUDOS_BOOTSTRAP'
-set -e
-rpm_args=
-for rpm in {bootstrap_package_globs}; do
-    [ -e "$rpm" ] || continue
-    rpm_args="$rpm_args $rpm"
-done
-[ -n "$rpm_args" ] || exit 0
-dnf5 -y \\
-    --installroot=/target \\
-    --releasever={releasever} \\
-    --setopt=reposdir=/ludos/dnf/repos \\
-    --setopt=cachedir=/ludos/dnf/cache \\
-    --setopt=persistdir=/ludos/dnf/persist \\
-    --setopt=logdir=/ludos/dnf/log \\
-    --setopt=install_weak_deps=False \\
-    --cacheonly \\
-    --disable-repo='*' \\
-    --enable-repo='*' \\
-    --nogpgcheck \\
-    install \\
-    --allowerasing \\
-    $rpm_args \\
-    && \\
-    rm -rf /target/var/cache/dnf /target/var/log/dnf*
+RUN --mount=type=bind,from={common_stage},source=/rpms,target=/rpms/common,ro /bin/sh <<'LUDOS_BOOTSTRAP'
+{_dnf_install_script(metadata.releasever, bootstrap_paths, installroot="/target")}
 LUDOS_BOOTSTRAP
 """
-    install_copy_lines = []
-    for block_name, _block_packages in package_blocks:
-        rpm_sources = []
-        if block_name in package_stage_names:
-            rpm_sources.append(("packages", package_stage_names[block_name]))
-        if block_name in build_stage_names:
-            rpm_sources.append(("build", build_stage_names[block_name]))
-        if not rpm_sources:
-            continue
-        install_copy_lines.extend(
-            f"COPY --from={stage_name} /rpms/ /rpms/install/{block_name}/{source_name}/\n"
-            for source_name, stage_name in rpm_sources
-        )
-    install_copy_lines = "".join(install_copy_lines)
-    install_step_lines = f"""{install_copy_lines}\
-RUN /bin/sh <<'LUDOS_INSTALL'
-set -e
-mkdir -p /rpms/install
-rpm_args=
-find /rpms/install -type f -name '*.rpm' | sort > /tmp/ludos-install-rpms
-while read -r rpm; do
-    [ -n "$rpm" ] || continue
-    rpm_args="$rpm_args $rpm"
-done < /tmp/ludos-install-rpms
-[ -n "$rpm_args" ] || exit 0
-dnf5 -y \\
-    --releasever={releasever} \\
-    --setopt=reposdir=/ludos/dnf/repos \\
-    --setopt=cachedir=/ludos/dnf/cache \\
-    --setopt=persistdir=/ludos/dnf/persist \\
-    --setopt=logdir=/ludos/dnf/log \\
-    --setopt=install_weak_deps=False \\
-    --cacheonly \\
-    --disable-repo='*' \\
-    --enable-repo='*' \\
-    --nogpgcheck \\
-    install \\
-    --allowerasing \\
-    $rpm_args \\
-    && \\
-    rm -rf /var/cache/dnf /var/log/dnf*
-LUDOS_INSTALL
-"""
+
+    card_packages = dict(metadata.card_packages)
+    card_resolutions = dict(metadata.card_resolutions)
+    postprocess_blocks = dict(metadata.postprocess_blocks)
+    built_package_names_by_block = {
+        plan.block: {
+            _package_name_from_nevra(package)
+            for package in plan.declared_packages
+        }
+        for plan in metadata.build_images
+    }
+    install_steps = []
     postprocess_steps = []
-    for block_name, postprocess in postprocess_blocks:
-        file_steps = []
-        if block_name in build_stage_names:
-            file_steps.append(
-                f"COPY --from={build_stage_names[block_name]} /files/ /files/\n"
+
+    if mode == "combined":
+        all_built_package_names = set().union(
+            *built_package_names_by_block.values()
+        ) if built_package_names_by_block else set()
+        install_paths = _rpm_paths_for_packages(
+            "/rpms/common",
+            tuple(
+                package
+                for package in metadata.common_packages
+                if _package_name_from_nevra(package) not in all_built_package_names
+            ),
+        )
+        mounts = [("type=bind", f"from={common_stage}", "source=/rpms", "target=/rpms/common", "ro")]
+        for card_name in metadata.card_order:
+            card_block_packages = card_packages.get(card_name, tuple())
+            if card_block_packages and card_name in package_stage_names:
+                mounts.append(
+                    (
+                        "type=bind",
+                        f"from={package_stage_names[card_name]}",
+                        "source=/rpms",
+                        f"target=/rpms/{_identifier(card_name)}",
+                        "ro",
+                    )
+                )
+                install_paths += _rpm_paths_for_packages(
+                    f"/rpms/{_identifier(card_name)}",
+                    card_block_packages,
+                )
+            build_rpm_files = build_rpm_files_by_block.get(card_name, tuple())
+            if build_rpm_files and card_name in build_stage_names:
+                mounts.append(
+                    (
+                        "type=bind",
+                        f"from={build_stage_names[card_name]}",
+                        "source=/rpms",
+                        f"target=/rpms/{_identifier(card_name)}-build",
+                        "ro",
+                    )
+                )
+                install_paths += tuple(
+                    f"/rpms/{_identifier(card_name)}-build/{rpm_file}"
+                    for rpm_file in build_rpm_files
+                )
+        if install_paths:
+            install_steps.append(
+                _run_with_mounts(
+                    mounts,
+                    "LUDOS_INSTALL",
+                    _dnf_install_script(metadata.releasever, install_paths),
+                )
             )
-        if block_name in card_file_cards:
-            file_steps.append(f"COPY files/{_identifier(block_name)}/ /files/\n")
-        file_step = "".join(file_steps)
-        set_command = "" if _starts_with_set_command(postprocess) else "set -e\n"
         postprocess_steps.append(
-            f"""#
-# Postprocess: {block_name}
+            _combined_postprocess_step(
+                metadata,
+                postprocess_blocks,
+                card_file_cards,
+                build_file_blocks,
+                build_stage_names,
+            )
+        )
+    else:
+        installed_common = set(metadata.bootstrap_packages)
+        common_set = set(metadata.common_packages)
+        for card_name in metadata.card_order:
+            card_built_package_names = built_package_names_by_block.get(card_name, set())
+            mounts = [
+                (
+                    "type=bind",
+                    f"from={common_stage}",
+                    "source=/rpms",
+                    "target=/rpms/common",
+                    "ro",
+                )
+            ]
+            common_needed = tuple(
+                package
+                for package in card_resolutions.get(card_name, tuple())
+                if package in common_set and package not in installed_common
+                and _package_name_from_nevra(package)
+                not in card_built_package_names
+            )
+            installed_common.update(
+                package
+                for package in card_resolutions.get(card_name, tuple())
+                if package in common_set
+                and _package_name_from_nevra(package) in card_built_package_names
+            )
+            installed_common.update(common_needed)
+            install_paths = _rpm_paths_for_packages("/rpms/common", common_needed)
+            card_block_packages = card_packages.get(card_name, tuple())
+            if card_block_packages and card_name in package_stage_names:
+                mounts.append(
+                    (
+                        "type=bind",
+                        f"from={package_stage_names[card_name]}",
+                        "source=/rpms",
+                        f"target=/rpms/{_identifier(card_name)}",
+                        "ro",
+                    )
+                )
+                install_paths += _rpm_paths_for_packages(
+                    f"/rpms/{_identifier(card_name)}",
+                    card_block_packages,
+                )
+            build_rpm_files = build_rpm_files_by_block.get(card_name, tuple())
+            if build_rpm_files and card_name in build_stage_names:
+                mounts.append(
+                    (
+                        "type=bind",
+                        f"from={build_stage_names[card_name]}",
+                        "source=/rpms",
+                        f"target=/rpms/{_identifier(card_name)}-build",
+                        "ro",
+                    )
+                )
+                install_paths += tuple(
+                    f"/rpms/{_identifier(card_name)}-build/{rpm_file}"
+                    for rpm_file in build_rpm_files
+                )
+            if install_paths:
+                install_steps.append(
+                    f"""#
+# Install packages: {card_name}
 #
 
-{file_step}\
-RUN /bin/sh <<'LUDOS_POSTPROCESS_{block_name}'
-{set_command}\
-{postprocess}
-rm -rf /files
-LUDOS_POSTPROCESS_{block_name}
+{_run_with_mounts(
+    mounts,
+    f"LUDOS_INSTALL_{_identifier(card_name)}",
+    _dnf_install_script(metadata.releasever, install_paths),
+)}
 """
-        )
-    postprocess_step_lines = "\n".join(postprocess_steps)
-    containerfile = build_dir / "Containerfile"
-    containerfile.write_text(
-        f"""{package_stage_lines}{build_stage_lines}{bootstrap_step}
+                )
+            if card_name in postprocess_blocks:
+                postprocess_steps.append(
+                    _postprocess_step(
+                        card_name,
+                        postprocess_blocks[card_name],
+                        card_name in card_file_cards,
+                        card_name in build_file_blocks,
+                        build_stage_names.get(card_name, ""),
+                    )
+                )
+
+    install_step_lines = "\n".join(step for step in install_steps if step)
+    postprocess_step_lines = "\n".join(step for step in postprocess_steps if step)
+    return f"""{stage_lines}{bootstrap_step}
 FROM scratch AS install
 COPY --from=bootstrap /target /
 WORKDIR /workspace/repos
@@ -997,69 +1409,223 @@ RUN rm -rf /etc/machine-id /var/lib/dbus/machine-id
 #
 
 {postprocess_step_lines}
-{label_lines}""",
-        encoding="utf-8",
+{label_lines}"""
+
+
+def _dnf_install_script(
+    releasever: str,
+    rpm_paths: tuple[str, ...],
+    *,
+    installroot: str | None = None,
+) -> str:
+    if not rpm_paths:
+        return "set -e\nexit 0\n"
+    installroot_line = f"    --installroot={installroot} \\\n" if installroot else ""
+    clean_root = installroot or ""
+    clean_cache = f"{clean_root}/var/cache/dnf".replace("//", "/")
+    clean_logs = f"{clean_root}/var/log/dnf*".replace("//", "/")
+    rpm_lines = " \\\n".join(f"    {shlex.quote(path)}" for path in rpm_paths)
+    return f"""set -e
+dnf5 -y \\
+{installroot_line}    --releasever={releasever} \\
+    --setopt=reposdir=/ludos/dnf/repos \\
+    --setopt=cachedir=/ludos/dnf/cache \\
+    --setopt=persistdir=/ludos/dnf/persist \\
+    --setopt=logdir=/ludos/dnf/log \\
+    --setopt=install_weak_deps=False \\
+    --cacheonly \\
+    --disable-repo='*' \\
+    --enable-repo='*' \\
+    --nogpgcheck \\
+    install \\
+    --allowerasing \\
+{rpm_lines} \\
+    && \\
+    rm -rf {clean_cache} {clean_logs}
+"""
+
+
+def _run_with_mounts(
+    mounts: list[tuple[str, ...]],
+    heredoc: str,
+    script: str,
+) -> str:
+    mount_args = " ".join(
+        "--mount=" + ",".join(parts)
+        for parts in mounts
+    )
+    return f"RUN {mount_args} /bin/sh <<'{heredoc}'\n{script}{heredoc}\n"
+
+
+def _postprocess_step(
+    block_name: str,
+    postprocess: str,
+    has_card_files: bool,
+    has_build_files: bool,
+    build_stage_name: str,
+) -> str:
+    mounts = []
+    identifier = _identifier(block_name)
+    if has_card_files:
+        mounts.append(
+            (
+                "type=bind",
+                f"source=files/{identifier}",
+                "target=/ludos/card-files",
+                "ro",
+            )
+        )
+    if has_build_files and build_stage_name:
+        mounts.append(
+            (
+                "type=bind",
+                f"from={build_stage_name}",
+                "source=/files",
+                "target=/ludos/build-files",
+                "ro",
+            )
+        )
+    set_command = "" if _starts_with_set_command(postprocess) else "set -e\n"
+    setup = _postprocess_file_setup(has_card_files, has_build_files)
+    return f"""#
+# Postprocess: {block_name}
+#
+
+{_run_with_mounts(
+    mounts,
+    f"LUDOS_POSTPROCESS_{identifier}",
+    f"{setup}{set_command}{postprocess}\nrm -rf /files\n",
+) if mounts else f"RUN /bin/sh <<'LUDOS_POSTPROCESS_{identifier}'\n{set_command}{postprocess}\nrm -rf /files\nLUDOS_POSTPROCESS_{identifier}\n"}
+"""
+
+
+def _combined_postprocess_step(
+    metadata: ResolvedBuildMetadata,
+    postprocess_blocks: dict[str, str],
+    card_file_cards: set[str],
+    build_file_blocks: set[str],
+    build_stage_names: dict[str, str],
+) -> str:
+    if not postprocess_blocks:
+        return ""
+    mounts = []
+    for card_name in metadata.card_order:
+        identifier = _identifier(card_name)
+        if card_name in card_file_cards:
+            mounts.append(
+                (
+                    "type=bind",
+                    f"source=files/{identifier}",
+                    f"target=/ludos/card-files/{identifier}",
+                    "ro",
+                )
+            )
+        if card_name in build_file_blocks and card_name in build_stage_names:
+            mounts.append(
+                (
+                    "type=bind",
+                    f"from={build_stage_names[card_name]}",
+                    "source=/files",
+                    f"target=/ludos/build-files/{identifier}",
+                    "ro",
+                )
+            )
+
+    scripts = []
+    for card_name in metadata.card_order:
+        postprocess = postprocess_blocks.get(card_name)
+        if not postprocess:
+            continue
+        identifier = _identifier(card_name)
+        set_command = "" if _starts_with_set_command(postprocess) else "set -e\n"
+        scripts.append(
+            f"""#
+# Postprocess: {card_name}
+#
+rm -rf /files
+mkdir -p /files
+if [ -d /ludos/card-files/{identifier} ]; then cp -a /ludos/card-files/{identifier}/. /files/; fi
+if [ -d /ludos/build-files/{identifier} ]; then cp -a /ludos/build-files/{identifier}/. /files/; fi
+{set_command}{postprocess}
+rm -rf /files
+"""
+        )
+    return _run_with_mounts(
+        mounts,
+        "LUDOS_POSTPROCESS",
+        "\n".join(scripts),
+    ) if mounts else "RUN /bin/sh <<'LUDOS_POSTPROCESS'\n" + "\n".join(scripts) + "LUDOS_POSTPROCESS\n"
+
+
+def _postprocess_file_setup(has_card_files: bool, has_build_files: bool) -> str:
+    if not has_card_files and not has_build_files:
+        return ""
+    lines = ["rm -rf /files", "mkdir -p /files"]
+    if has_card_files:
+        lines.append("cp -a /ludos/card-files/. /files/")
+    if has_build_files:
+        lines.append("cp -a /ludos/build-files/. /files/")
+    return "\n".join(lines) + "\n"
+
+
+def _rpm_paths_for_packages(mount_dir: str, packages: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        f"{mount_dir}/{_rpm_filename_nevra(package)}.rpm"
+        for package in packages
     )
 
-    log(f"Building final image: {output_image}")
-    _run_container_build(
-        [
-            podman,
-            "build",
-            "--layers",
-            "--pull=missing",
-            "--tag",
-            output_image,
-            "--volume",
-            f"{root_dir / 'repos'}:/workspace/repos:ro",
-            "--volume",
-            f"{repo_dir}:/ludos/dnf/repos:ro",
-            "--volume",
-            f"{dnf_cache_dir}:/ludos/dnf/cache",
-            "--volume",
-            f"{dnf_persist_dir}:/ludos/dnf/persist",
-            "--volume",
-            f"{dnf_log_dir}:/ludos/dnf/log",
-            "--file",
-            str(containerfile),
-            str(build_dir),
-        ],
-        containerfile,
-    )
 
-    return BuildResult(
-        image=image,
-        distro=distro,
-        orchestrator=orchestrator,
-        output_image=output_image,
-        requested_packages=requested_packages,
-        resolved_packages=resolved_packages,
-        package_blocks=final_package_blocks,
-        package_dir=package_dir,
-        repo_dir=repo_dir,
-        podman=str(podman),
-        cache_version=cache_version,
-        repo_images=tuple(repo_images),
-        package_images=tuple(package_images),
-        build_images=tuple(build_images),
-        build_blocks=tuple(build_images_by_block),
-        builder_images=tuple(builder_images.values()),
-    )
+def _rpm_files_in_image(podman: str, image: str) -> tuple[str, ...]:
+    with tempfile.TemporaryDirectory(prefix="ludos-image-rpms-") as temp_dir:
+        output_dir = Path(temp_dir)
+        _extract_image_paths(podman, image, {"rpms": output_dir})
+        return tuple(sorted(path.name for path in output_dir.glob("*.rpm")))
 
 
-def resolve_manifest_images(
-    manifest_path: Path,
-    cards_dir: Path | None = None,
-    cache_dir: Path | None = None,
-    cache_version: str | None = None,
+def _image_has_files(podman: str, image: str, source: str) -> bool:
+    with tempfile.TemporaryDirectory(prefix="ludos-image-files-") as temp_dir:
+        output_dir = Path(temp_dir)
+        try:
+            _extract_image_paths(podman, image, {source.strip("/"): output_dir})
+        except subprocess.CalledProcessError:
+            return False
+        return any(path.is_file() for path in output_dir.rglob("*"))
+
+
+def _metadata_build_result(
+    metadata: ResolvedBuildMetadata,
+    *,
+    package_blocks: tuple[tuple[str, tuple[str, ...]], ...] | None = None,
+    build_outputs: BuildImageOutputs | None = None,
 ) -> BuildResult:
-    return build_manifest(
-        manifest_path,
-        cards_dir=cards_dir,
-        cache_dir=cache_dir,
-        cache_version=cache_version,
-        cache_only=True,
-        resolve_only=True,
+    package_blocks = package_blocks or metadata.package_blocks
+    build_outputs = build_outputs or BuildImageOutputs()
+    build_images_by_block = dict(build_outputs.images_by_block)
+    if not build_images_by_block:
+        build_images_by_block = {
+            plan.block: plan.image for plan in metadata.build_images
+        }
+    return BuildResult(
+        image=metadata.image,
+        distro=metadata.distro,
+        orchestrator=metadata.orchestrator,
+        output_image=metadata.output_image,
+        requested_packages=metadata.requested_packages,
+        resolved_packages=tuple(
+            package
+            for _block_name, block_packages in package_blocks
+            for package in block_packages
+        ),
+        package_blocks=package_blocks,
+        package_dir=Path(metadata.package_dir),
+        repo_dir=Path(metadata.repo_dir),
+        podman=metadata.podman,
+        cache_version=metadata.cache_version,
+        repo_images=metadata.repo_images,
+        package_images=tuple(plan.image for plan in metadata.package_images),
+        build_images=tuple(build_images_by_block.values()),
+        build_blocks=tuple(build_images_by_block),
+        builder_images=tuple(plan.builder_image for plan in metadata.build_images),
     )
 
 
