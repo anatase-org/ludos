@@ -26,6 +26,7 @@ class SpecBuild:
     spec: str
     packages: dict[str, tuple[str, ...]] = field(default_factory=dict)
     replace: dict[str, str] = field(default_factory=dict)
+    files: tuple[str, ...] = tuple()
     upstream: UpstreamRef | None = None
 
 
@@ -372,12 +373,14 @@ def _spec_builds_tuple(
 
         packages = _spec_packages_dict(item, "packages", path, label)
         replace = _spec_replace_dict(item, "replace", path, label)
+        files = _string_tuple(item, "files", path)
         upstream = _upstream_ref(item, "upstream", path, label)
         specs.append(
             SpecBuild(
                 spec=spec,
                 packages=packages,
                 replace=replace,
+                files=files,
                 upstream=upstream,
             )
         )

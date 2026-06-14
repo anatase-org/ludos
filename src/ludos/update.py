@@ -124,7 +124,7 @@ def update_card(
             new_sha=upstream_head.sha,
         )
         if not dry_run:
-            _copy_worktree_to_source(repo_dir, source.source_dir)
+            _copy_merged_source(repo_dir, source)
             _set_locked_sha(lock_data, source.key, upstream_head.sha)
             _write_lock(lock_path, lock_data)
 
@@ -208,6 +208,8 @@ def _upstream_sources(card: Card) -> tuple[UpstreamSource, ...]:
         spec_path = _spec_source_path(card_source, card_base, spec)
         source_dir = spec_path.parent
         key = source_dir.relative_to(card_base).as_posix()
+        if key == ".":
+            key = card_base.name
         if key in seen:
             raise ConfigError(f"{card_source}: duplicate upstream source '{key}'")
         seen.add(key)
@@ -283,7 +285,10 @@ def _merge_dist_git_update(
     _reset_worktree(repo_dir)
     _rev_parse(repo_dir, old_sha)
     _run_git(repo_dir, ["checkout", "-B", "ludos-update", old_sha], capture=True)
-    _replace_worktree_contents(repo_dir, source.source_dir)
+    if source.spec.files:
+        _overlay_spec_files(repo_dir, source)
+    else:
+        _replace_worktree_contents(repo_dir, source.source_dir)
     _run_git(repo_dir, ["add", "-A"])
     if not _git_tree_clean(repo_dir):
         _run_git(
@@ -369,6 +374,63 @@ def _copy_worktree_to_source(repo_dir: Path, source_dir: Path) -> None:
         else:
             child.unlink()
     _copy_directory_contents(repo_dir, source_dir, exclude={".git"})
+
+
+def _copy_merged_source(repo_dir: Path, source: UpstreamSource) -> None:
+    if source.spec.files:
+        _copy_merged_spec_files(repo_dir, source)
+    else:
+        _copy_worktree_to_source(repo_dir, source.source_dir)
+
+
+def _overlay_spec_files(repo_dir: Path, source: UpstreamSource) -> None:
+    spec_name = Path(source.spec.spec).name
+    shutil.copy2(source.source_dir / spec_name, repo_dir / spec_name)
+    for pattern in source.spec.files:
+        matches = sorted(source.source_dir.glob(pattern))
+        if not matches:
+            continue
+        _remove_matches(repo_dir, pattern)
+        for path in matches:
+            _copy_relative_path(path, source.source_dir, repo_dir)
+
+
+def _copy_merged_spec_files(repo_dir: Path, source: UpstreamSource) -> None:
+    spec_name = Path(source.spec.spec).name
+    shutil.copy2(repo_dir / spec_name, source.source_dir / spec_name)
+    for pattern in source.spec.files:
+        _remove_matches(source.source_dir, pattern)
+        for path in sorted(repo_dir.glob(pattern)):
+            _copy_relative_path(path, repo_dir, source.source_dir)
+
+
+def _remove_matches(base_dir: Path, pattern: str) -> None:
+    for path in sorted(base_dir.glob(pattern), reverse=True):
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+
+
+def _copy_relative_path(
+    source_path: Path,
+    source_base: Path,
+    destination_base: Path,
+) -> None:
+    relative = source_path.relative_to(source_base)
+    destination = destination_base / relative
+    if source_path.is_dir() and not source_path.is_symlink():
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source_path, destination, symlinks=True)
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.is_symlink():
+        if destination.exists() or destination.is_symlink():
+            destination.unlink()
+        os.symlink(os.readlink(source_path), destination)
+        return
+    shutil.copy2(source_path, destination)
 
 
 def _copy_directory_contents(

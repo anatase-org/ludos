@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as _datetime
 import fnmatch
+import glob
 import hashlib
 import json
 import os
@@ -1907,7 +1908,19 @@ def _stage_card_specs(
 
         relative_dir = spec_source.parent.relative_to(card_base_dir)
         staged_source_dir = workspace_dir / relative_dir
-        _copy_directory_contents(spec_source.parent, staged_source_dir, ignore_rules)
+        if spec.files:
+            shutil.rmtree(staged_source_dir, ignore_errors=True)
+            staged_source_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(spec_source, staged_source_dir / spec_source.name)
+            _copy_spec_files(
+                spec_source.parent,
+                staged_source_dir,
+                spec.files,
+                ignore_rules,
+                card_source,
+            )
+        else:
+            _copy_directory_contents(spec_source.parent, staged_source_dir, ignore_rules)
         staged_spec_path = staged_source_dir / spec_source.name
         _transform_staged_spec(
             staged_spec_path,
@@ -1928,6 +1941,45 @@ def _stage_card_specs(
             )
         )
     return tuple(staged)
+
+
+def _copy_spec_files(
+    source_dir: Path,
+    destination_dir: Path,
+    patterns: tuple[str, ...],
+    ignore_rules: tuple["_IgnoreRule", ...],
+    card_source: Path,
+) -> None:
+    for pattern in patterns:
+        pattern_path = Path(pattern)
+        if pattern_path.is_absolute() or ".." in pattern_path.parts:
+            raise ConfigError(
+                f"{card_source}: spec files entry '{pattern}' escapes the card"
+            )
+        matches = sorted(source_dir.glob(pattern))
+        if not matches:
+            if glob.has_magic(pattern):
+                continue
+            raise ConfigError(
+                f"{card_source}: spec files entry '{pattern}' is missing"
+            )
+        for source_path in matches:
+            source_path = source_path.resolve()
+            try:
+                relative_path = source_path.relative_to(source_dir).as_posix()
+            except ValueError as exc:
+                raise ConfigError(
+                    f"{card_source}: spec files entry '{pattern}' escapes the card"
+                ) from exc
+            is_dir = source_path.is_dir()
+            if _ignored_by_containerignore(relative_path, is_dir, ignore_rules):
+                continue
+            target_path = destination_dir / relative_path
+            if is_dir:
+                _copy_directory_contents(source_path, target_path, ignore_rules)
+            elif source_path.is_file():
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, target_path)
 
 
 def _copy_directory_contents(
@@ -2192,9 +2244,51 @@ def _card_specs_hash(
                 digest.update(b"\0")
         spec_path = card_base_dir / spec.spec
         spec_dir = spec_path.parent
-        digest.update(_hash_paths(card_base_dir, (spec_dir.relative_to(card_base_dir).as_posix(),)).encode("utf-8"))
+        if spec.files:
+            hash_paths = (
+                spec_path.relative_to(card_base_dir).as_posix(),
+                *_spec_file_hash_paths(
+                    card_source,
+                    card_base_dir,
+                    spec_dir,
+                    spec.files,
+                ),
+            )
+        else:
+            hash_paths = (spec_dir.relative_to(card_base_dir).as_posix(),)
+        digest.update(_hash_paths(card_base_dir, hash_paths).encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()[:HASH_LENGTH]
+
+
+def _spec_file_hash_paths(
+    card_source: Path,
+    card_base_dir: Path,
+    spec_dir: Path,
+    patterns: tuple[str, ...],
+) -> tuple[str, ...]:
+    paths = []
+    for pattern in patterns:
+        pattern_path = Path(pattern)
+        if pattern_path.is_absolute() or ".." in pattern_path.parts:
+            raise ConfigError(
+                f"{card_source}: spec files entry '{pattern}' escapes the card"
+            )
+        matches = sorted(spec_dir.glob(pattern))
+        if not matches:
+            if glob.has_magic(pattern):
+                continue
+            raise ConfigError(
+                f"{card_source}: spec files entry '{pattern}' is missing"
+            )
+        for match in matches:
+            try:
+                paths.append(match.relative_to(card_base_dir).as_posix())
+            except ValueError as exc:
+                raise ConfigError(
+                    f"{card_source}: spec files entry '{pattern}' escapes the card"
+                ) from exc
+    return tuple(paths)
 
 
 def _parse_file_ref(value: str) -> FileRef:
