@@ -2169,11 +2169,6 @@ def _card_specs_hash(
     digest = hashlib.sha256()
     digest.update(card_source.name.encode("utf-8"))
     digest.update(b"\0")
-    try:
-        digest.update(card_source.read_bytes())
-    except FileNotFoundError:
-        pass
-    digest.update(b"\0")
     digest.update(prepare_script.encode("utf-8"))
     digest.update(b"\0")
     for key, value in sorted(card_env.items()):
