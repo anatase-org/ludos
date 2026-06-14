@@ -2134,8 +2134,11 @@ def _spec_packages_for_arch(spec: SpecBuild, arch: str) -> tuple[str, ...]:
 
 def _spec_build_targets(packages: tuple[str, ...], arch: str) -> tuple[str, ...]:
     targets = [arch]
-    if arch == "x86_64" and any(package.endswith(".i686") for package in packages):
-        targets.append("i686")
+    if arch == "x86_64":
+        if all(package.endswith(".i686") for package in packages):
+            targets = ["i686"]
+        elif any(package.endswith(".i686") for package in packages):
+            targets.append("i686")
     return tuple(dict.fromkeys(targets))
 
 
