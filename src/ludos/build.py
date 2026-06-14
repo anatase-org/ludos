@@ -517,18 +517,41 @@ def build_manifest(
                 workspace_dir=spec_scan_dir,
                 arch=arch,
             )
-            log(f"Resolving spec BuildRequires for card: {card_name}")
-            spec_builder_packages = _resolve_spec_build_requires(
-                orchestrator_dnf_base,
-                releasever,
-                spec_scan_dir,
-                tuple(staged.spec_path for staged in staged_specs),
-                arch,
+            spec_builder_package_list = []
+            for target, spec_paths in _spec_paths_by_build_target(staged_specs):
+                log(f"Resolving spec BuildRequires for card: {card_name} ({target})")
+                target_builder_packages = _resolve_spec_build_requires(
+                    orchestrator_dnf_base,
+                    releasever,
+                    spec_scan_dir,
+                    spec_paths,
+                    target,
+                )
+                spec_builder_package_list.extend(target_builder_packages)
+                if target != arch:
+                    log(
+                        f"Resolving spec BuildRequires arch variants for card: "
+                        f"{card_name} ({target})"
+                    )
+                    spec_builder_package_list.extend(
+                        _resolve_package_arch_variants(
+                            orchestrator_dnf_base,
+                            releasever,
+                            target_builder_packages,
+                            target,
+                        )
+                    )
+            spec_builder_packages = _unique_packages(tuple(spec_builder_package_list))
+        builder_package_requests = _unique_packages(
+            (
+                *build_deps,
+                *spec_builder_packages,
             )
+        )
         builder_packages = _resolve_packages(
             orchestrator_dnf_base,
             releasever,
-            _unique_packages((*explicit_builder_packages, *spec_builder_packages)),
+            builder_package_requests,
         )
         if not builder_packages:
             raise ConfigError(f"dnf did not resolve builder packages for {card_name}")
@@ -1317,6 +1340,13 @@ def _resolve_packages(
 
 
 def _parse_resolved_packages(output: str) -> tuple[str, ...]:
+    return _parse_resolved_packages_from_sections(output, include_dependencies=True)
+
+
+def _parse_resolved_packages_from_sections(
+    output: str,
+    include_dependencies: bool,
+) -> tuple[str, ...]:
     resolved_packages = []
     in_install_section = False
     for line in output.splitlines():
@@ -1326,6 +1356,9 @@ def _parse_resolved_packages(output: str) -> tuple[str, ...]:
         if not stripped:
             continue
         if stripped.startswith("Installing"):
+            if stripped != "Installing:" and not include_dependencies:
+                in_install_section = False
+                continue
             in_install_section = True
             continue
         if stripped.startswith("Package "):
@@ -2142,12 +2175,23 @@ def _spec_build_targets(packages: tuple[str, ...], arch: str) -> tuple[str, ...]
     return tuple(dict.fromkeys(targets))
 
 
+def _spec_paths_by_build_target(
+    staged_specs: tuple[StagedSpec, ...],
+) -> tuple[tuple[str, tuple[Path, ...]], ...]:
+    targets: dict[str, list[Path]] = {}
+    for staged in staged_specs:
+        for target in staged.targets:
+            targets.setdefault(target, []).append(staged.spec_path)
+    return tuple((target, tuple(paths)) for target, paths in targets.items())
+
+
 def _resolve_spec_build_requires(
     orchestrator_dnf_base: list[str],
     releasever: str,
     workspace_dir: Path,
     spec_paths: tuple[Path, ...],
     arch: str,
+    include_dependencies: bool = True,
 ) -> tuple[str, ...]:
     if not spec_paths:
         return tuple()
@@ -2190,7 +2234,78 @@ def _resolve_spec_build_requires(
     if transaction_preview.returncode not in (0, 1):
         detail = "\n".join(output.splitlines()[-20:])
         raise ConfigError(f"dnf did not resolve spec BuildRequires:\n{detail}")
-    return _parse_resolved_packages(output)
+    return _parse_resolved_packages_from_sections(output, include_dependencies)
+
+
+def _resolve_package_arch_variants(
+    orchestrator_dnf_base: list[str],
+    releasever: str,
+    packages: tuple[str, ...],
+    arch: str,
+) -> tuple[str, ...]:
+    candidates = tuple(
+        _package_with_arch(package, arch)
+        for package in packages
+        if _is_arch_variant_candidate(package, arch)
+    )
+    if not candidates:
+        return tuple()
+
+    query = subprocess.run(
+        [
+            *orchestrator_dnf_base,
+            "--setopt=reposdir=/ludos/dnf/repos",
+            "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=persistdir=/ludos/dnf/persist",
+            "--setopt=logdir=/ludos/dnf/log",
+            "--disable-repo=*",
+            "--enable-repo=*",
+            f"--releasever={releasever}",
+            "repoquery",
+            "--queryformat",
+            "%{name}-%{evr}.%{arch}\\n",
+            *candidates,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    output = query.stdout + "\n" + query.stderr
+    if query.returncode != 0:
+        detail = "\n".join(output.splitlines()[-20:])
+        raise ConfigError(f"dnf did not resolve {arch} package variants:\n{detail}")
+
+    variants = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.endswith(":") or " " in stripped:
+            continue
+        if stripped.endswith(f".{arch}"):
+            variants.append(stripped)
+    return _unique_packages(tuple(variants))
+
+
+def _package_with_arch(package: str, arch: str) -> str:
+    return re.sub(r"\.[^.]+$", f".{arch}", package)
+
+
+def _is_arch_variant_candidate(package: str, arch: str) -> bool:
+    if package.endswith(f".{arch}") or package.endswith(".noarch"):
+        return False
+    name = _package_name_from_nevra(package)
+    if name in {"libatomic", "libgcc"}:
+        return True
+    return name.endswith("-devel") or name.endswith("-static")
+
+
+def _package_name_from_nevra(package: str) -> str:
+    match = re.match(r"^(?P<name>.+)-\d*:.+\.[^.]+$", package)
+    if match:
+        return match.group("name")
+    match = re.match(r"^(?P<name>.+)-[^-]+-[^-]+\.[^.]+$", package)
+    if match:
+        return match.group("name")
+    return package.rsplit(".", 1)[0]
 
 
 def _dnf_base_with_volume(
@@ -2218,6 +2333,34 @@ def _specs_build_script(
         'source_cache="/cache/artifacts/sources"',
         'mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}',
         'mkdir -p "$source_cache"',
+        'cat > "$topdir/ludos-meson-i686-cross.ini" <<\'LUDOS_MESON_I686_CROSS\'',
+        "[binaries]",
+        "c = ['gcc', '-m32']",
+        "cpp = ['g++', '-m32']",
+        "rust = ['rustc', '--target', 'i686-unknown-linux-gnu']",
+        "rust_ld = ['gcc', '-m32']",
+        "ar = 'gcc-ar'",
+        "strip = 'strip'",
+        "pkg-config = 'pkg-config'",
+        "",
+        "[properties]",
+        "pkg_config_libdir = ['/usr/lib/pkgconfig', '/usr/share/pkgconfig']",
+        "needs_exe_wrapper = false",
+        "",
+        "[host_machine]",
+        "system = 'linux'",
+        "cpu_family = 'x86'",
+        "cpu = 'i686'",
+        "endian = 'little'",
+        "LUDOS_MESON_I686_CROSS",
+        'cat > "$topdir/ludos-meson-i686" <<\'LUDOS_MESON_I686_WRAPPER\'',
+        "#!/bin/sh",
+        'if [ "${1:-}" = setup ]; then',
+        '  exec /usr/bin/meson "$@" --cross-file "$LUDOS_MESON_CROSS_FILE"',
+        "fi",
+        'exec /usr/bin/meson "$@"',
+        "LUDOS_MESON_I686_WRAPPER",
+        'chmod +x "$topdir/ludos-meson-i686"',
     ]
     wanted = tuple(
         dict.fromkeys(package for staged in staged_specs for package in staged.packages)
@@ -2258,8 +2401,23 @@ def _specs_build_script(
                 '  find "$source_cache" -maxdepth 1 -type f -exec cp -n -t "$topdir/SOURCES" {} +',
                 "fi",
                 f"for target in {targets}; do",
+                "  if [ \"$target\" = i686 ]; then",
+                "    export PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/share/pkgconfig",
+                "    export PKG_CONFIG_PATH=",
+                "    export BINDGEN_EXTRA_CLANG_ARGS=\"${BINDGEN_EXTRA_CLANG_ARGS:+$BINDGEN_EXTRA_CLANG_ARGS }-m32\"",
+                "    export LDFLAGS=\"${LDFLAGS:+$LDFLAGS }-Wl,--no-warn-rwx-segments\"",
+                "    export LUDOS_MESON_CROSS_FILE=\"$topdir/ludos-meson-i686-cross.ini\"",
+                "    if [ -x /usr/lib/llvm22/bin/llvm-config ]; then",
+                "      export LLVM_CONFIG=/usr/lib/llvm22/bin/llvm-config",
+                "      export PATH=/usr/lib/llvm22/bin:$PATH",
+                "    fi",
+                "  fi",
                 f"  echo {shlex.quote(f'Building packages from {topdir}/SPECS/{spec_name}')}",
-                f"  rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"",
+                "  if [ \"$target\" = i686 ]; then",
+                f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\" --define \"__meson $topdir/ludos-meson-i686\"",
+                "  else",
+                f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"",
+                "  fi",
                 "done",
             ]
         )
