@@ -89,6 +89,7 @@ class Manifest:
     bootstrap: str
     repos: tuple[RepoRef, ...]
     cards: tuple[str, ...]
+    orchestrator_deps: tuple[str, ...] = tuple()
     local_prefix: str = ""
     labels: dict[str, str] = field(default_factory=dict)
     source: Path | None = None
@@ -102,6 +103,7 @@ class Manifest:
             releasever=_required_string(data, "releasever", path),
             distro=_required_string(data, "distro", path),
             orchestrator=_required_string(data, "orchestrator", path),
+            orchestrator_deps=_string_tuple(data, "orchestrator-deps", path),
             bootstrap=_required_string(data, "bootstrap", path),
             repos=_repo_refs_tuple(data, "repos", path),
             cards=_required_string_tuple(data, "cards", path),

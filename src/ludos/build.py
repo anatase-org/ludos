@@ -112,7 +112,9 @@ def build_manifest(
         _substitute_variables(validation.manifest.distro, manifest_env),
         "distro",
     )
-    orchestrator = _substitute_variables(validation.manifest.orchestrator, manifest_env)
+    orchestrator_source = _substitute_variables(
+        validation.manifest.orchestrator, manifest_env
+    )
     output_image = f"localhost/{local_prefix}{image}:{distro}"
     if cache_version is None:
         cache_version = _datetime.date.today().strftime("%Y%m%d")
@@ -157,11 +159,16 @@ def build_manifest(
     if buildah:
         log(f"Using Buildah: {buildah}")
 
-    orchestrator_image = _local_image(
-        local_prefix,
-        "orchestrator",
-        f"{distro}-{cache_version}",
+    orchestrator_deps = tuple(
+        _substitute_variables(package, manifest_env)
+        for package in validation.manifest.orchestrator_deps
     )
+    if orchestrator_deps:
+        orchestrator_tag = f"{distro}-{_package_hash(orchestrator_deps)}-{cache_version}"
+    else:
+        orchestrator_tag = f"{distro}-base-{cache_version}"
+
+    orchestrator_image = _local_image(local_prefix, "orchestrator", orchestrator_tag)
     if _image_exists(podman, orchestrator_image):
         log(f"Reusing orchestrator image: {orchestrator_image}")
     elif load_only_version or cache_only:
@@ -170,8 +177,10 @@ def build_manifest(
         log(f"Creating orchestrator image: {orchestrator_image}")
         _create_orchestrator_image(
             podman=podman,
-            source=orchestrator,
+            buildah=buildah,
+            source=orchestrator_source,
             image=orchestrator_image,
+            packages=_build_deps(orchestrator_deps),
         )
     orchestrator = orchestrator_image
 
@@ -1045,11 +1054,74 @@ def _require_buildah(buildah: str | None) -> str:
     return buildah
 
 
-def _create_orchestrator_image(*, podman: str, source: str, image: str) -> None:
+def _create_orchestrator_image(
+    *,
+    podman: str,
+    buildah: str | None,
+    source: str,
+    image: str,
+    packages: tuple[str, ...],
+) -> None:
     returncode, _output = _run_streamed_command([podman, "pull", source])
     if returncode != 0:
         raise ConfigError(f"failed to pull orchestrator image: {source}")
-    subprocess.run([podman, "tag", source, image], check=True)
+
+    if not packages:
+        subprocess.run([podman, "tag", source, image], check=True)
+        return
+
+    package_args = " ".join(shlex.quote(package) for package in packages)
+    buildah = _require_buildah(buildah)
+    buildah_command = shlex.quote(buildah)
+    script = "\n".join(
+        [
+            "set -eu",
+            "container=",
+            "mounted=0",
+            'cleanup() {',
+            '  if [ "$mounted" = 1 ]; then '
+            f"{buildah_command} unmount \"$container\" >/dev/null 2>&1 || true; fi",
+            '  if [ -n "$container" ]; then '
+            f"{buildah_command} rm \"$container\" >/dev/null 2>&1 || true; fi",
+            "}",
+            "trap cleanup EXIT INT TERM",
+            f"container=$({buildah_command} from --quiet {shlex.quote(source)})",
+            f"mount_path=$({buildah_command} mount \"$container\")",
+            "mounted=1",
+            _shell_command(
+                [
+                    podman,
+                    "run",
+                    "--rm",
+                    "--volume",
+                    "$mount_path:/target",
+                    source,
+                    "dnf5",
+                    "-y",
+                    "--installroot=/target",
+                    "--setopt=install_weak_deps=False",
+                    "install",
+                    "--allowerasing",
+                ],
+                raw_suffix=f" {package_args}",
+            ),
+            'rm -rf "$mount_path/var/cache/dnf"',
+            'find "$mount_path/var/log" -maxdepth 1 -name "dnf*" '
+            "-exec rm -rf {} + 2>/dev/null || true",
+            f"{buildah_command} unmount \"$container\" >/dev/null",
+            "mounted=0",
+            f"{buildah_command} commit --rm --quiet --format oci \"$container\" {shlex.quote(image)} >/dev/null",
+            "container=",
+        ]
+    )
+    returncode, _output = _run_streamed_command(
+        [buildah, "unshare", "/bin/sh", "-s"],
+        input_text=script + "\n",
+    )
+    if returncode != 0:
+        raise ConfigError(
+            f"orchestrator image build failed with exit status {returncode}"
+        )
 
 
 def _repo_id(rendered_repo: str, source: Path) -> str:
