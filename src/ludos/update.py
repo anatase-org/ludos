@@ -118,7 +118,7 @@ def update_card(
             f"Commits:\n"
             f"{_commit_summary(repo_dir, old_sha, upstream_head.sha)}"
         )
-        conflicted = _merge_dist_git_update(
+        conflict_paths = _merge_dist_git_update(
             repo_dir=repo_dir,
             source=source,
             old_sha=old_sha,
@@ -129,17 +129,18 @@ def update_card(
             _set_locked_sha(lock_data, source.key, upstream_head.sha)
             _write_lock(lock_path, lock_data)
 
-        if conflicted:
+        if conflict_paths:
             copied = (
                 "no files were copied back"
                 if dry_run
                 else "conflicted files were copied back"
             )
             raise ConfigError(
-                f"{card_source}: merge conflicts while updating {source.key}; "
-                f"{copied}"
+                f"merge conflicts found for '{card_label}:{source.key}' ({copied}):\n"
+                f"{_conflict_summary(repo_dir, source, conflict_paths, dry_run=dry_run)}"
             )
 
+        log(f"Updated '{card_label}:{source.key}' to '{upstream_head.sha}'")
         result = CardUpdateResult(
             initialized=result.initialized,
             skipped=result.skipped,
@@ -233,14 +234,14 @@ def _ensure_dist_git_repo(
     git_dir = repo_dir / ".git"
     if not repo_dir.exists():
         log(
-            f"Cloning upstream for {card_label}:{key} "
+            f"Cloning upstream for '{card_label}:{key}' "
             f"into {_display_path(repo_dir)}"
         )
         _run(["git", "clone", "--origin", "upstream", upstream.url, str(repo_dir)])
     elif not git_dir.exists():
         raise ConfigError(f"{repo_dir}: cache path exists but is not a git repository")
     else:
-        log(f"Fetching upstream for {card_label}:{key}")
+        log(f"Fetching upstream for '{card_label}:{key}'")
         remotes = _run_git(repo_dir, ["remote"], capture=True).stdout.splitlines()
         if "upstream" in remotes:
             _run_git(repo_dir, ["remote", "set-url", "upstream", upstream.url])
@@ -279,10 +280,10 @@ def _merge_dist_git_update(
     source: UpstreamSource,
     old_sha: str,
     new_sha: str,
-) -> bool:
+) -> tuple[str, ...]:
     _reset_worktree(repo_dir)
     _rev_parse(repo_dir, old_sha)
-    _run_git(repo_dir, ["checkout", "-B", "ludos-update", old_sha])
+    _run_git(repo_dir, ["checkout", "-B", "ludos-update", old_sha], capture=True)
     _replace_worktree_contents(repo_dir, source.source_dir)
     _run_git(repo_dir, ["add", "-A"])
     if not _git_tree_clean(repo_dir):
@@ -318,7 +319,7 @@ def _merge_dist_git_update(
         capture=True,
     )
     if merge.returncode == 0:
-        return False
+        return tuple()
 
     conflicts = _run_git(
         repo_dir,
@@ -327,16 +328,27 @@ def _merge_dist_git_update(
         check=False,
     )
     if conflicts.returncode == 0 and conflicts.stdout.strip():
-        return True
+        return tuple(conflicts.stdout.splitlines())
     raise ConfigError(
         f"{repo_dir}: git merge failed with exit status {merge.returncode}"
     )
 
 
+def _conflict_summary(
+    repo_dir: Path,
+    source: UpstreamSource,
+    conflict_paths: tuple[str, ...],
+    *,
+    dry_run: bool,
+) -> str:
+    base_dir = repo_dir if dry_run else source.source_dir
+    return "\n".join(f" - {_display_path(base_dir / path)}" for path in conflict_paths)
+
+
 def _reset_worktree(repo_dir: Path) -> None:
     _run_git(repo_dir, ["merge", "--abort"], check=False, capture=True)
-    _run_git(repo_dir, ["reset", "--hard"])
-    _run_git(repo_dir, ["clean", "-fdx"])
+    _run_git(repo_dir, ["reset", "--hard"], capture=True)
+    _run_git(repo_dir, ["clean", "-fdx"], capture=True)
 
 
 def _replace_worktree_contents(repo_dir: Path, source_dir: Path) -> None:
