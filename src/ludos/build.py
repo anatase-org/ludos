@@ -283,8 +283,11 @@ def build_manifest(
         raise ConfigError(f"{manifest_path}: missing bootstrap card")
     if bootstrap_card.source is None:
         raise ConfigError("bootstrap card has no source path")
-    if not bootstrap_card.packages:
-        raise ConfigError(f"{bootstrap_card.source}: bootstrap card must define packages")
+    bootstrap_packages = _packages_for_arch(bootstrap_card.packages, arch)
+    if not bootstrap_packages:
+        raise ConfigError(
+            f"{bootstrap_card.source}: bootstrap card must define packages for {arch}"
+        )
     if (
         bootstrap_card.files
         or bootstrap_card.specs
@@ -306,7 +309,7 @@ def build_manifest(
         bootstrap_env.update(prepared_env)
 
     inherited_env = dict(manifest_env)
-    requested_packages = list(bootstrap_card.packages)
+    requested_packages = list(bootstrap_packages)
     for _priority, _insertion_order, card_name, card in card_entries:
         if card.source is None:
             raise ConfigError(f"card '{card_name}' has no source path")
@@ -319,9 +322,8 @@ def build_manifest(
         card_sources[card_name] = card.source
         if card.prepare.strip():
             card_prepare_scripts[card_name] = card.prepare.rstrip()
-        card_packages = []
-        for package in card.packages:
-            card_packages.append(package)
+        card_packages = list(_packages_for_arch(card.packages, arch))
+        for package in card_packages:
             requested_packages.append(package)
         card_requests.append(tuple(card_packages))
         parsed_file_refs = tuple(_parse_file_ref(file_ref) for file_ref in card.files)
@@ -386,7 +388,7 @@ def build_manifest(
     bootstrap_resolved_packages = _resolve_packages(
         orchestrator_dnf_base,
         releasever,
-        tuple(bootstrap_card.packages),
+        bootstrap_packages,
     )
     if not bootstrap_resolved_packages:
         raise ConfigError("dnf did not resolve packages for bootstrap")
@@ -2195,7 +2197,14 @@ def _drop_nvidia_kmod_runtime_requires(text: str) -> str:
 
 
 def _spec_packages_for_arch(spec: SpecBuild, arch: str) -> tuple[str, ...]:
-    packages = list(spec.packages.get(arch, spec.packages.get("*", tuple())))
+    return _packages_for_arch(spec.packages, arch)
+
+
+def _packages_for_arch(
+    packages_by_arch: dict[str, tuple[str, ...]],
+    arch: str,
+) -> tuple[str, ...]:
+    packages = list(packages_by_arch.get(arch, packages_by_arch.get("*", tuple())))
     return tuple(dict.fromkeys(packages))
 
 

@@ -35,7 +35,7 @@ class Card:
     version: int
     priority: int = 1
     env: dict[str, str | int] = field(default_factory=dict)
-    packages: tuple[str, ...] = tuple()
+    packages: dict[str, tuple[str, ...]] = field(default_factory=dict)
     build_deps: tuple[str, ...] = tuple()
     specs: tuple[SpecBuild, ...] = tuple()
     repos: tuple["RepoRef", ...] = tuple()
@@ -53,7 +53,7 @@ class Card:
             version=_required_version(data, path),
             priority=_optional_int(data, "priority", path, default=1),
             env=_env_dict(data, path, include_default=False),
-            packages=_string_tuple(data, "packages", path),
+            packages=_packages_dict(data, "packages", path),
             build_deps=_string_tuple(data, "build-deps", path),
             specs=_spec_builds_tuple(data, "specs", path),
             repos=_repo_refs_tuple(data, "repos", path),
@@ -373,7 +373,7 @@ def _spec_builds_tuple(
         if not isinstance(spec, str) or not spec.strip():
             raise ConfigError(f"{path}: '{label}.spec' must be a non-empty string")
 
-        packages = _spec_packages_dict(item, "packages", path, label)
+        packages = _packages_dict(item, "packages", path, label)
         replace = _spec_replace_dict(item, "replace", path, label)
         files = _string_tuple(item, "files", path)
         upstream = _upstream_ref(item, "upstream", path, label)
@@ -390,30 +390,31 @@ def _spec_builds_tuple(
     return tuple(specs)
 
 
-def _spec_packages_dict(
-    data: dict[str, Any], key: str, path: Path, label: str
+def _packages_dict(
+    data: dict[str, Any], key: str, path: Path, label: str = ""
 ) -> dict[str, tuple[str, ...]]:
+    qualified_key = f"{label}.{key}" if label else key
     value = data.get(key, {})
     if value is None:
         return {}
     if isinstance(value, list):
         if not all(isinstance(package, str) for package in value):
-            raise ConfigError(f"{path}: '{label}.{key}' must be a list of strings")
+            raise ConfigError(f"{path}: '{qualified_key}' must be a list of strings")
         return {"*": tuple(value)}
     if not isinstance(value, dict):
         raise ConfigError(
-            f"{path}: '{label}.{key}' must be a list of strings or an arch mapping"
+            f"{path}: '{qualified_key}' must be a list of strings or an arch mapping"
         )
 
     result = {}
     for arch, packages in value.items():
         if not isinstance(arch, str) or not arch.strip():
-            raise ConfigError(f"{path}: '{label}.{key}' arch keys must be strings")
+            raise ConfigError(f"{path}: '{qualified_key}' arch keys must be strings")
         if not isinstance(packages, list) or not all(
             isinstance(package, str) for package in packages
         ):
             raise ConfigError(
-                f"{path}: '{label}.{key}.{arch}' must be a list of strings"
+                f"{path}: '{qualified_key}.{arch}' must be a list of strings"
             )
         result[arch] = tuple(packages)
     return result
