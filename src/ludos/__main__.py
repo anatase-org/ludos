@@ -136,6 +136,8 @@ def validate_command(args: argparse.Namespace) -> int:
 
 
 def build_command(args: argparse.Namespace) -> int:
+    show_logo(args)
+
     result = build_manifest(
         args.manifest,
         args.cards_dir,
@@ -185,7 +187,6 @@ def main() -> int:
     configure_tracebacks()
     parser = build_parser()
     args = parser.parse_args()
-    show_logo(args)
     if not hasattr(args, "func"):
         return 0
     try:
@@ -197,7 +198,6 @@ def main() -> int:
         error(exc)
         return 1
     except subprocess.CalledProcessError as exc:
-        command = " ".join(shlex.quote(str(part)) for part in exc.cmd)
         error(f"command failed with exit status {exc.returncode}")
         return 1
 
