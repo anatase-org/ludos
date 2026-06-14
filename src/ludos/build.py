@@ -433,7 +433,6 @@ def build_manifest(
     common_package_set = {
         package for package, count in package_counts.items() if count > 1
     }
-    common_package_set = _drop_minimal_provider_conflicts(common_package_set)
     common_package_set = {
         package for package in common_package_set if package not in bootstrap_package_set
     }
@@ -463,9 +462,6 @@ def build_manifest(
         for package in card_resolution:
             if package in bootstrap_package_set or package in common_package_set:
                 continue
-            full_package = _full_provider_package(package)
-            if full_package != package and full_package in selected_package_set:
-                continue
             card_packages.append(package)
         if not card_packages and card_name not in build_card_names:
             continue
@@ -480,7 +476,6 @@ def build_manifest(
     package_download_blocks = (bootstrap_package_block, *package_blocks)
     package_download_hashes = (bootstrap_package_block_hash, *package_block_hashes)
     resolved_packages = tuple(resolved_package_list)
-    resolved_packages = _drop_minimal_provider_conflicts(resolved_packages)
     if not resolved_packages and not package_blocks:
         raise ConfigError("dnf did not resolve any packages")
     log(
@@ -520,9 +515,13 @@ def build_manifest(
                 spec_scan_dir,
                 tuple(staged.spec_path for staged in staged_specs),
             )
-        builder_packages = _unique_packages(
-            (*explicit_builder_packages, *spec_builder_packages)
+        builder_packages = _resolve_packages(
+            orchestrator_dnf_base,
+            releasever,
+            _unique_packages((*explicit_builder_packages, *spec_builder_packages)),
         )
+        if not builder_packages:
+            raise ConfigError(f"dnf did not resolve builder packages for {card_name}")
         builder_hash = _nevra_hash(builder_packages)
         builder_image = _local_image(
             local_prefix,
@@ -1230,6 +1229,7 @@ def _resolve_packages(
             "--installroot=/ludos/resolve-root",
             f"--releasever={releasever}",
             "install",
+            "--allowerasing",
             *packages,
         ],
         check=False,
@@ -1377,7 +1377,11 @@ def _download_block_packages(
                     "dnf did not resolve transient builder packages: "
                     + ", ".join(missing_packages)
                 )
-            resolved_packages = _unique_packages((*resolved_packages, *missing_resolved))
+            resolved_packages = _resolve_packages(
+                orchestrator_dnf_base,
+                releasever,
+                _unique_packages((*resolved_packages, *missing_resolved)),
+            )
         else:
             raise ConfigError("builder package transient closure did not converge")
 
@@ -2093,6 +2097,7 @@ def _resolve_spec_build_requires(
             "--installroot=/ludos/resolve-root",
             f"--releasever={releasever}",
             "builddep",
+            "--allowerasing",
             "--spec",
             *spec_args,
         ],
@@ -2852,23 +2857,6 @@ def _card_name(source: Path, root_dir: Path) -> str:
         return "card"
 
     return "-".join(parts)
-
-
-def _drop_minimal_provider_conflicts(packages):
-    package_set = set(packages)
-    filtered = []
-    for package in packages:
-        full_package = _full_provider_package(package)
-        if full_package != package and full_package in package_set:
-            continue
-        filtered.append(package)
-    if isinstance(packages, set):
-        return set(filtered)
-    return tuple(filtered)
-
-
-def _full_provider_package(package: str) -> str:
-    return package.replace("-minimal-", "-", 1)
 
 
 def _substitute_variables(value: str, variables: dict[str, str]) -> str:
