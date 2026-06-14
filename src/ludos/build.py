@@ -2632,6 +2632,11 @@ def _workspace_path_rewriter(
             f"{workspace}/build",
             line,
         )
+        line = re.sub(
+            r"(?<![A-Za-z0-9_./-])/workspace/rpmbuild(?=/?|\W)",
+            f"{workspace}/rpmbuild",
+            line,
+        )
         return re.sub(
             r"(?<![A-Za-z0-9_./-])/workspace(?=/?|\W)",
             source,
