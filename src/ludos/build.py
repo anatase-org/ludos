@@ -514,6 +514,7 @@ def build_manifest(
                 releasever,
                 spec_scan_dir,
                 tuple(staged.spec_path for staged in staged_specs),
+                arch,
             )
         builder_packages = _resolve_packages(
             orchestrator_dnf_base,
@@ -2071,6 +2072,7 @@ def _resolve_spec_build_requires(
     releasever: str,
     workspace_dir: Path,
     spec_paths: tuple[Path, ...],
+    arch: str,
 ) -> tuple[str, ...]:
     if not spec_paths:
         return tuple()
@@ -2098,6 +2100,10 @@ def _resolve_spec_build_requires(
             f"--releasever={releasever}",
             "builddep",
             "--allowerasing",
+            "--define",
+            f"_target_cpu {arch}",
+            "--define",
+            f"_target {arch}-redhat-linux-gnu",
             "--spec",
             *spec_args,
         ],
@@ -2134,7 +2140,9 @@ def _specs_build_script(
     lines = [
         "set -eux",
         f"topdir={shlex.quote(topdir)}",
+        'source_cache="/cache/artifacts/sources"',
         'mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}',
+        'mkdir -p "$source_cache"',
     ]
     wanted = tuple(
         dict.fromkeys(package for staged in staged_specs for package in staged.packages)
@@ -2156,7 +2164,23 @@ def _specs_build_script(
                 f"find {shlex.quote(source_dir)} -maxdepth 1 -type f ! -name '*.spec' -exec cp -f -t \"$topdir/SOURCES\" {{}} +",
                 f"cp -f {shlex.quote(spec_path)} \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
                 f"if grep -Eq '^(Source|Patch)[0-9]*:[[:space:]]+https?://' \"$topdir/SPECS/{shlex.quote(spec_name)}\"; then",
-                f"  spectool -g -C \"$topdir/SOURCES\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
+                f"  spectool -l \"$topdir/SPECS/{shlex.quote(spec_name)}\" > \"$topdir/sources.list\"",
+                "  missing_sources=0",
+                "  while IFS= read -r source_entry; do",
+                "    source_url=${source_entry#*:}",
+                "    source_url=$(printf '%s\\n' \"$source_url\" | sed 's/^[[:space:]]*//')",
+                "    case \"$source_url\" in http://*|https://*) ;; *) continue ;; esac",
+                "    source_name=${source_url##*/}",
+                "    source_name=${source_name%%\\?*}",
+                "    if [ ! -f \"$source_cache/$source_name\" ]; then",
+                "      missing_sources=1",
+                "      break",
+                "    fi",
+                "  done < \"$topdir/sources.list\"",
+                "  if [ \"$missing_sources\" -eq 1 ]; then",
+                f"    spectool -g -C \"$source_cache\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
+                "  fi",
+                '  find "$source_cache" -maxdepth 1 -type f -exec cp -n -t "$topdir/SOURCES" {} +',
                 "fi",
                 f"for target in {targets}; do",
                 f"  echo {shlex.quote(f'Building packages from {topdir}/SPECS/{spec_name}')}",
