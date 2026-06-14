@@ -303,14 +303,6 @@ def build_manifest(
         if card.build.strip() and card.specs:
             raise ConfigError(f"{card.source}: card cannot define both build and specs")
         card_env = _card_env(inherited_env, card.env)
-        if card.prepare.strip() and not card.specs:
-            log(f"Preparing card: {card_name}")
-            prepared_env = _run_prepare_block(
-                card_source=card.source,
-                card_env=card_env,
-                prepare_script=card.prepare.rstrip(),
-            )
-            card_env.update(prepared_env)
         inherited_env.update(card_env)
         card_names.append(card_name)
         card_envs[card_name] = card_env
@@ -634,6 +626,16 @@ def build_manifest(
             continue
         if cache_only:
             raise ConfigError(f"build output image is not cached: {build_image}")
+
+        if block_name in card_prepare_scripts and block_name not in card_specs:
+            log(f"Preparing build for card: {block_name}")
+            prepared_env = _run_prepare_block(
+                card_source=card_sources[block_name],
+                card_env=card_envs[block_name],
+                prepare_script=card_prepare_scripts[block_name],
+            )
+            if prepared_env:
+                card_envs[block_name].update(prepared_env)
 
         log(f"Running build for card: {block_name} (:{_image_tag(build_image)})")
         if block_name in card_specs:
@@ -1761,7 +1763,7 @@ def _run_specs_build(
         raise ConfigError(f"{card_source}: specs build has no specs")
 
     if prepare_script.strip():
-        _run_specs_prepare(
+        prepared_env = _run_specs_prepare(
             podman=podman,
             orchestrator=orchestrator,
             workspace_dir=workspace_dir,
@@ -1771,7 +1773,10 @@ def _run_specs_build(
             card_env=card_env,
             prepare_script=prepare_script,
             card_source=card_source,
+            card_name=card_name,
         )
+        if prepared_env:
+            card_env.update(prepared_env)
 
     build_script = _specs_build_script(staged_specs, workspace_dir, arch)
     command = [
@@ -1832,7 +1837,10 @@ def _run_specs_prepare(
     card_env: dict[str, str],
     prepare_script: str,
     card_source: Path,
-) -> None:
+    card_name: str,
+) -> dict[str, str]:
+    env_file = workspace_dir / ".ludos-env"
+    env_file.unlink(missing_ok=True)
     command = [
         podman,
         "run",
@@ -1851,6 +1859,7 @@ def _run_specs_prepare(
     ]
     for key, value in sorted(card_env.items()):
         command.extend(["--env", f"{key}={value}"])
+    command.extend(["--env", "LUDOS_ENV=/workspace/.ludos-env"])
     command.extend(["--env", "PS4=+ "])
     command.extend([orchestrator, "/bin/sh", "-ex", "-s"])
     returncode, _output = _run_streamed_command(
@@ -1867,6 +1876,10 @@ def _run_specs_prepare(
         raise ConfigError(
             f"spec prepare failed with exit status {returncode}"
         )
+    values = _load_dotenv(env_file)
+    if values:
+        log(f"Prepared {len(values)} environment values for card: {card_name}")
+    return values
 
 
 def _stage_card_specs(
