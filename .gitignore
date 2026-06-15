@@ -25,3 +25,4 @@ upload_all.sh
 make_images.sh
 notebooks/*
 build/*
+logs

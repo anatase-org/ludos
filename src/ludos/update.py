@@ -343,12 +343,14 @@ def _merge_dist_git_update(
 ) -> tuple[str, ...]:
     _reset_worktree(repo_dir)
     _rev_parse(repo_dir, old_sha)
-    _run_git(repo_dir, ["checkout", "-B", LUDOS_BRANCH, old_sha], capture=True)
+    _rev_parse(repo_dir, new_sha)
+    _run_git(repo_dir, ["checkout", "--detach", old_sha], capture=True)
     if source.spec.files:
         _overlay_spec_files(repo_dir, source)
     else:
         _replace_worktree_contents(repo_dir, source.source_dir)
     _run_git(repo_dir, ["add", "-A"])
+    local_sha = old_sha
     if not _git_tree_clean(repo_dir):
         _run_git(
             repo_dir,
@@ -366,6 +368,12 @@ def _merge_dist_git_update(
                 f"Apply local {source.key} changes",
             ],
         )
+        local_sha = _rev_parse(repo_dir, "HEAD")
+
+    _reset_worktree(repo_dir)
+    _run_git(repo_dir, ["checkout", "-B", LUDOS_BRANCH, new_sha], capture=True)
+    if local_sha == old_sha:
+        return tuple()
 
     merge = _run_git(
         repo_dir,
@@ -376,7 +384,7 @@ def _merge_dist_git_update(
             "core.hooksPath=/dev/null",
             "merge",
             "--no-edit",
-            new_sha,
+            local_sha,
         ],
         check=False,
         capture=True,
