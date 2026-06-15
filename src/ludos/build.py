@@ -110,6 +110,7 @@ class ResolvedBuildMetadata:
     cache_dir: str
     build_dir: str
     card_build_dir: str
+    spec_source_cache_dir: str
     build_artifact_cache_dir: str
     dnf_cache_dir: str
     dnf_persist_dir: str
@@ -128,6 +129,7 @@ class ResolvedBuildMetadata:
     card_prepare_scripts: tuple[tuple[str, str], ...]
     card_builds: tuple[tuple[str, str], ...]
     card_specs: tuple[tuple[str, tuple[SpecBuild, ...]], ...]
+    spec_source_revisions: tuple[tuple[str, str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -152,6 +154,15 @@ class StagedSpec:
     source_dir: Path
     packages: tuple[str, ...]
     targets: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SpecSource:
+    base_dir: Path
+    spec_path: Path
+    spec_relpath: Path
+    revision: str = ""
+    stage_prefix: Path = Path(".")
 
 
 def build_manifest(
@@ -270,12 +281,14 @@ def _resolve_manifest_metadata(
     dnf_log_dir = dnf_dir / "log"
     dnf_resolve_dir = dnf_dir / "resolves"
     build_artifact_cache_dir = distro_cache_dir / "build-artifacts"
+    spec_source_cache_dir = cache_dir / "spec-sources" / "git"
 
     distro_cache_dir.mkdir(parents=True, exist_ok=True)
     package_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
     card_build_dir.mkdir(parents=True, exist_ok=True)
     build_artifact_cache_dir.mkdir(parents=True, exist_ok=True)
+    spec_source_cache_dir.mkdir(parents=True, exist_ok=True)
     repo_dir.mkdir(parents=True, exist_ok=True)
     dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     dnf_persist_dir.mkdir(parents=True, exist_ok=True)
@@ -405,6 +418,7 @@ def _resolve_manifest_metadata(
     card_build_deps = {}
     card_hashes = {}
     card_spec_hashes = {}
+    spec_source_revisions = {}
     card_envs = {}
     card_sources = {}
     card_prepare_scripts = {}
@@ -472,12 +486,17 @@ def _resolve_manifest_metadata(
                 log(f"Skipping specs for card without packages on {arch}: {card_name}")
         if card_name in card_specs:
             card_build_deps[card_name] = card.build_deps
-            card_spec_hashes[card_name] = _card_specs_hash(
+            card_spec_hash, card_spec_revisions = _card_specs_hash(
                 card.source,
                 card_specs[card_name],
                 card_env,
                 card.prepare.rstrip(),
+                spec_source_cache_dir,
+                cache_only=cache_only,
             )
+            card_spec_hashes[card_name] = card_spec_hash
+            if card_spec_revisions:
+                spec_source_revisions[card_name] = card_spec_revisions
         if card.hash.strip():
             card_hashes[card_name] = card.hash.strip()
         if card.postprocess.strip():
@@ -691,6 +710,9 @@ def _resolve_manifest_metadata(
                 card_env=card_envs[card_name],
                 workspace_dir=spec_scan_dir,
                 arch=arch,
+                spec_source_cache_dir=spec_source_cache_dir,
+                cache_only=True,
+                source_revisions=spec_source_revisions.get(card_name, tuple()),
             )
             spec_builder_package_list = []
             for target, spec_paths in _spec_paths_by_build_target(staged_specs):
@@ -857,6 +879,7 @@ def _resolve_manifest_metadata(
         cache_dir=str(distro_cache_dir),
         build_dir=str(build_dir),
         card_build_dir=str(card_build_dir),
+        spec_source_cache_dir=str(spec_source_cache_dir),
         build_artifact_cache_dir=str(build_artifact_cache_dir),
         dnf_cache_dir=str(dnf_cache_dir),
         dnf_persist_dir=str(dnf_persist_dir),
@@ -888,6 +911,11 @@ def _resolve_manifest_metadata(
         card_prepare_scripts=tuple(card_prepare_scripts.items()),
         card_builds=tuple(card_builds.items()),
         card_specs=tuple(card_specs.items()),
+        spec_source_revisions=tuple(
+            (card_name, spec_source, revision)
+            for card_name, revisions in spec_source_revisions.items()
+            for spec_source, revision in revisions
+        ),
     )
 
 
@@ -1018,6 +1046,9 @@ def build_build_images(
         card_prepare_scripts = dict(manifest.card_prepare_scripts)
         card_builds = dict(manifest.card_builds)
         card_specs = dict(manifest.card_specs)
+        spec_source_revisions = _spec_source_revisions_by_card(
+            manifest.spec_source_revisions
+        )
 
         for plan in manifest.build_images:
             if target_set and plan.block not in target_set and plan.image not in target_set:
@@ -1065,6 +1096,8 @@ def build_build_images(
                     specs=card_specs[plan.block],
                     prepare_script=card_prepare_scripts.get(plan.block, ""),
                     arch=manifest.arch,
+                    spec_source_cache_dir=Path(manifest.spec_source_cache_dir),
+                    source_revisions=spec_source_revisions.get(plan.block, tuple()),
                 )
             else:
                 build_output = _run_card_build(
@@ -2483,6 +2516,8 @@ def _run_specs_build(
     specs: tuple[SpecBuild, ...],
     prepare_script: str,
     arch: str,
+    spec_source_cache_dir: Path,
+    source_revisions: tuple[tuple[str, str], ...],
 ) -> CardBuildOutput:
     workspace_dir = build_dir / "workspace"
     rpm_dir = build_dir / "rpms"
@@ -2499,6 +2534,9 @@ def _run_specs_build(
         card_env=card_env,
         workspace_dir=workspace_dir,
         arch=arch,
+        spec_source_cache_dir=spec_source_cache_dir,
+        cache_only=True,
+        source_revisions=source_revisions,
     )
     if not staged_specs:
         raise ConfigError(f"{card_source}: specs build has no specs")
@@ -2630,42 +2668,55 @@ def _stage_card_specs(
     card_env: dict[str, str],
     workspace_dir: Path,
     arch: str,
+    spec_source_cache_dir: Path,
+    cache_only: bool,
+    source_revisions: tuple[tuple[str, str], ...] = tuple(),
 ) -> tuple[StagedSpec, ...]:
     _remove_tree(workspace_dir)
     workspace_dir.mkdir(parents=True, exist_ok=True)
-    card_base_dir = _card_base_dir(card_source)
-    ignore_rules = _load_containerignore(card_base_dir)
+    source_revision_map = dict(source_revisions)
     staged = []
     for spec in specs:
         packages = _spec_packages_for_arch(spec, arch)
         if not packages:
             log(f"Skipping spec without packages on {arch}: {spec.spec}")
             continue
-        spec_relpath = _validate_relative_file_path(spec.spec, card_source, "spec")
-        spec_source = (card_base_dir / spec_relpath).resolve()
-        try:
-            spec_source.relative_to(card_base_dir)
-        except ValueError as exc:
-            raise ConfigError(f"{card_source}: spec '{spec.spec}' escapes the card") from exc
-        if not spec_source.is_file():
-            raise ConfigError(f"{card_source}: spec '{spec.spec}' is missing")
-
-        relative_dir = spec_source.parent.relative_to(card_base_dir)
+        spec_source = _resolve_spec_source(
+            card_source,
+            spec.spec,
+            spec_source_cache_dir,
+            cache_only=cache_only,
+            revision=source_revision_map.get(spec.spec, ""),
+        )
+        ignore_rules = _load_containerignore(spec_source.base_dir)
+        relative_dir = (
+            spec_source.stage_prefix
+            / spec_source.spec_path.parent.relative_to(spec_source.base_dir)
+        )
         staged_source_dir = workspace_dir / relative_dir
         if spec.files:
             shutil.rmtree(staged_source_dir, ignore_errors=True)
             staged_source_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(spec_source, staged_source_dir / spec_source.name)
+            shutil.copy2(
+                spec_source.spec_path,
+                staged_source_dir / spec_source.spec_path.name,
+            )
             _copy_spec_files(
-                spec_source.parent,
+                spec_source.spec_path.parent,
                 staged_source_dir,
                 spec.files,
                 ignore_rules,
                 card_source,
+                spec_source.base_dir,
             )
         else:
-            _copy_directory_contents(spec_source.parent, staged_source_dir, ignore_rules)
-        staged_spec_path = staged_source_dir / spec_source.name
+            _copy_directory_contents(
+                spec_source.spec_path.parent,
+                staged_source_dir,
+                ignore_rules,
+                ignore_base_dir=spec_source.base_dir,
+            )
+        staged_spec_path = staged_source_dir / spec_source.spec_path.name
         _transform_staged_spec(
             staged_spec_path,
             spec.replace,
@@ -2690,7 +2741,9 @@ def _copy_spec_files(
     patterns: tuple[str, ...],
     ignore_rules: tuple["_IgnoreRule", ...],
     card_source: Path,
+    ignore_base_dir: Path,
 ) -> None:
+    ignore_base_dir = ignore_base_dir.resolve()
     for pattern in patterns:
         pattern_path = Path(pattern)
         if pattern_path.is_absolute() or ".." in pattern_path.parts:
@@ -2713,11 +2766,20 @@ def _copy_spec_files(
                     f"{card_source}: spec files entry '{pattern}' escapes the card"
                 ) from exc
             is_dir = source_path.is_dir()
-            if _ignored_by_containerignore(relative_path, is_dir, ignore_rules):
+            try:
+                ignore_path = source_path.relative_to(ignore_base_dir).as_posix()
+            except ValueError:
+                ignore_path = relative_path
+            if _ignored_by_containerignore(ignore_path, is_dir, ignore_rules):
                 continue
             target_path = destination_dir / relative_path
             if is_dir:
-                _copy_directory_contents(source_path, target_path, ignore_rules)
+                _copy_directory_contents(
+                    source_path,
+                    target_path,
+                    ignore_rules,
+                    ignore_base_dir=ignore_base_dir,
+                )
             elif source_path.is_file():
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source_path, target_path)
@@ -2727,13 +2789,21 @@ def _copy_directory_contents(
     source_dir: Path,
     destination_dir: Path,
     ignore_rules: tuple["_IgnoreRule", ...],
+    ignore_base_dir: Path | None = None,
 ) -> None:
     source_dir = source_dir.resolve()
+    ignore_base_dir = (
+        source_dir if ignore_base_dir is None else ignore_base_dir.resolve()
+    )
     shutil.rmtree(destination_dir, ignore_errors=True)
     for source_path in source_dir.rglob("*"):
         relative = source_path.relative_to(source_dir).as_posix()
         is_dir = source_path.is_dir()
-        if _ignored_by_containerignore(relative, is_dir, ignore_rules):
+        try:
+            ignore_path = source_path.relative_to(ignore_base_dir).as_posix()
+        except ValueError:
+            ignore_path = relative
+        if _ignored_by_containerignore(ignore_path, is_dir, ignore_rules):
             if is_dir:
                 continue
             continue
@@ -3203,9 +3273,12 @@ def _card_specs_hash(
     specs: tuple[SpecBuild, ...],
     card_env: dict[str, str],
     prepare_script: str,
-) -> str:
-    card_base_dir = _card_base_dir(card_source)
+    spec_source_cache_dir: Path,
+    *,
+    cache_only: bool,
+) -> tuple[str, tuple[tuple[str, str], ...]]:
     digest = hashlib.sha256()
+    source_revisions = []
     digest.update(card_source.name.encode("utf-8"))
     digest.update(b"\0")
     digest.update(prepare_script.encode("utf-8"))
@@ -3229,23 +3302,43 @@ def _card_specs_hash(
             for package in packages:
                 digest.update(package.encode("utf-8"))
                 digest.update(b"\0")
-        spec_path = card_base_dir / spec.spec
-        spec_dir = spec_path.parent
+        spec_source = _resolve_spec_source(
+            card_source,
+            spec.spec,
+            spec_source_cache_dir,
+            cache_only=cache_only,
+            revision="",
+        )
+        if spec_source.revision:
+            source_revisions.append((spec.spec, spec_source.revision))
+        if spec.hash_revision and spec_source.revision:
+            digest.update(spec_source.revision.encode("utf-8"))
+            digest.update(b"\0")
+        spec_dir = spec_source.spec_path.parent
         if spec.files:
             hash_paths = (
-                spec_path.relative_to(card_base_dir).as_posix(),
+                spec_source.spec_path.relative_to(spec_source.base_dir).as_posix(),
                 *_spec_file_hash_paths(
                     card_source,
-                    card_base_dir,
+                    spec_source.base_dir,
                     spec_dir,
                     spec.files,
                 ),
             )
         else:
-            hash_paths = (spec_dir.relative_to(card_base_dir).as_posix(),)
-        digest.update(_hash_paths(card_base_dir, hash_paths).encode("utf-8"))
+            hash_paths = (spec_dir.relative_to(spec_source.base_dir).as_posix(),)
+        digest.update(_hash_paths(spec_source.base_dir, hash_paths).encode("utf-8"))
         digest.update(b"\0")
-    return digest.hexdigest()[:HASH_LENGTH]
+    return digest.hexdigest()[:HASH_LENGTH], tuple(source_revisions)
+
+
+def _spec_source_revisions_by_card(
+    revisions: tuple[tuple[str, str, str], ...],
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    by_card: dict[str, list[tuple[str, str]]] = {}
+    for card_name, spec_source, revision in revisions:
+        by_card.setdefault(card_name, []).append((spec_source, revision))
+    return {card_name: tuple(values) for card_name, values in by_card.items()}
 
 
 def _spec_file_hash_paths(
@@ -3302,7 +3395,9 @@ def _is_http_source(source: str) -> bool:
 
 
 def _is_git_source(source: str) -> bool:
-    return source.startswith(("git+https://", "git+http://", "git+ssh://"))
+    return source.startswith(
+        ("git+https://", "git+http://", "git+ssh://", "git+file://")
+    )
 
 
 def _validate_relative_file_path(value: str, source: Path, label: str) -> Path:
@@ -3312,6 +3407,282 @@ def _validate_relative_file_path(value: str, source: Path, label: str) -> Path:
             f"{source}: {label} '{value}' must be a relative path without '..'"
         )
     return path
+
+
+def _resolve_spec_source(
+    card_source: Path,
+    source: str,
+    spec_source_cache_dir: Path,
+    *,
+    cache_only: bool,
+    revision: str = "",
+) -> SpecSource:
+    if _is_git_source(source):
+        return _resolve_git_spec_source(
+            card_source,
+            source,
+            spec_source_cache_dir,
+            cache_only=cache_only,
+            revision=revision,
+        )
+
+    card_base_dir = _card_base_dir(card_source)
+    spec_relpath = _validate_relative_file_path(source, card_source, "spec")
+    spec_path = (card_base_dir / spec_relpath).resolve()
+    try:
+        spec_path.relative_to(card_base_dir)
+    except ValueError as exc:
+        raise ConfigError(f"{card_source}: spec '{source}' escapes the card") from exc
+    if not spec_path.is_file():
+        raise ConfigError(f"{card_source}: spec '{source}' is missing")
+    return SpecSource(
+        base_dir=card_base_dir,
+        spec_path=spec_path,
+        spec_relpath=spec_relpath,
+    )
+
+
+def _resolve_git_spec_source(
+    card_source: Path,
+    source: str,
+    spec_source_cache_dir: Path,
+    *,
+    cache_only: bool,
+    revision: str = "",
+) -> SpecSource:
+    git = shutil.which("git")
+    if not git:
+        raise ConfigError("git must be installed to use git spec sources")
+
+    repo_url, ref, spec_relpath = _parse_git_spec_source(source)
+    source_key = _git_source_cache_key(repo_url)
+    repo_dir = spec_source_cache_dir / source_key / "repo"
+    spec_source_cache_dir.mkdir(parents=True, exist_ok=True)
+    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    if revision:
+        _pin_git_source_cache(git, repo_dir, repo_url, revision, source)
+    elif cache_only:
+        if not _is_git_repository(git, repo_dir):
+            raise ConfigError(
+                f"{card_source}: git spec source is not cached: {source}"
+            )
+        log(f"Using cached git spec source: {source}")
+    else:
+        _update_git_source_cache(git, repo_dir, repo_url, ref, source)
+
+    spec_path = (repo_dir / spec_relpath).resolve()
+    try:
+        spec_path.relative_to(repo_dir.resolve())
+    except ValueError as exc:
+        raise ConfigError(f"{card_source}: spec '{source}' escapes the git source") from exc
+    if not spec_path.is_file():
+        raise ConfigError(f"{card_source}: spec '{source}' is missing")
+    revision = _git_stdout(
+        git,
+        repo_dir,
+        ["rev-parse", "HEAD"],
+        "git spec source revision",
+    )
+    return SpecSource(
+        base_dir=repo_dir.resolve(),
+        spec_path=spec_path,
+        spec_relpath=spec_relpath,
+        revision=revision,
+        stage_prefix=Path("spec-sources") / source_key,
+    )
+
+
+def _update_git_source_cache(
+    git: str,
+    repo_dir: Path,
+    repo_url: str,
+    ref: tuple[str, str],
+    source: str,
+) -> None:
+    if not _is_git_repository(git, repo_dir):
+        shutil.rmtree(repo_dir, ignore_errors=True)
+        log(f"Initializing git spec source: {source}")
+        _run_logged_command([git, "init", str(repo_dir)], "git spec source init")
+        _run_logged_command(
+            [git, "-C", str(repo_dir), "remote", "add", "origin", repo_url],
+            "git spec source remote setup",
+        )
+    else:
+        log(f"Updating git spec source: {source}")
+        _run_logged_command(
+            [git, "-C", str(repo_dir), "remote", "set-url", "origin", repo_url],
+            "git spec source remote update",
+        )
+
+    _run_logged_command(
+        [
+            git,
+            "-C",
+            str(repo_dir),
+            "fetch",
+            "--depth=1",
+            "--prune",
+            "origin",
+            _git_fetch_ref(ref),
+        ],
+        "git spec source fetch",
+    )
+    _run_logged_command(
+        [git, "-C", str(repo_dir), "checkout", "--force", "FETCH_HEAD"],
+        "git spec source checkout",
+    )
+
+
+def _pin_git_source_cache(
+    git: str,
+    repo_dir: Path,
+    repo_url: str,
+    revision: str,
+    source: str,
+) -> None:
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        raise ConfigError(f"git spec source '{source}' has invalid pinned revision")
+    if _is_git_repository(git, repo_dir):
+        if _git_head_revision(git, repo_dir) == revision:
+            return
+        log(f"Updating git spec source revision: {source}")
+        _run_logged_command(
+            [git, "-C", str(repo_dir), "remote", "set-url", "origin", repo_url],
+            "git spec source remote update",
+        )
+    else:
+        shutil.rmtree(repo_dir, ignore_errors=True)
+        log(f"Cloning git spec source at pinned revision: {source}")
+        _run_logged_command([git, "init", str(repo_dir)], "git spec source init")
+        _run_logged_command(
+            [git, "-C", str(repo_dir), "remote", "add", "origin", repo_url],
+            "git spec source remote setup",
+        )
+
+    if not _git_has_revision(git, repo_dir, revision):
+        _run_logged_command(
+            [
+                git,
+                "-C",
+                str(repo_dir),
+                "fetch",
+                "--depth=1",
+                "origin",
+                revision,
+            ],
+            "git spec source pinned fetch",
+        )
+    _run_logged_command(
+        [git, "-C", str(repo_dir), "checkout", "--force", revision],
+        "git spec source pinned checkout",
+    )
+
+
+def _git_head_revision(git: str, repo_dir: Path) -> str:
+    result = subprocess.run(
+        [git, "-C", str(repo_dir), "rev-parse", "HEAD"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _git_has_revision(git: str, repo_dir: Path, revision: str) -> bool:
+    result = subprocess.run(
+        [git, "-C", str(repo_dir), "cat-file", "-e", f"{revision}^{{commit}}"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def _parse_git_spec_source(source: str) -> tuple[str, tuple[str, str], Path]:
+    raw_source = source.removeprefix("git+")
+    source_without_fragment, separator, fragment = raw_source.partition("#")
+    if not separator:
+        fragment = ""
+    parsed = urllib.parse.urlsplit(source_without_fragment)
+    if parsed.scheme not in ("https", "http", "ssh", "file"):
+        raise ConfigError(f"unsupported git spec source protocol in '{source}'")
+    if parsed.query:
+        raise ConfigError(f"git spec source '{source}' must not include a query")
+    if ":" not in parsed.path:
+        raise ConfigError(
+            f"git spec source '{source}' must be 'git+<repo-url>:<spec-path>'"
+        )
+
+    repo_path, spec_path_value = parsed.path.rsplit(":", 1)
+    if not repo_path or not spec_path_value:
+        raise ConfigError(
+            f"git spec source '{source}' must be 'git+<repo-url>:<spec-path>'"
+        )
+    spec_path = _validate_git_spec_path(
+        urllib.parse.unquote(spec_path_value),
+        source,
+    )
+    repo_url = urllib.parse.urlunsplit(
+        parsed._replace(path=repo_path, query="", fragment="")
+    )
+    return (
+        repo_url,
+        _parse_git_ref_fragment(fragment, source, "git spec source"),
+        spec_path,
+    )
+
+
+def _parse_git_ref_fragment(
+    fragment: str,
+    source: str,
+    label: str,
+) -> tuple[str, str]:
+    if not fragment:
+        return ("default", "")
+    if ":" in fragment or "=" not in fragment:
+        raise ConfigError(f"{label} '{source}' has invalid ref selector")
+    ref_kind, ref_value = fragment.split("=", 1)
+    if ref_kind not in ("commit", "tag", "branch", "ref") or not ref_value:
+        raise ConfigError(f"{label} '{source}' has invalid ref selector")
+    return (ref_kind, ref_value)
+
+
+def _validate_git_spec_path(value: str, source: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or not value.strip():
+        raise ConfigError(
+            f"git spec source '{source}' spec path must be relative without '..'"
+        )
+    return path
+
+
+def _git_source_cache_key(repo_url: str) -> str:
+    parsed = urllib.parse.urlsplit(repo_url)
+    name = Path(parsed.path.rstrip("/")).name or "repo"
+    if name.endswith(".git"):
+        name = name[:-4]
+    repo_hash = hashlib.sha256(repo_url.encode("utf-8")).hexdigest()[:12]
+    return f"{_identifier(name)}-{repo_hash}"
+
+
+def _git_stdout(
+    git: str,
+    repo_dir: Path,
+    args: list[str],
+    description: str,
+) -> str:
+    result = subprocess.run(
+        [git, "-C", str(repo_dir), *args],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    raise ConfigError(f"{description} failed with exit status {result.returncode}")
 
 
 def _download_file_source(source: str, target: Path) -> None:
@@ -3410,18 +3781,13 @@ def _run_logged_command(command: list[str], description: str) -> None:
 def _parse_git_file_source(source: str) -> tuple[str, tuple[str, str], Path]:
     raw_source = source.removeprefix("git+")
     parsed = urllib.parse.urlsplit(raw_source)
-    if parsed.scheme not in ("https", "http", "ssh"):
+    if parsed.scheme not in ("https", "http", "ssh", "file"):
         raise ConfigError(f"unsupported git files source protocol in '{source}'")
     if parsed.fragment:
         ref_expr = parsed.fragment
         if ":" in ref_expr:
             raise ConfigError(f"git files source '{source}' must not include a subpath")
-        if "=" not in ref_expr:
-            raise ConfigError(f"git files source '{source}' has invalid ref selector")
-        ref_kind, ref_value = ref_expr.split("=", 1)
-        if ref_kind not in ("commit", "tag", "branch", "ref") or not ref_value:
-            raise ConfigError(f"git files source '{source}' has invalid ref selector")
-        ref = (ref_kind, ref_value)
+        ref = _parse_git_ref_fragment(ref_expr, source, "git files source")
     else:
         ref = ("default", "")
     repo_url = urllib.parse.urlunsplit(parsed._replace(fragment=""))
@@ -3681,6 +4047,8 @@ def _run_streamed_command(
 
         return process.wait(), "".join(output_lines)
     finally:
+        if process.stdout is not None:
+            process.stdout.close()
         if process.poll() is None:
             _terminate_process_group(process)
 
