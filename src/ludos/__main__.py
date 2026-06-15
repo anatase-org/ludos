@@ -10,6 +10,7 @@ from .build import build_manifest
 from .cleanup import cleanup_local_images
 from .logging import LOGO_STR, configure_tracebacks, error, log
 from .model import ConfigError, validate_manifest
+from .patchwork import patch_target
 from .update import update_targets
 
 
@@ -89,6 +90,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fetch and merge in the cache without copying files back or updating locks.",
     )
     update.set_defaults(func=update_command)
+
+    patch = subcommands.add_parser(
+        "patch",
+        help="Work with git-backed patchwork branches.",
+    )
+    patch.add_argument(
+        "--patchwork-dir",
+        type=Path,
+        default=None,
+        help="Directory for patchwork checkouts. Defaults to ./patchwork.",
+    )
+    patch_subcommands = patch.add_subparsers(dest="patch_action", required=True)
+    patch_checkout = patch_subcommands.add_parser(
+        "checkout",
+        help="Recreate the ludos patchwork branch from a saved patch file.",
+    )
+    patch_checkout.add_argument("target", help="Patch target as <card>:<spec>.")
+    patch_checkout.set_defaults(func=patch_command)
+    patch_apply = patch_subcommands.add_parser(
+        "apply",
+        help="Update the saved patch file from the ludos patchwork branch.",
+    )
+    patch_apply.add_argument("target", help="Patch target as <card>:<spec>.")
+    patch_apply.set_defaults(func=patch_command)
 
     cleanup = subcommands.add_parser(
         "cleanup",
@@ -197,6 +222,14 @@ def update_command(args: argparse.Namespace) -> int:
         cache_dir=args.cache_dir,
         patchwork_dir=args.patchwork_dir,
         dry_run=args.dry_run,
+    )
+
+
+def patch_command(args: argparse.Namespace) -> int:
+    return patch_target(
+        args.patch_action,
+        args.target,
+        patchwork_dir=args.patchwork_dir,
     )
 
 
