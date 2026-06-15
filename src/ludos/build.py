@@ -191,6 +191,7 @@ def build_manifest(
         metadata,
         build_outputs=build_outputs,
         mode="combined" if ci else "separated",
+        cache_only=cache_only,
     )[0]
 
 
@@ -1144,6 +1145,7 @@ def build_final_manifest_images(
     *,
     build_outputs: BuildImageOutputs | None = None,
     mode: str = "separated",
+    cache_only: bool = False,
 ) -> tuple[BuildResult, ...]:
     if mode not in ("separated", "combined"):
         raise ConfigError(f"unknown final image build mode: {mode}")
@@ -1155,6 +1157,7 @@ def build_final_manifest_images(
                 manifest,
                 build_outputs=build_outputs,
                 mode=mode,
+                cache_only=cache_only,
             )
         )
     return tuple(results)
@@ -1165,6 +1168,7 @@ def _build_final_manifest_image(
     *,
     build_outputs: BuildImageOutputs,
     mode: str,
+    cache_only: bool,
 ) -> BuildResult:
     build_dir = Path(metadata.build_dir)
     card_files_dir = build_dir / "files"
@@ -1187,13 +1191,20 @@ def _build_final_manifest_image(
             )
             target_path = card_context_dir / target_relpath
             target_path.parent.mkdir(parents=True, exist_ok=True)
+            remote_cache_path = git_cache_dir / target_relpath
             if _is_http_source(file_ref.source):
-                _download_file_source(file_ref.source, target_path)
+                _copy_http_file_source(
+                    file_ref.source,
+                    target_path,
+                    remote_cache_path,
+                    cache_only=cache_only,
+                )
             elif _is_git_source(file_ref.source):
                 _copy_git_file_source(
                     file_ref.source,
                     target_path,
-                    git_cache_dir / target_relpath,
+                    remote_cache_path,
+                    cache_only=cache_only,
                 )
             else:
                 source_relpath = _validate_relative_file_path(
@@ -3775,9 +3786,27 @@ def _git_stdout(
     raise ConfigError(f"{description} failed with exit status {result.returncode}")
 
 
+def _copy_http_file_source(
+    source: str,
+    target: Path,
+    cache_path: Path,
+    *,
+    cache_only: bool,
+) -> None:
+    if cache_only:
+        if not cache_path.is_file():
+            raise ConfigError(f"file source is not cached: {source}")
+        shutil.copy2(cache_path, target)
+        return
+
+    _download_file_source(source, cache_path)
+    shutil.copy2(cache_path, target)
+
+
 def _download_file_source(source: str, target: Path) -> None:
     log(f"Downloading file source: {source}")
     try:
+        target.parent.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(source) as response:
             with target.open("wb") as handle:
                 shutil.copyfileobj(response, handle)
@@ -3785,7 +3814,13 @@ def _download_file_source(source: str, target: Path) -> None:
         raise ConfigError(f"failed to download file source '{source}': {exc}") from exc
 
 
-def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
+def _copy_git_file_source(
+    source: str,
+    target: Path,
+    cache_dir: Path,
+    *,
+    cache_only: bool,
+) -> None:
     git = shutil.which("git")
     if not git:
         raise ConfigError("git must be installed to use git files sources")
@@ -3793,7 +3828,13 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
     repo_url, ref, repo_path = _parse_git_file_source(source)
     source_dir = cache_dir
     source_dir.parent.mkdir(parents=True, exist_ok=True)
-    if not _is_git_repository(git, source_dir):
+    if cache_only:
+        if not _is_git_repository(git, source_dir) or not (
+            source_dir / ".git" / "FETCH_HEAD"
+        ).is_file():
+            raise ConfigError(f"git file source is not cached: {source}")
+        log(f"Using cached git file source: {source}")
+    elif not _is_git_repository(git, source_dir):
         shutil.rmtree(source_dir, ignore_errors=True)
         log(f"Initializing git file source: {source}")
         _run_logged_command([git, "init", str(source_dir)], "git file source init")
@@ -3807,20 +3848,21 @@ def _copy_git_file_source(source: str, target: Path, cache_dir: Path) -> None:
             [git, "-C", str(source_dir), "remote", "set-url", "origin", repo_url],
             "git file source remote update",
         )
-    _run_logged_command(
-        [
-            git,
-            "-C",
-            str(source_dir),
-            "fetch",
-            "--depth=1",
-            "--filter=blob:none",
-            "--prune",
-            "origin",
-            _git_fetch_ref(ref),
-        ],
-        "git file source fetch",
-    )
+    if not cache_only:
+        _run_logged_command(
+            [
+                git,
+                "-C",
+                str(source_dir),
+                "fetch",
+                "--depth=1",
+                "--filter=blob:none",
+                "--prune",
+                "origin",
+                _git_fetch_ref(ref),
+            ],
+            "git file source fetch",
+        )
     if repo_path != Path("."):
         raise ConfigError(f"git files source '{source}' does not support subpaths yet")
     if target.exists():
