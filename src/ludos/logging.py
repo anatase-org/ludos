@@ -20,7 +20,6 @@ STREAM_TRUNCATED_LINE = "| ... <truncated>"
 INFO_MESSAGE_INDENT = 8
 LOG_DIR = Path("logs")
 LOG_FILE = LOG_DIR / "ludos.log"
-LOG_MAX_BYTES = 10 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
 LOG_ROTATE_ON_START = True
 
@@ -209,7 +208,7 @@ def _make_file_handler() -> logging.Handler:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
         LOG_FILE,
-        maxBytes=LOG_MAX_BYTES,
+        maxBytes=0,
         backupCount=LOG_BACKUP_COUNT,
         encoding="utf-8",
     )
