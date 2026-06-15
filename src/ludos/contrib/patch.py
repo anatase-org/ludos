@@ -44,9 +44,7 @@ def patch_sources(card: Card) -> tuple[PatchSource, ...]:
             )
         spec_path = spec_source_path(source, base, spec)
         source_dir = spec_path.parent
-        key = source_dir.relative_to(base).as_posix()
-        if key == ".":
-            key = base.name
+        key = patch_source_key(base, source_dir, spec.patch)
         if key in seen:
             raise ConfigError(f"{source}: duplicate patch source '{key}'")
         seen.add(key)
@@ -279,6 +277,15 @@ def patchwork_dir(patchwork_base: Path | None) -> Path:
     if patchwork_base is None:
         patchwork_base = DEFAULT_PATCHWORK_DIR
     return patchwork_base.expanduser().resolve()
+
+
+def patch_source_key(base: Path, source_dir: Path, patch: PatchRef) -> str:
+    if patch.name:
+        return patch.name
+    key = source_dir.relative_to(base).as_posix()
+    if key == ".":
+        key = base.name
+    return key
 
 
 def current_branch(repo_dir: Path) -> str:

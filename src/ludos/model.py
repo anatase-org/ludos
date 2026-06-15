@@ -27,6 +27,7 @@ class PatchRef:
     url: str
     ref: str
     file: str
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -502,6 +503,7 @@ def _patch_ref(
     url = value.get("url")
     ref = value.get("ref")
     file = value.get("file")
+    name = value.get("name", "")
     if not isinstance(patch_type, str) or not patch_type.strip():
         raise ConfigError(f"{path}: '{label}.{key}.type' must be a non-empty string")
     if not isinstance(url, str) or not url.strip():
@@ -510,7 +512,9 @@ def _patch_ref(
         raise ConfigError(f"{path}: '{label}.{key}.ref' must be a non-empty string")
     if not isinstance(file, str) or not file.strip():
         raise ConfigError(f"{path}: '{label}.{key}.file' must be a non-empty string")
-    return PatchRef(type=patch_type, url=url, ref=ref, file=file)
+    if not isinstance(name, str):
+        raise ConfigError(f"{path}: '{label}.{key}.name' must be a string")
+    return PatchRef(type=patch_type, url=url, ref=ref, file=file, name=name)
 
 
 def _string_dict(data: dict[str, Any], key: str, path: Path) -> dict[str, str]:

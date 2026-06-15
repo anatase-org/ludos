@@ -115,6 +115,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     patch_apply.add_argument("target", help="Patch target as <card>:<spec>.")
     patch_apply.set_defaults(func=patch_command)
+    patch_init = patch_subcommands.add_parser(
+        "init",
+        help="Initialize git patchwork for a spec.",
+    )
+    patch_init.add_argument("target", help="Patch target as <card>:<spec>.")
+    patch_init.add_argument("url", help="Upstream git URL for patchwork.")
+    patch_init.add_argument(
+        "--file",
+        default="overrides.patch",
+        help="Patch file name to create. Defaults to overrides.patch.",
+    )
+    patch_init.add_argument(
+        "--ref",
+        default="${spec:Version}",
+        help="Git ref for the patch base. Defaults to ${spec:Version}.",
+    )
+    patch_init.add_argument(
+        "--name",
+        default="",
+        help="Patchwork repo name. Defaults to the derived card/spec source name.",
+    )
+    patch_init.set_defaults(func=patch_command)
 
     package = subcommands.add_parser(
         "package",
@@ -257,6 +279,10 @@ def patch_command(args: argparse.Namespace) -> int:
         args.patch_action,
         args.target,
         patchwork_dir=args.patchwork_dir,
+        url=getattr(args, "url", ""),
+        file=getattr(args, "file", "overrides.patch"),
+        ref=getattr(args, "ref", "${spec:Version}"),
+        name=getattr(args, "name", ""),
     )
 
 
