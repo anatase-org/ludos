@@ -3176,8 +3176,8 @@ def _specs_build_script(
             [
                 f"find {shlex.quote(source_dir)} -maxdepth 1 -type f ! -name '*.spec' -exec cp -f -t \"$topdir/SOURCES\" {{}} +",
                 f"cp -f {shlex.quote(spec_path)} \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
-                f"if grep -Eq '^(Source|Patch)[0-9]*:[[:space:]]+https?://' \"$topdir/SPECS/{shlex.quote(spec_name)}\"; then",
-                f"  spectool -l \"$topdir/SPECS/{shlex.quote(spec_name)}\" > \"$topdir/sources.list\"",
+                f"if spectool -l \"$topdir/SPECS/{shlex.quote(spec_name)}\" > \"$topdir/sources.list\"; then",
+                "  if grep -Eq '^(Source|Patch)[0-9]*:[[:space:]]+https?://' \"$topdir/sources.list\"; then",
                 "  missing_sources=0",
                 "  while IFS= read -r source_entry; do",
                 "    source_url=${source_entry#*:}",
@@ -3194,6 +3194,7 @@ def _specs_build_script(
                 f"    spectool -g -C \"$source_cache\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
                 "  fi",
                 '  find "$source_cache" -maxdepth 1 -type f -exec cp -n -t "$topdir/SOURCES" {} +',
+                "  fi",
                 "fi",
                 f"for target in {targets}; do",
                 "  if [ \"$target\" = i686 ]; then",
