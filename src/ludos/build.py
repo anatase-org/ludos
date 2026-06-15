@@ -444,11 +444,18 @@ def _resolve_manifest_metadata(
             card_builds[card_name] = card.build.rstrip()
             card_build_deps[card_name] = card.build_deps
         if card.specs:
-            card_specs[card_name] = card.specs
+            active_specs = tuple(
+                spec for spec in card.specs if _spec_packages_for_arch(spec, arch)
+            )
+            if active_specs:
+                card_specs[card_name] = active_specs
+            else:
+                log(f"Skipping specs for card without packages on {arch}: {card_name}")
+        if card_name in card_specs:
             card_build_deps[card_name] = card.build_deps
             card_spec_hashes[card_name] = _card_specs_hash(
                 card.source,
-                card.specs,
+                card_specs[card_name],
                 card_env,
                 card.prepare.rstrip(),
             )
@@ -2609,6 +2616,10 @@ def _stage_card_specs(
     ignore_rules = _load_containerignore(card_base_dir)
     staged = []
     for spec in specs:
+        packages = _spec_packages_for_arch(spec, arch)
+        if not packages:
+            log(f"Skipping spec without packages on {arch}: {spec.spec}")
+            continue
         spec_relpath = _validate_relative_file_path(spec.spec, card_source, "spec")
         spec_source = (card_base_dir / spec_relpath).resolve()
         try:
@@ -2640,9 +2651,6 @@ def _stage_card_specs(
             card_env,
             arch,
         )
-        packages = _spec_packages_for_arch(spec, arch)
-        if not packages:
-            raise ConfigError(f"{card_source}: spec '{spec.spec}' has no packages for {arch}")
         staged.append(
             StagedSpec(
                 spec=spec,
