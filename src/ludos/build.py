@@ -114,6 +114,7 @@ class ResolvedBuildMetadata:
     dnf_cache_dir: str
     dnf_persist_dir: str
     dnf_log_dir: str
+    dnf_resolve_dir: str
     podman: str
     buildah: str | None
     cache_version: str
@@ -267,6 +268,7 @@ def _resolve_manifest_metadata(
     dnf_cache_dir = dnf_dir / "cache"
     dnf_persist_dir = dnf_dir / "persist"
     dnf_log_dir = dnf_dir / "log"
+    dnf_resolve_dir = dnf_dir / "resolves"
     build_artifact_cache_dir = distro_cache_dir / "build-artifacts"
 
     distro_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -278,6 +280,7 @@ def _resolve_manifest_metadata(
     dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     dnf_persist_dir.mkdir(parents=True, exist_ok=True)
     dnf_log_dir.mkdir(parents=True, exist_ok=True)
+    dnf_resolve_dir.mkdir(parents=True, exist_ok=True)
 
     podman = shutil.which("podman")
     if not podman:
@@ -527,6 +530,8 @@ def _resolve_manifest_metadata(
         releasever,
         bootstrap_packages,
         package_id_by_nevra,
+        dnf_resolve_dir,
+        tuple(repo_images),
     )
     if not bootstrap_resolved_packages:
         raise ConfigError("dnf did not resolve packages for bootstrap")
@@ -548,6 +553,8 @@ def _resolve_manifest_metadata(
             releasever,
             card_packages,
             package_id_by_nevra,
+            dnf_resolve_dir,
+            tuple(repo_images),
         )
         if not card_resolved_package_list:
             raise ConfigError(f"dnf did not resolve packages for {card_name}")
@@ -565,6 +572,8 @@ def _resolve_manifest_metadata(
             releasever,
             tuple(contextual_requests),
             package_id_by_nevra,
+            dnf_resolve_dir,
+            tuple(repo_images),
         )
         contextual_additions = tuple(
             package
@@ -668,6 +677,8 @@ def _resolve_manifest_metadata(
             releasever,
             build_deps,
             package_id_by_nevra,
+            dnf_resolve_dir,
+            tuple(repo_images),
         )
         if not explicit_builder_packages:
             raise ConfigError(f"dnf did not resolve build-deps for {card_name}")
@@ -719,6 +730,8 @@ def _resolve_manifest_metadata(
             releasever,
             builder_package_requests,
             package_id_by_nevra,
+            dnf_resolve_dir,
+            tuple(repo_images),
         )
         if not builder_packages:
             raise ConfigError(f"dnf did not resolve builder packages for {card_name}")
@@ -844,6 +857,7 @@ def _resolve_manifest_metadata(
         dnf_cache_dir=str(dnf_cache_dir),
         dnf_persist_dir=str(dnf_persist_dir),
         dnf_log_dir=str(dnf_log_dir),
+        dnf_resolve_dir=str(dnf_resolve_dir),
         podman=str(podman),
         buildah=buildah,
         cache_version=cache_version,
@@ -961,7 +975,6 @@ def build_package_card_images(
                 plan.builder_packages,
                 package_dir=Path(manifest.package_dir),
                 resolve_dependencies=True,
-                releasever=manifest.releasever,
             )
             log(f"Creating builder image: {plan.builder_image}")
             _create_builder_image(
@@ -1964,27 +1977,29 @@ def _resolve_packages(
     releasever: str,
     packages: tuple[str, ...],
     package_id_by_nevra: dict[str, tuple[str, str]],
+    resolve_cache_dir: Path,
+    repo_images: tuple[str, ...],
 ) -> tuple[str, ...]:
-    transaction_preview = subprocess.run(
-        [
-            *orchestrator_dnf_base,
-            "--assumeno",
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--setopt=install_weak_deps=False",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            "--installroot=/ludos/resolve-root",
-            f"--releasever={releasever}",
-            "install",
-            "--allowerasing",
-            *packages,
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
+    cmd = [
+        *orchestrator_dnf_base,
+        "--assumeno",
+        "--setopt=reposdir=/ludos/dnf/repos",
+        "--setopt=cachedir=/ludos/dnf/cache",
+        "--setopt=persistdir=/ludos/dnf/persist",
+        "--setopt=logdir=/ludos/dnf/log",
+        "--setopt=install_weak_deps=False",
+        "--disable-repo=*",
+        "--enable-repo=*",
+        "--installroot=/ludos/resolve-root",
+        f"--releasever={releasever}",
+        "install",
+        "--allowerasing",
+        *packages,
+    ]
+    transaction_preview = _run_cached_transaction_preview(
+        cmd,
+        resolve_cache_dir,
+        repo_images,
     )
     output = transaction_preview.stdout + "\n" + transaction_preview.stderr
     if transaction_preview.returncode not in (0, 1):
@@ -1995,20 +2010,53 @@ def _resolve_packages(
     return tuple(package for package, _package_id in entries)
 
 
-def _parse_resolved_packages(output: str) -> tuple[str, ...]:
-    return _parse_resolved_packages_from_sections(output, include_dependencies=True)
-
-
-def _parse_resolved_packages_from_sections(
-    output: str,
-    include_dependencies: bool,
-) -> tuple[str, ...]:
-    return tuple(
-        package
-        for package, _package_id in _parse_resolved_package_entries(
-            output, include_dependencies
+def _run_cached_transaction_preview(
+    cmd: list[str],
+    resolve_cache_dir: Path,
+    repo_images: tuple[str, ...],
+) -> subprocess.CompletedProcess[str]:
+    repo_tags = tuple(_image_tag(image) for image in repo_images)
+    cache_key = _resolve_cache_key(cmd, repo_tags)
+    cache_file = resolve_cache_dir / f"{cache_key}.json"
+    if cache_file.exists():
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(
+            args=data.get("args", cmd),
+            returncode=int(data["returncode"]),
+            stdout=str(data.get("stdout", "")),
+            stderr=str(data.get("stderr", "")),
         )
+
+    transaction_preview = subprocess.run(
+        cmd,
+        check=False,
+        text=True,
+        capture_output=True,
     )
+    resolve_cache_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "args": cmd,
+        "repo_tags": repo_tags,
+        "returncode": transaction_preview.returncode,
+        "stdout": transaction_preview.stdout,
+        "stderr": transaction_preview.stderr,
+    }
+    temp_file = cache_file.with_suffix(".json.tmp")
+    temp_file.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temp_file.replace(cache_file)
+    return transaction_preview
+
+
+def _resolve_cache_key(cmd: list[str], repo_tags: tuple[str, ...]) -> str:
+    payload = json.dumps(
+        {
+            "cmd": cmd,
+            "repo_tags": repo_tags,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _parse_resolved_package_entries(
@@ -2083,20 +2131,12 @@ def _download_block_packages(
     *,
     package_dir: Path | None = None,
     resolve_dependencies: bool = False,
-    releasever: str | None = None,
 ) -> tuple[str, ...]:
     if not block_packages:
         return tuple()
     if resolve_dependencies:
         if package_dir is None:
             raise ConfigError("package_dir is required when resolving download dependencies")
-        if releasever is None:
-            raise ConfigError("releasever is required when resolving download dependencies")
-        download_id = _package_hash(block_packages)
-        verify_dir = package_dir / ".verify" / download_id
-        shutil.rmtree(verify_dir, ignore_errors=True)
-        verify_dir.mkdir(parents=True, exist_ok=True)
-        resolved_packages = block_packages
     else:
         rpm_files = _package_rpm_files(orchestrator_dnf_base, block_packages)
         download_options = ["--destdir=/ludos/packages"]
@@ -2119,50 +2159,13 @@ def _download_block_packages(
         return rpm_files
 
     if resolve_dependencies:
-        for _attempt in range(1, 6):
-            rpm_files = _package_rpm_files(orchestrator_dnf_base, resolved_packages)
-            if not _rpm_files_cached(package_dir, rpm_files):
-                _download_exact_packages(
-                    orchestrator_dnf_base,
-                    resolved_packages,
-                    "/ludos/packages",
-                )
-            _stage_rpm_files(package_dir, rpm_files, verify_dir)
-            missing_packages = _missing_cacheonly_install_packages(
+        rpm_files = _package_rpm_files(orchestrator_dnf_base, block_packages)
+        if not _rpm_files_cached(package_dir, rpm_files):
+            _download_exact_packages(
                 orchestrator_dnf_base,
-                releasever,
-                verify_dir,
+                block_packages,
+                "/ludos/packages",
             )
-            if not missing_packages:
-                break
-            shutil.rmtree(verify_dir, ignore_errors=True)
-            verify_dir.mkdir(parents=True, exist_ok=True)
-            log(
-                f"Adding {len(missing_packages)} transient builder packages "
-                f"from cache-only install check"
-            )
-            missing_resolved = _resolve_packages(
-                orchestrator_dnf_base,
-                releasever,
-                missing_packages,
-            )
-            if not missing_resolved:
-                raise ConfigError(
-                    "dnf did not resolve transient builder packages: "
-                    + ", ".join(missing_packages)
-                )
-            resolved_packages = _resolve_packages(
-                orchestrator_dnf_base,
-                releasever,
-                _unique_packages((*resolved_packages, *missing_resolved)),
-            )
-        else:
-            raise ConfigError("builder package transient closure did not converge")
-
-        rpm_files = tuple(sorted(path.name for path in verify_dir.glob("*.rpm")))
-        if not rpm_files:
-            raise ConfigError("dependency-resolved package download did not produce RPMs")
-        shutil.rmtree(verify_dir, ignore_errors=True)
         return rpm_files
 
     raise AssertionError("unreachable")
@@ -2195,85 +2198,12 @@ def _rpm_files_cached(package_dir: Path, rpm_files: tuple[str, ...]) -> bool:
     return all((package_dir / rpm_file).is_file() for rpm_file in rpm_files)
 
 
-def _missing_cacheonly_install_packages(
-    orchestrator_dnf_base: list[str],
-    releasever: str,
-    rpm_dir: Path,
-) -> tuple[str, ...]:
-    rpm_paths = tuple(f"/rpms/{path.name}" for path in sorted(rpm_dir.glob("*.rpm")))
-    if not rpm_paths:
-        return tuple()
-    dnf_base = _dnf_base_with_volume(orchestrator_dnf_base, rpm_dir, "/rpms:ro")
-    transaction_preview = subprocess.run(
-        [
-            *dnf_base,
-            "--assumeno",
-            "--installroot=/ludos/verify-root",
-            f"--releasever={releasever}",
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--setopt=install_weak_deps=False",
-            "--cacheonly",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            "install",
-            "--allowerasing",
-            *rpm_paths,
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
-    output = transaction_preview.stdout + "\n" + transaction_preview.stderr
-    local_packages = {path.name.removesuffix(".rpm") for path in rpm_dir.glob("*.rpm")}
-    transaction_packages = _parse_resolved_packages(output)
-    missing_transaction_packages = tuple(
-        package
-        for package in transaction_packages
-        if _rpm_filename_nevra(package) not in local_packages
-    )
-    if missing_transaction_packages:
-        return missing_transaction_packages
-
-    missing_packages = tuple(
-        dict.fromkeys(
-            re.findall(
-                r'Cannot download the "([^"]+)" package, cacheonly option is activated',
-                output,
-            )
-        )
-    )
-    if missing_packages:
-        return missing_packages
-    if "Transaction Summary:" not in output and "Nothing to do." not in output:
-        detail = "\n".join(output.splitlines()[-20:])
-        raise ConfigError(f"dnf could not verify builder package closure:\n{detail}")
-    if transaction_preview.returncode not in (0, 1):
-        detail = "\n".join(output.splitlines()[-20:])
-        raise ConfigError(f"dnf could not verify builder package closure:\n{detail}")
-    return tuple()
-
-
 def _rpm_filename_nevra(nevra: str) -> str:
     if ":" not in nevra:
         return nevra
     name_epoch, version_release_arch = nevra.split(":", 1)
     name, _epoch = name_epoch.rsplit("-", 1)
     return f"{name}-{version_release_arch}"
-
-
-def _stage_rpm_files(
-    package_dir: Path, rpm_files: tuple[str, ...], destination_dir: Path
-) -> None:
-    for rpm_file in rpm_files:
-        source = _cached_rpm_path(package_dir, rpm_file)
-        target = destination_dir / rpm_file
-        try:
-            os.link(source, target)
-        except OSError:
-            shutil.copy2(source, target)
 
 
 def _cached_rpm_path(package_dir: Path, rpm_file: str) -> Path:
