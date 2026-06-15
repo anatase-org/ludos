@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from ludos.model import SpecBuild, UpstreamRef
-from ludos.update import LUDOS_BRANCH, UpstreamSource, _merge_dist_git_update
+from ludos.contrib.update import LUDOS_BRANCH, UpstreamSource, _merge_dist_git_update
 
 
 class DistGitUpdateTests(unittest.TestCase):

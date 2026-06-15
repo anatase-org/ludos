@@ -5,6 +5,7 @@ tree
 *.tar
 *.oci-archive
 *.json
+!pyrightconfig.json
 tmp
 .env*
 *_oci

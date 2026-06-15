@@ -10,8 +10,8 @@ from .build import build_manifest
 from .cleanup import cleanup_local_images
 from .logging import LOGO_STR, configure_tracebacks, error, log
 from .model import ConfigError, validate_manifest
-from .patchwork import patch_target
-from .update import update_targets
+from .contrib.patchwork import patch_target
+from .contrib.update import update_targets
 
 
 def build_parser() -> argparse.ArgumentParser:

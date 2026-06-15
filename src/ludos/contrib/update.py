@@ -10,8 +10,8 @@ from typing import Any
 
 import yaml
 
-from .logging import log, stream
-from .model import Card, ConfigError, SpecBuild, UpstreamRef, validate_manifest
+from ..logging import log, stream
+from ..model import Card, ConfigError, SpecBuild, UpstreamRef, validate_manifest
 from .patch import (
     LUDOS_BRANCH,
     PATCH_SHA,

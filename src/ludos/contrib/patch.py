@@ -11,8 +11,8 @@ from typing import Any
 
 import yaml
 
-from .logging import log, stream
-from .model import Card, ConfigError, PatchRef, SpecBuild
+from ..logging import log, stream
+from ..model import Card, ConfigError, PatchRef, SpecBuild
 
 
 DEFAULT_PATCHWORK_DIR = Path("patchwork")

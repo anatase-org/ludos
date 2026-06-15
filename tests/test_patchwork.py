@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ludos.patchwork import apply_patch, checkout_patch
+from ludos.contrib.patchwork import apply_patch, checkout_patch
 
 
 class PatchworkCommandTests(unittest.TestCase):

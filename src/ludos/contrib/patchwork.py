@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import patch as patch_helpers
-from .logging import log
-from .model import Card, ConfigError
+from ..logging import log
+from ..model import Card, ConfigError
 
 
 @dataclass(frozen=True)
