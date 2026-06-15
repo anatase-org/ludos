@@ -1026,10 +1026,11 @@ def build_build_images(
             if _image_exists(manifest.podman, plan.image):
                 log(f"Reusing build output image: {plan.image}")
                 images_by_block[plan.block] = plan.image
-                rpm_files_by_block[plan.block] = _rpm_files_in_image(
+                rpm_files, has_files = _build_output_metadata_in_image(
                     manifest.podman, plan.image
                 )
-                if _image_has_files(manifest.podman, plan.image, "/files"):
+                rpm_files_by_block[plan.block] = rpm_files
+                if has_files:
                     file_blocks.add(plan.block)
                 continue
             if cache_only:
@@ -1089,8 +1090,11 @@ def build_build_images(
                 files_dir=build_output.files_dir,
             )
             images_by_block[plan.block] = plan.image
-            rpm_files_by_block[plan.block] = build_output.rpm_files
-            if build_output.file_count:
+            rpm_files, has_files = _build_output_metadata_in_image(
+                manifest.podman, plan.image
+            )
+            rpm_files_by_block[plan.block] = rpm_files
+            if has_files:
                 file_blocks.add(plan.block)
 
     return BuildImageOutputs(
@@ -1643,21 +1647,38 @@ def _rpm_paths_for_packages(mount_dir: str, packages: tuple[str, ...]) -> tuple[
     )
 
 
-def _rpm_files_in_image(podman: str, image: str) -> tuple[str, ...]:
-    with tempfile.TemporaryDirectory(prefix="ludos-image-rpms-") as temp_dir:
-        output_dir = Path(temp_dir)
-        _extract_image_paths(podman, image, {"rpms": output_dir})
-        return tuple(sorted(path.name for path in output_dir.glob("*.rpm")))
-
-
-def _image_has_files(podman: str, image: str, source: str) -> bool:
-    with tempfile.TemporaryDirectory(prefix="ludos-image-files-") as temp_dir:
-        output_dir = Path(temp_dir)
-        try:
-            _extract_image_paths(podman, image, {source.strip("/"): output_dir})
-        except subprocess.CalledProcessError:
-            return False
-        return any(path.is_file() for path in output_dir.rglob("*"))
+def _build_output_metadata_in_image(
+    podman: str,
+    image: str,
+) -> tuple[tuple[str, ...], bool]:
+    script = r"""
+image=$1
+mount_path=$(podman image mount "$image")
+cleanup() { podman image unmount "$image" >/dev/null; }
+trap cleanup EXIT
+if [ -d "$mount_path/rpms" ]; then
+  find "$mount_path/rpms" -maxdepth 1 -type f -name "*.rpm" -printf "R\t%f\n" | sort
+fi
+if [ -d "$mount_path/files" ] && [ -n "$(find "$mount_path/files" -type f -print -quit)" ]; then
+  printf "F\t1\n"
+else
+  printf "F\t0\n"
+fi
+"""
+    listing = subprocess.run(
+        [podman, "unshare", "/bin/sh", "-eu", "-c", script, "--", image],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    rpm_files = []
+    has_files = False
+    for line in listing.stdout.splitlines():
+        if line.startswith("R\t"):
+            rpm_files.append(line[2:])
+        elif line == "F\t1":
+            has_files = True
+    return tuple(rpm_files), has_files
 
 
 def _metadata_build_result(
