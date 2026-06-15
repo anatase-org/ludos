@@ -726,6 +726,7 @@ def _resolve_manifest_metadata(
                     package_id_by_nevra,
                     dnf_resolve_dir,
                     tuple(repo_images),
+                    include_dependencies=False,
                 )
                 spec_builder_package_list.extend(target_builder_packages)
                 if target != arch:
