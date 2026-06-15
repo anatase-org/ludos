@@ -2947,7 +2947,7 @@ def _resolve_package_arch_variants(
         f"--releasever={releasever}",
         "repoquery",
         "--queryformat",
-        "%{name}\\t%{name}-%{evr}.%{arch}\\n",
+        "%{name}\t%{name}-%{evr}.%{arch}\n",
         *candidates,
     ]
     query = _run_cached_transaction_preview(
