@@ -23,6 +23,21 @@ from .model import ConfigError, SpecBuild, validate_manifest
 
 
 HASH_LENGTH = 8
+RPM_ARCH_SUFFIXES = frozenset(
+    (
+        "aarch64",
+        "armv7hl",
+        "i386",
+        "i486",
+        "i586",
+        "i686",
+        "noarch",
+        "ppc64le",
+        "riscv64",
+        "s390x",
+        "x86_64",
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -58,7 +73,7 @@ class BuildImagePlan:
     image: str
     builder_image: str
     builder_packages: tuple[str, ...]
-    declared_packages: tuple[str, ...] = tuple()
+    declared_package_ids: tuple[tuple[str, str], ...] = tuple()
 
 
 @dataclass(frozen=True)
@@ -87,6 +102,7 @@ class ResolvedBuildMetadata:
     card_order: tuple[str, ...]
     card_packages: tuple[tuple[str, tuple[str, ...]], ...]
     card_resolutions: tuple[tuple[str, tuple[str, ...]], ...]
+    package_ids: tuple[tuple[str, str, str], ...]
     package_images: tuple[PackageImagePlan, ...]
     build_images: tuple[BuildImagePlan, ...]
     package_dir: str
@@ -464,13 +480,7 @@ def _resolve_manifest_metadata(
         if card.postprocess.strip():
             postprocess_blocks.append((card_name, card.postprocess.rstrip()))
     build_card_names = set(card_builds) | set(card_specs)
-    locally_built_package_names_by_card = _locally_built_package_names_by_card(
-        card_specs,
-        arch,
-    )
-    locally_built_package_names = set().union(
-        *locally_built_package_names_by_card.values()
-    ) if locally_built_package_names_by_card else set()
+    package_id_by_nevra: dict[str, tuple[str, str]] = {}
     requested_packages = tuple(requested_packages)
     if not requested_packages and not build_card_names:
         raise ConfigError(f"{manifest_path}: no packages requested by cards")
@@ -503,11 +513,20 @@ def _resolve_manifest_metadata(
         "dnf5",
     ]
 
+    locally_built_package_ids_by_card = _locally_built_package_ids_by_card(
+        card_specs,
+        arch,
+    )
+    locally_built_package_ids = set().union(
+        *locally_built_package_ids_by_card.values()
+    ) if locally_built_package_ids_by_card else set()
+
     log("Resolving package transaction for bootstrap")
     bootstrap_resolved_packages = _resolve_packages(
         orchestrator_dnf_base,
         releasever,
         bootstrap_packages,
+        package_id_by_nevra,
     )
     if not bootstrap_resolved_packages:
         raise ConfigError("dnf did not resolve packages for bootstrap")
@@ -528,6 +547,7 @@ def _resolve_manifest_metadata(
             orchestrator_dnf_base,
             releasever,
             card_packages,
+            package_id_by_nevra,
         )
         if not card_resolved_package_list:
             raise ConfigError(f"dnf did not resolve packages for {card_name}")
@@ -544,6 +564,7 @@ def _resolve_manifest_metadata(
             orchestrator_dnf_base,
             releasever,
             tuple(contextual_requests),
+            package_id_by_nevra,
         )
         contextual_additions = tuple(
             package
@@ -610,7 +631,10 @@ def _resolve_manifest_metadata(
         for package in card_resolution:
             if package in bootstrap_package_set or package in common_package_set:
                 continue
-            if _package_name_from_nevra(package) in locally_built_package_names:
+            if (
+                _resolved_package_id(package_id_by_nevra, package)
+                in locally_built_package_ids
+            ):
                 continue
             card_packages.append(package)
         if not card_packages and card_name not in build_card_names:
@@ -643,6 +667,7 @@ def _resolve_manifest_metadata(
             orchestrator_dnf_base,
             releasever,
             build_deps,
+            package_id_by_nevra,
         )
         if not explicit_builder_packages:
             raise ConfigError(f"dnf did not resolve build-deps for {card_name}")
@@ -665,6 +690,7 @@ def _resolve_manifest_metadata(
                     spec_scan_dir,
                     spec_paths,
                     target,
+                    package_id_by_nevra,
                 )
                 spec_builder_package_list.extend(target_builder_packages)
                 if target != arch:
@@ -678,6 +704,7 @@ def _resolve_manifest_metadata(
                             releasever,
                             target_builder_packages,
                             target,
+                            package_id_by_nevra,
                         )
                     )
             spec_builder_packages = _unique_packages(tuple(spec_builder_package_list))
@@ -691,16 +718,19 @@ def _resolve_manifest_metadata(
             orchestrator_dnf_base,
             releasever,
             builder_package_requests,
+            package_id_by_nevra,
         )
         if not builder_packages:
             raise ConfigError(f"dnf did not resolve builder packages for {card_name}")
         builder_package_map[card_name] = builder_packages
         if card_name in card_specs:
-            declared_packages = []
+            declared_package_ids = []
             for spec in card_specs[card_name]:
-                declared_packages.extend(_spec_packages_for_arch(spec, arch))
-            build_declared_package_map[card_name] = _unique_packages(
-                tuple(declared_packages)
+                declared_package_ids.extend(
+                    _package_request_ids(_spec_packages_for_arch(spec, arch), arch)
+                )
+            build_declared_package_map[card_name] = tuple(
+                dict.fromkeys(declared_package_ids)
             )
         builder_hash = _nevra_hash(builder_packages)
         builder_image = _local_image(
@@ -780,6 +810,10 @@ def _resolve_manifest_metadata(
             if block_name != "common"
         ),
         card_resolutions=tuple(zip(card_names, card_resolutions)),
+        package_ids=tuple(
+            (package, package_id[0], package_id[1])
+            for package, package_id in sorted(package_id_by_nevra.items())
+        ),
         package_images=tuple(
             PackageImagePlan(
                 block=block_name,
@@ -795,7 +829,7 @@ def _resolve_manifest_metadata(
                 image=build_images_by_block[block_name],
                 builder_image=builder_images[block_name],
                 builder_packages=builder_package_map[block_name],
-                declared_packages=build_declared_package_map.get(
+                declared_package_ids=build_declared_package_map.get(
                     block_name, tuple()
                 ),
             )
@@ -1245,26 +1279,28 @@ LUDOS_BOOTSTRAP
     card_packages = dict(metadata.card_packages)
     card_resolutions = dict(metadata.card_resolutions)
     postprocess_blocks = dict(metadata.postprocess_blocks)
-    built_package_names_by_block = {
-        plan.block: {
-            _package_name_from_nevra(package)
-            for package in plan.declared_packages
-        }
+    package_id_by_nevra = {
+        package: (name, arch)
+        for package, name, arch in metadata.package_ids
+    }
+    built_package_ids_by_block = {
+        plan.block: set(plan.declared_package_ids)
         for plan in metadata.build_images
     }
     install_steps = []
     postprocess_steps = []
 
     if mode == "combined":
-        all_built_package_names = set().union(
-            *built_package_names_by_block.values()
-        ) if built_package_names_by_block else set()
+        all_built_package_ids = set().union(
+            *built_package_ids_by_block.values()
+        ) if built_package_ids_by_block else set()
         install_paths = _rpm_paths_for_packages(
             "/rpms/common",
             tuple(
                 package
                 for package in metadata.common_packages
-                if _package_name_from_nevra(package) not in all_built_package_names
+                if _resolved_package_id(package_id_by_nevra, package)
+                not in all_built_package_ids
             ),
         )
         mounts = [("type=bind", f"from={common_stage}", "source=/rpms", "target=/rpms/common", "ro")]
@@ -1320,7 +1356,7 @@ LUDOS_BOOTSTRAP
         installed_common = set(metadata.bootstrap_packages)
         common_set = set(metadata.common_packages)
         for card_name in metadata.card_order:
-            card_built_package_names = built_package_names_by_block.get(card_name, set())
+            card_built_package_ids = built_package_ids_by_block.get(card_name, set())
             mounts = [
                 (
                     "type=bind",
@@ -1334,14 +1370,15 @@ LUDOS_BOOTSTRAP
                 package
                 for package in card_resolutions.get(card_name, tuple())
                 if package in common_set and package not in installed_common
-                and _package_name_from_nevra(package)
-                not in card_built_package_names
+                and _resolved_package_id(package_id_by_nevra, package)
+                not in card_built_package_ids
             )
             installed_common.update(
                 package
                 for package in card_resolutions.get(card_name, tuple())
                 if package in common_set
-                and _package_name_from_nevra(package) in card_built_package_names
+                and _resolved_package_id(package_id_by_nevra, package)
+                in card_built_package_ids
             )
             installed_common.update(common_needed)
             install_paths = _rpm_paths_for_packages("/rpms/common", common_needed)
@@ -1926,6 +1963,7 @@ def _resolve_packages(
     orchestrator_dnf_base: list[str],
     releasever: str,
     packages: tuple[str, ...],
+    package_id_by_nevra: dict[str, tuple[str, str]],
 ) -> tuple[str, ...]:
     transaction_preview = subprocess.run(
         [
@@ -1952,7 +1990,9 @@ def _resolve_packages(
     if transaction_preview.returncode not in (0, 1):
         detail = "\n".join(output.splitlines()[-20:])
         raise ConfigError(f"dnf did not resolve packages:\n{detail}")
-    return _parse_resolved_packages(output)
+    entries = _parse_resolved_package_entries(output, include_dependencies=True)
+    package_id_by_nevra.update(entries)
+    return tuple(package for package, _package_id in entries)
 
 
 def _parse_resolved_packages(output: str) -> tuple[str, ...]:
@@ -1963,6 +2003,18 @@ def _parse_resolved_packages_from_sections(
     output: str,
     include_dependencies: bool,
 ) -> tuple[str, ...]:
+    return tuple(
+        package
+        for package, _package_id in _parse_resolved_package_entries(
+            output, include_dependencies
+        )
+    )
+
+
+def _parse_resolved_package_entries(
+    output: str,
+    include_dependencies: bool,
+) -> tuple[tuple[str, tuple[str, str]], ...]:
     resolved_packages = []
     in_install_section = False
     for line in output.splitlines():
@@ -1986,7 +2038,7 @@ def _parse_resolved_packages_from_sections(
         if len(fields) < 4:
             continue
         package, arch, version = fields[:3]
-        resolved_packages.append(f"{package}-{version}.{arch}")
+        resolved_packages.append((f"{package}-{version}.{arch}", (package, arch)))
     return tuple(resolved_packages)
 
 
@@ -2789,19 +2841,41 @@ def _packages_for_arch(
     return tuple(dict.fromkeys(packages))
 
 
-def _locally_built_package_names_by_card(
+def _locally_built_package_ids_by_card(
     card_specs: dict[str, tuple[SpecBuild, ...]],
     arch: str,
-) -> dict[str, set[str]]:
-    names_by_card = {}
+) -> dict[str, set[tuple[str, str]]]:
+    ids_by_card = {}
     for card_name, specs in card_specs.items():
-        names = set()
+        package_ids = set()
         for spec in specs:
-            for package in _spec_packages_for_arch(spec, arch):
-                names.add(_package_name_from_nevra(package))
-        if names:
-            names_by_card[card_name] = names
-    return names_by_card
+            package_ids.update(_package_request_ids(_spec_packages_for_arch(spec, arch), arch))
+        if package_ids:
+            ids_by_card[card_name] = package_ids
+    return ids_by_card
+
+
+def _package_request_ids(
+    packages: tuple[str, ...],
+    default_arch: str,
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        dict.fromkeys(
+            package_id
+            for package in packages
+            for package_id in _package_request_ids_one(package, default_arch)
+        )
+    )
+
+
+def _package_request_ids_one(
+    package: str,
+    default_arch: str,
+) -> tuple[tuple[str, str], ...]:
+    name, separator, suffix = package.rpartition(".")
+    if separator and suffix in RPM_ARCH_SUFFIXES:
+        return ((name, suffix),)
+    return ((package, default_arch), (package, "noarch"))
 
 
 def _spec_build_targets(packages: tuple[str, ...], arch: str) -> tuple[str, ...]:
@@ -2830,6 +2904,8 @@ def _resolve_spec_build_requires(
     workspace_dir: Path,
     spec_paths: tuple[Path, ...],
     arch: str,
+    package_id_by_nevra: dict[str, tuple[str, str]],
+    *,
     include_dependencies: bool = True,
 ) -> tuple[str, ...]:
     if not spec_paths:
@@ -2873,7 +2949,9 @@ def _resolve_spec_build_requires(
     if transaction_preview.returncode not in (0, 1):
         detail = "\n".join(output.splitlines()[-20:])
         raise ConfigError(f"dnf did not resolve spec BuildRequires:\n{detail}")
-    return _parse_resolved_packages_from_sections(output, include_dependencies)
+    entries = _parse_resolved_package_entries(output, include_dependencies)
+    package_id_by_nevra.update(entries)
+    return tuple(package for package, _package_id in entries)
 
 
 def _resolve_package_arch_variants(
@@ -2881,11 +2959,12 @@ def _resolve_package_arch_variants(
     releasever: str,
     packages: tuple[str, ...],
     arch: str,
+    package_id_by_nevra: dict[str, tuple[str, str]],
 ) -> tuple[str, ...]:
     candidates = tuple(
         _package_with_arch(package, arch)
         for package in packages
-        if _is_arch_variant_candidate(package, arch)
+        if _is_arch_variant_candidate(package_id_by_nevra, package, arch)
     )
     if not candidates:
         return tuple()
@@ -2902,7 +2981,7 @@ def _resolve_package_arch_variants(
             f"--releasever={releasever}",
             "repoquery",
             "--queryformat",
-            "%{name}-%{evr}.%{arch}\\n",
+            "%{name}\\t%{name}-%{evr}.%{arch}\\n",
             *candidates,
         ],
         check=False,
@@ -2919,8 +2998,12 @@ def _resolve_package_arch_variants(
         stripped = line.strip()
         if not stripped or stripped.endswith(":") or " " in stripped:
             continue
-        if stripped.endswith(f".{arch}"):
-            variants.append(stripped)
+        if "\t" not in stripped:
+            continue
+        name, package = stripped.split("\t", 1)
+        if package.endswith(f".{arch}"):
+            package_id_by_nevra[package] = (name, arch)
+            variants.append(package)
     return _unique_packages(tuple(variants))
 
 
@@ -2928,23 +3011,27 @@ def _package_with_arch(package: str, arch: str) -> str:
     return re.sub(r"\.[^.]+$", f".{arch}", package)
 
 
-def _is_arch_variant_candidate(package: str, arch: str) -> bool:
+def _is_arch_variant_candidate(
+    package_id_by_nevra: dict[str, tuple[str, str]],
+    package: str,
+    arch: str,
+) -> bool:
     if package.endswith(f".{arch}") or package.endswith(".noarch"):
         return False
-    name = _package_name_from_nevra(package)
+    name, _package_arch = _resolved_package_id(package_id_by_nevra, package)
     if name in {"libatomic", "libgcc"}:
         return True
     return name.endswith("-devel") or name.endswith("-static")
 
 
-def _package_name_from_nevra(package: str) -> str:
-    match = re.match(r"^(?P<name>.+)-\d*:.+\.[^.]+$", package)
-    if match:
-        return match.group("name")
-    match = re.match(r"^(?P<name>.+)-[^-]+-[^-]+\.[^.]+$", package)
-    if match:
-        return match.group("name")
-    return package.rsplit(".", 1)[0]
+def _resolved_package_id(
+    package_id_by_nevra: dict[str, tuple[str, str]],
+    package: str,
+) -> tuple[str, str]:
+    try:
+        return package_id_by_nevra[package]
+    except KeyError as exc:
+        raise ConfigError(f"missing package mapping for resolved package: {package}") from exc
 
 
 def _dnf_base_with_volume(
