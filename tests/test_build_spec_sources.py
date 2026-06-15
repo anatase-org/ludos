@@ -5,11 +5,15 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ludos.build import (
+    StagedSpec,
     _card_specs_hash,
     _git_source_cache_key,
+    _resolve_staged_spec_builder_packages,
     _stage_card_specs,
+    _specs_build_script,
 )
 from ludos.model import Card, SpecBuild
 
@@ -310,6 +314,93 @@ class GitSpecSourceTests(unittest.TestCase):
 
     def _git(self, args: list[str], *, cwd: Path) -> None:
         subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+class SpecBuildRequiresResolutionTests(unittest.TestCase):
+    def test_i686_build_script_exports_multilib_cxx_include_path(self) -> None:
+        workspace_dir = Path("/workspace")
+        staged_specs = (
+            StagedSpec(
+                spec=SpecBuild(spec="mesa.spec"),
+                spec_path=workspace_dir / "mesa.spec",
+                source_dir=workspace_dir,
+                packages=("mesa-libGL.i686",),
+                targets=("i686",),
+            ),
+        )
+
+        script = _specs_build_script(staged_specs, workspace_dir, "x86_64")
+
+        self.assertIn("i686-redhat-linux", script)
+        self.assertIn("export CPLUS_INCLUDE_PATH=", script)
+
+    def test_cross_arch_variants_are_discovered_from_builddep_dependencies(self) -> None:
+        package_id_by_nevra: dict[str, tuple[str, str]] = {}
+        workspace_dir = Path("/workspace")
+        staged_specs = (
+            StagedSpec(
+                spec=SpecBuild(spec="mesa.spec"),
+                spec_path=workspace_dir / "mesa.spec",
+                source_dir=workspace_dir,
+                packages=("mesa-libGL.i686",),
+                targets=("i686",),
+            ),
+        )
+        build_requires_include_dependencies = []
+
+        def build_requires(*args, include_dependencies: bool) -> tuple[str, ...]:
+            build_requires_include_dependencies.append(include_dependencies)
+            package_id_by_nevra[
+                "cargo-rpm-macros-0:28.4-3.fc44.noarch"
+            ] = ("cargo-rpm-macros", "noarch")
+            if include_dependencies:
+                package_id_by_nevra[
+                    "rust-std-static-0:1.94.1-1.fc44.x86_64"
+                ] = ("rust-std-static", "x86_64")
+                package_id_by_nevra[
+                    "libstdc++-devel-0:16.0.1-0.10.fc44.x86_64"
+                ] = ("libstdc++-devel", "x86_64")
+                return (
+                    "cargo-rpm-macros-0:28.4-3.fc44.noarch",
+                    "libstdc++-devel-0:16.0.1-0.10.fc44.x86_64",
+                    "rust-std-static-0:1.94.1-1.fc44.x86_64",
+                )
+            return ("cargo-rpm-macros-0:28.4-3.fc44.noarch",)
+
+        def arch_variants(*args) -> tuple[str, ...]:
+            packages = args[2]
+            self.assertIn("libstdc++-devel-0:16.0.1-0.10.fc44.x86_64", packages)
+            self.assertIn("rust-std-static-0:1.94.1-1.fc44.x86_64", packages)
+            return (
+                "libstdc++-devel-0:16.0.1-0.10.fc44.i686",
+                "rust-std-static-0:1.94.1-1.fc44.i686",
+            )
+
+        with (
+            patch("ludos.build._resolve_spec_build_requires", build_requires),
+            patch("ludos.build._resolve_package_arch_variants", arch_variants),
+        ):
+            packages = _resolve_staged_spec_builder_packages(
+                [],
+                "44",
+                workspace_dir,
+                staged_specs,
+                "x86_64",
+                package_id_by_nevra,
+                Path("/cache"),
+                (),
+                card_name="mesa",
+            )
+
+        self.assertEqual(build_requires_include_dependencies, [False, True])
+        self.assertEqual(
+            packages,
+            (
+                "cargo-rpm-macros-0:28.4-3.fc44.noarch",
+                "libstdc++-devel-0:16.0.1-0.10.fc44.i686",
+                "rust-std-static-0:1.94.1-1.fc44.i686",
+            ),
+        )
 
 
 if __name__ == "__main__":

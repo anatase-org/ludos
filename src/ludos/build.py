@@ -714,38 +714,17 @@ def _resolve_manifest_metadata(
                 cache_only=True,
                 source_revisions=spec_source_revisions.get(card_name, tuple()),
             )
-            spec_builder_package_list = []
-            for target, spec_paths in _spec_paths_by_build_target(staged_specs):
-                log(f"Resolving spec BuildRequires for card: {card_name} ({target})")
-                target_builder_packages = _resolve_spec_build_requires(
-                    orchestrator_dnf_base,
-                    releasever,
-                    spec_scan_dir,
-                    spec_paths,
-                    target,
-                    package_id_by_nevra,
-                    dnf_resolve_dir,
-                    tuple(repo_images),
-                    include_dependencies=False,
-                )
-                spec_builder_package_list.extend(target_builder_packages)
-                if target != arch:
-                    log(
-                        f"Resolving spec BuildRequires arch variants for card: "
-                        f"{card_name} ({target})"
-                    )
-                    spec_builder_package_list.extend(
-                        _resolve_package_arch_variants(
-                            orchestrator_dnf_base,
-                            releasever,
-                            target_builder_packages,
-                            target,
-                            package_id_by_nevra,
-                            dnf_resolve_dir,
-                            tuple(repo_images),
-                        )
-                    )
-            spec_builder_packages = _unique_packages(tuple(spec_builder_package_list))
+            spec_builder_packages = _resolve_staged_spec_builder_packages(
+                orchestrator_dnf_base,
+                releasever,
+                spec_scan_dir,
+                staged_specs,
+                arch,
+                package_id_by_nevra,
+                dnf_resolve_dir,
+                tuple(repo_images),
+                card_name=card_name,
+            )
         builder_package_requests = _unique_packages(
             (
                 *build_deps,
@@ -2065,6 +2044,9 @@ def _resolve_packages(
         detail = "\n".join(output.splitlines()[-20:])
         raise ConfigError(f"dnf did not resolve packages:\n{detail}")
     entries = _parse_resolved_package_entries(output, include_dependencies=True)
+    if not entries:
+        detail = "\n".join(output.splitlines()[-20:])
+        raise ConfigError(f"dnf did not resolve packages:\n{detail}")
     package_id_by_nevra.update(entries)
     return tuple(package for package, _package_id in entries)
 
@@ -2931,6 +2913,63 @@ def _spec_paths_by_build_target(
     return tuple((target, tuple(paths)) for target, paths in targets.items())
 
 
+def _resolve_staged_spec_builder_packages(
+    orchestrator_dnf_base: list[str],
+    releasever: str,
+    workspace_dir: Path,
+    staged_specs: tuple[StagedSpec, ...],
+    arch: str,
+    package_id_by_nevra: dict[str, tuple[str, str]],
+    resolve_cache_dir: Path,
+    repo_images: tuple[str, ...],
+    *,
+    card_name: str,
+) -> tuple[str, ...]:
+    packages = []
+    for target, spec_paths in _spec_paths_by_build_target(staged_specs):
+        log(f"Resolving spec BuildRequires for card: {card_name} ({target})")
+        target_builder_packages = _resolve_spec_build_requires(
+            orchestrator_dnf_base,
+            releasever,
+            workspace_dir,
+            spec_paths,
+            target,
+            package_id_by_nevra,
+            resolve_cache_dir,
+            repo_images,
+            include_dependencies=False,
+        )
+        packages.extend(target_builder_packages)
+        if target != arch:
+            target_builder_closure = _resolve_spec_build_requires(
+                orchestrator_dnf_base,
+                releasever,
+                workspace_dir,
+                spec_paths,
+                target,
+                package_id_by_nevra,
+                resolve_cache_dir,
+                repo_images,
+                include_dependencies=True,
+            )
+            log(
+                f"Resolving spec BuildRequires arch variants for card: "
+                f"{card_name} ({target})"
+            )
+            packages.extend(
+                _resolve_package_arch_variants(
+                    orchestrator_dnf_base,
+                    releasever,
+                    target_builder_closure,
+                    target,
+                    package_id_by_nevra,
+                    resolve_cache_dir,
+                    repo_images,
+                )
+            )
+    return _unique_packages(tuple(packages))
+
+
 def _resolve_spec_build_requires(
     orchestrator_dnf_base: list[str],
     releasever: str,
@@ -3202,6 +3241,10 @@ def _specs_build_script(
                 "    export PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/share/pkgconfig",
                 "    export PKG_CONFIG_PATH=",
                 "    export BINDGEN_EXTRA_CLANG_ARGS=\"${BINDGEN_EXTRA_CLANG_ARGS:+$BINDGEN_EXTRA_CLANG_ARGS }-m32\"",
+                "    cxx_target_include=$(find /usr/include/c++ -mindepth 2 -maxdepth 2 -type d -path '*/i686-redhat-linux' -print -quit 2>/dev/null || true)",
+                "    if [ -n \"$cxx_target_include\" ]; then",
+                "      export CPLUS_INCLUDE_PATH=\"$cxx_target_include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}\"",
+                "    fi",
                 "    export LDFLAGS=\"${LDFLAGS:+$LDFLAGS }-Wl,--no-warn-rwx-segments\"",
                 "    export LUDOS_MESON_CROSS_FILE=\"$topdir/ludos-meson-i686-cross.ini\"",
                 "    if [ -x /usr/lib/llvm22/bin/llvm-config ]; then",
