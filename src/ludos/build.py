@@ -887,6 +887,7 @@ def build_package_card_images(
     cache_only: bool = False,
 ) -> None:
     created: set[str] = set()
+    built_builders: set[str] = set()
     for manifest in metadata:
         for plan in manifest.package_images:
             if not plan.packages or plan.image in created:
@@ -911,6 +912,40 @@ def build_package_card_images(
             )
             created.add(plan.image)
 
+        for plan in manifest.build_images:
+            if plan.builder_image in built_builders:
+                continue
+            if _image_exists(manifest.podman, plan.builder_image):
+                log(f"Reusing builder image: {plan.builder_image}")
+                built_builders.add(plan.builder_image)
+                continue
+            if cache_only:
+                raise ConfigError(f"builder image is not cached: {plan.builder_image}")
+
+            builder_rpm_files = _download_block_packages(
+                list(manifest.orchestrator_dnf_base),
+                plan.builder_packages,
+                package_dir=Path(manifest.package_dir),
+                resolve_dependencies=True,
+                releasever=manifest.releasever,
+            )
+            log(f"Creating builder image: {plan.builder_image}")
+            _create_builder_image(
+                podman=manifest.podman,
+                buildah=_require_buildah(manifest.buildah),
+                orchestrator=manifest.orchestrator,
+                root_dir=Path(manifest.root_dir),
+                repo_dir=Path(manifest.repo_dir),
+                dnf_cache_dir=Path(manifest.dnf_cache_dir),
+                dnf_persist_dir=Path(manifest.dnf_persist_dir),
+                dnf_log_dir=Path(manifest.dnf_log_dir),
+                image=plan.builder_image,
+                package_dir=Path(manifest.package_dir),
+                rpm_files=builder_rpm_files,
+                releasever=manifest.releasever,
+            )
+            built_builders.add(plan.builder_image)
+
 
 def build_build_images(
     metadata: tuple[ResolvedBuildMetadata, ...],
@@ -922,7 +957,6 @@ def build_build_images(
     images_by_block: dict[str, str] = {}
     rpm_files_by_block: dict[str, tuple[str, ...]] = {}
     file_blocks: set[str] = set()
-    built_builders: set[str] = set()
 
     for manifest in metadata:
         card_envs = {
@@ -938,38 +972,6 @@ def build_build_images(
             if target_set and plan.block not in target_set and plan.image not in target_set:
                 continue
 
-            if plan.builder_image not in built_builders:
-                if _image_exists(manifest.podman, plan.builder_image):
-                    log(f"Reusing builder image: {plan.builder_image}")
-                elif cache_only:
-                    raise ConfigError(
-                        f"builder image is not cached: {plan.builder_image}"
-                    )
-                else:
-                    builder_rpm_files = _download_block_packages(
-                        list(manifest.orchestrator_dnf_base),
-                        plan.builder_packages,
-                        package_dir=Path(manifest.package_dir),
-                        resolve_dependencies=True,
-                        releasever=manifest.releasever,
-                    )
-                    log(f"Creating builder image: {plan.builder_image}")
-                    _create_builder_image(
-                        podman=manifest.podman,
-                        buildah=_require_buildah(manifest.buildah),
-                        orchestrator=manifest.orchestrator,
-                        root_dir=Path(manifest.root_dir),
-                        repo_dir=Path(manifest.repo_dir),
-                        dnf_cache_dir=Path(manifest.dnf_cache_dir),
-                        dnf_persist_dir=Path(manifest.dnf_persist_dir),
-                        dnf_log_dir=Path(manifest.dnf_log_dir),
-                        image=plan.builder_image,
-                        package_dir=Path(manifest.package_dir),
-                        rpm_files=builder_rpm_files,
-                        releasever=manifest.releasever,
-                    )
-                built_builders.add(plan.builder_image)
-
             if _image_exists(manifest.podman, plan.image):
                 log(f"Reusing build output image: {plan.image}")
                 images_by_block[plan.block] = plan.image
@@ -981,6 +983,11 @@ def build_build_images(
                 continue
             if cache_only:
                 raise ConfigError(f"build output image is not cached: {plan.image}")
+            if not _image_exists(manifest.podman, plan.builder_image):
+                raise ConfigError(
+                    f"builder image is missing: {plan.builder_image}; "
+                    "create card images before running builds"
+                )
 
             card_env = dict(card_envs[plan.block])
             if plan.block in card_prepare_scripts and plan.block not in card_specs:
