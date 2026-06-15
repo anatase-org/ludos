@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--no-ccache",
         action="store_true",
-        help="Do not mount or enable the shared ccache directory for builder runs.",
+        help="Do not mount or enable shared ccache/sccache directories for builder runs.",
     )
     build.set_defaults(func=build_command)
 

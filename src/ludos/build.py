@@ -25,6 +25,7 @@ from .model import ConfigError, SpecBuild, validate_manifest
 HASH_LENGTH = 8
 CCACHE_CONTAINER_DIR = "/cache/ccache"
 CCACHE_PATH_PREFIX = "/usr/lib64/ccache:/usr/lib/ccache"
+SCCACHE_CONTAINER_DIR = f"{CCACHE_CONTAINER_DIR}/sccache"
 RPM_ARCH_SUFFIXES = frozenset(
     (
         "aarch64",
@@ -2443,14 +2444,25 @@ def _add_ccache_builder_options(command: list[str], ccache_dir: Path | None) -> 
 
     command.extend(["--volume", f"{ccache_dir}:{CCACHE_CONTAINER_DIR}"])
     command.extend(["--env", f"CCACHE_DIR={CCACHE_CONTAINER_DIR}"])
+    command.extend(["--env", f"SCCACHE_DIR={SCCACHE_CONTAINER_DIR}"])
     if "CCACHE_MAXSIZE" in os.environ:
         command.extend(["--env", f"CCACHE_MAXSIZE={os.environ['CCACHE_MAXSIZE']}"])
+    if "SCCACHE_CACHE_SIZE" in os.environ:
+        command.extend(
+            ["--env", f"SCCACHE_CACHE_SIZE={os.environ['SCCACHE_CACHE_SIZE']}"]
+        )
 
 
 def _ccache_build_prelude(ccache_dir: Path | None) -> str:
     if ccache_dir is None:
         return ""
-    return f"export PATH={CCACHE_PATH_PREFIX}:$PATH\n"
+    return (
+        f"export PATH={CCACHE_PATH_PREFIX}:$PATH\n"
+        f"mkdir -p {shlex.quote(SCCACHE_CONTAINER_DIR)}\n"
+        "if command -v sccache >/dev/null 2>&1; then\n"
+        "  export RUSTC_WRAPPER=sccache\n"
+        "fi\n"
+    )
 
 
 def _run_card_build(

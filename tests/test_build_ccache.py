@@ -9,16 +9,21 @@ from ludos.__main__ import build_parser
 from ludos.build import (
     CCACHE_CONTAINER_DIR,
     CCACHE_PATH_PREFIX,
+    SCCACHE_CONTAINER_DIR,
     _add_ccache_builder_options,
     _ccache_build_prelude,
 )
 
 
 class BuildCcacheTests(unittest.TestCase):
-    def test_builder_options_mount_ccache_and_pass_maxsize(self) -> None:
+    def test_builder_options_mount_compiler_caches_and_pass_maxsize(self) -> None:
         command = ["podman", "run"]
 
-        with patch.dict(os.environ, {"CCACHE_MAXSIZE": "20G"}, clear=True):
+        with patch.dict(
+            os.environ,
+            {"CCACHE_MAXSIZE": "20G", "SCCACHE_CACHE_SIZE": "30G"},
+            clear=True,
+        ):
             _add_ccache_builder_options(command, Path("/tmp/cache/ccache"))
 
         self.assertEqual(
@@ -31,7 +36,11 @@ class BuildCcacheTests(unittest.TestCase):
                 "--env",
                 f"CCACHE_DIR={CCACHE_CONTAINER_DIR}",
                 "--env",
+                f"SCCACHE_DIR={SCCACHE_CONTAINER_DIR}",
+                "--env",
                 "CCACHE_MAXSIZE=20G",
+                "--env",
+                "SCCACHE_CACHE_SIZE=30G",
             ],
         )
 
@@ -50,6 +59,8 @@ class BuildCcacheTests(unittest.TestCase):
                 f"/tmp/cache/ccache:{CCACHE_CONTAINER_DIR}",
                 "--env",
                 f"CCACHE_DIR={CCACHE_CONTAINER_DIR}",
+                "--env",
+                f"SCCACHE_DIR={SCCACHE_CONTAINER_DIR}",
             ],
         )
 
@@ -64,7 +75,13 @@ class BuildCcacheTests(unittest.TestCase):
     def test_ccache_prelude_prepends_wrapper_dirs(self) -> None:
         self.assertEqual(
             _ccache_build_prelude(Path("/tmp/cache/ccache")),
-            f"export PATH={CCACHE_PATH_PREFIX}:$PATH\n",
+            (
+                f"export PATH={CCACHE_PATH_PREFIX}:$PATH\n"
+                f"mkdir -p {SCCACHE_CONTAINER_DIR}\n"
+                "if command -v sccache >/dev/null 2>&1; then\n"
+                "  export RUSTC_WRAPPER=sccache\n"
+                "fi\n"
+            ),
         )
 
     def test_build_parser_defaults_to_ccache_enabled(self) -> None:
