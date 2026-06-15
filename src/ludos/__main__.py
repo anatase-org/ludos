@@ -51,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Build the final image with combined package and postprocess layers.",
     )
+    build.add_argument(
+        "--no-ccache",
+        action="store_true",
+        help="Do not mount or enable the shared ccache directory for builder runs.",
+    )
     build.set_defaults(func=build_command)
 
     validate = subcommands.add_parser("validate", help="Validate Ludos config files.")
@@ -225,11 +230,12 @@ def build_command(args: argparse.Namespace) -> int:
 
     result = build_manifest(
         args.manifest,
-        args.cards_dir,
-        args.cache_dir,
-        args.version,
-        args.cache,
-        args.ci,
+        cards_dir=args.cards_dir,
+        cache_dir=args.cache_dir,
+        cache_version=args.version,
+        cache_only=args.cache,
+        ci=args.ci,
+        ccache=not args.no_ccache,
     )
     log(
         f"Built {result.output_image} for {result.image} on {result.distro} "

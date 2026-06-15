@@ -23,6 +23,8 @@ from .model import ConfigError, SpecBuild, validate_manifest
 
 
 HASH_LENGTH = 8
+CCACHE_CONTAINER_DIR = "/cache/ccache"
+CCACHE_PATH_PREFIX = "/usr/lib64/ccache:/usr/lib/ccache"
 RPM_ARCH_SUFFIXES = frozenset(
     (
         "aarch64",
@@ -112,6 +114,7 @@ class ResolvedBuildMetadata:
     card_build_dir: str
     spec_source_cache_dir: str
     build_artifact_cache_dir: str
+    ccache_dir: str | None
     dnf_cache_dir: str
     dnf_persist_dir: str
     dnf_log_dir: str
@@ -172,6 +175,7 @@ def build_manifest(
     cache_version: str | None = None,
     cache_only: bool = False,
     ci: bool = False,
+    ccache: bool = True,
 ) -> BuildResult:
     metadata = resolve_build_manifests(
         (manifest_path,),
@@ -179,6 +183,7 @@ def build_manifest(
         cache_dir=cache_dir,
         cache_version=cache_version,
         cache_only=cache_only,
+        ccache=ccache,
     )
     build_package_card_images(metadata, cache_only=cache_only)
     build_outputs = build_build_images(metadata, cache_only=cache_only)
@@ -195,6 +200,7 @@ def resolve_build_manifests(
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
+    ccache: bool = True,
 ) -> tuple[ResolvedBuildMetadata, ...]:
     if not manifest_paths:
         raise ConfigError("at least one manifest is required")
@@ -205,6 +211,7 @@ def resolve_build_manifests(
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
+            ccache=ccache,
         )
         for manifest_path in manifest_paths
     )
@@ -217,6 +224,7 @@ def _resolve_manifest_metadata(
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
+    ccache: bool = True,
 ) -> ResolvedBuildMetadata:
     log(f"Validating manifest: {manifest_path}")
     validation = validate_manifest(manifest_path, cards_dir)
@@ -282,6 +290,7 @@ def _resolve_manifest_metadata(
     dnf_resolve_dir = dnf_dir / "resolves"
     build_artifact_cache_dir = distro_cache_dir / "build-artifacts"
     spec_source_cache_dir = cache_dir / "spec-sources" / "git"
+    ccache_dir = cache_dir / "ccache" if ccache else None
 
     distro_cache_dir.mkdir(parents=True, exist_ok=True)
     package_dir.mkdir(parents=True, exist_ok=True)
@@ -289,6 +298,8 @@ def _resolve_manifest_metadata(
     card_build_dir.mkdir(parents=True, exist_ok=True)
     build_artifact_cache_dir.mkdir(parents=True, exist_ok=True)
     spec_source_cache_dir.mkdir(parents=True, exist_ok=True)
+    if ccache_dir is not None:
+        ccache_dir.mkdir(parents=True, exist_ok=True)
     repo_dir.mkdir(parents=True, exist_ok=True)
     dnf_cache_dir.mkdir(parents=True, exist_ok=True)
     dnf_persist_dir.mkdir(parents=True, exist_ok=True)
@@ -861,6 +872,7 @@ def _resolve_manifest_metadata(
         card_build_dir=str(card_build_dir),
         spec_source_cache_dir=str(spec_source_cache_dir),
         build_artifact_cache_dir=str(build_artifact_cache_dir),
+        ccache_dir=str(ccache_dir) if ccache_dir is not None else None,
         dnf_cache_dir=str(dnf_cache_dir),
         dnf_persist_dir=str(dnf_persist_dir),
         dnf_log_dir=str(dnf_log_dir),
@@ -1070,6 +1082,11 @@ def build_build_images(
                     build_dir=Path(manifest.card_build_dir) / _identifier(plan.block),
                     artifact_cache_dir=Path(manifest.build_artifact_cache_dir)
                     / _identifier(plan.block),
+                    ccache_dir=(
+                        Path(manifest.ccache_dir)
+                        if manifest.ccache_dir is not None
+                        else None
+                    ),
                     card_name=plan.block,
                     card_source=card_sources[plan.block],
                     card_env=card_env,
@@ -1086,6 +1103,11 @@ def build_build_images(
                     build_dir=Path(manifest.card_build_dir) / _identifier(plan.block),
                     artifact_cache_dir=Path(manifest.build_artifact_cache_dir)
                     / _identifier(plan.block),
+                    ccache_dir=(
+                        Path(manifest.ccache_dir)
+                        if manifest.ccache_dir is not None
+                        else None
+                    ),
                     card_name=plan.block,
                     card_source=card_sources[plan.block],
                     card_env=card_env,
@@ -2404,12 +2426,29 @@ def _run_prepare_block(
         return values
 
 
+def _add_ccache_builder_options(command: list[str], ccache_dir: Path | None) -> None:
+    if ccache_dir is None:
+        return
+
+    command.extend(["--volume", f"{ccache_dir}:{CCACHE_CONTAINER_DIR}"])
+    command.extend(["--env", f"CCACHE_DIR={CCACHE_CONTAINER_DIR}"])
+    if "CCACHE_MAXSIZE" in os.environ:
+        command.extend(["--env", f"CCACHE_MAXSIZE={os.environ['CCACHE_MAXSIZE']}"])
+
+
+def _ccache_build_prelude(ccache_dir: Path | None) -> str:
+    if ccache_dir is None:
+        return ""
+    return f"export PATH={CCACHE_PATH_PREFIX}:$PATH\n"
+
+
 def _run_card_build(
     *,
     podman: str,
     orchestrator: str,
     build_dir: Path,
     artifact_cache_dir: Path,
+    ccache_dir: Path | None,
     card_name: str,
     card_source: Path,
     card_env: dict[str, str],
@@ -2451,11 +2490,12 @@ def _run_card_build(
     ]
     for key, value in sorted(card_env.items()):
         command.extend(["--env", f"{key}={value}"])
+    _add_ccache_builder_options(command, ccache_dir)
     command.extend(["--env", "PS4=+ "])
     command.extend([orchestrator, "/bin/sh", "-ex", "-s"])
     returncode, _output = _run_streamed_command(
         command,
-        input_text=build_script + "\n",
+        input_text=_ccache_build_prelude(ccache_dir) + build_script + "\n",
         line_rewriter=_workspace_path_rewriter(
             source_dir=card_base_dir,
             workspace_dir=workspace_dir,
@@ -2493,6 +2533,7 @@ def _run_specs_build(
     orchestrator: str,
     build_dir: Path,
     artifact_cache_dir: Path,
+    ccache_dir: Path | None,
     card_name: str,
     card_source: Path,
     card_env: dict[str, str],
@@ -2532,6 +2573,7 @@ def _run_specs_build(
             rpm_dir=rpm_dir,
             files_dir=files_dir,
             artifact_cache_dir=artifact_cache_dir,
+            ccache_dir=ccache_dir,
             card_env=card_env,
             prepare_script=prepare_script,
             card_source=card_source,
@@ -2560,11 +2602,12 @@ def _run_specs_build(
     ]
     for key, value in sorted(card_env.items()):
         command.extend(["--env", f"{key}={value}"])
+    _add_ccache_builder_options(command, ccache_dir)
     command.extend(["--env", "PS4=+ "])
     command.extend([orchestrator, "/bin/sh", "-ex", "-s"])
     returncode, _output = _run_streamed_command(
         command,
-        input_text=build_script,
+        input_text=_ccache_build_prelude(ccache_dir) + build_script,
         line_rewriter=_workspace_path_rewriter(
             source_dir=_card_base_dir(card_source),
             workspace_dir=workspace_dir,
@@ -2596,6 +2639,7 @@ def _run_specs_prepare(
     rpm_dir: Path,
     files_dir: Path,
     artifact_cache_dir: Path,
+    ccache_dir: Path | None,
     card_env: dict[str, str],
     prepare_script: str,
     card_source: Path,
@@ -2621,12 +2665,13 @@ def _run_specs_prepare(
     ]
     for key, value in sorted(card_env.items()):
         command.extend(["--env", f"{key}={value}"])
+    _add_ccache_builder_options(command, ccache_dir)
     command.extend(["--env", "LUDOS_ENV=/workspace/.ludos-env"])
     command.extend(["--env", "PS4=+ "])
     command.extend([orchestrator, "/bin/sh", "-ex", "-s"])
     returncode, _output = _run_streamed_command(
         command,
-        input_text=prepare_script + "\n",
+        input_text=_ccache_build_prelude(ccache_dir) + prepare_script + "\n",
         line_rewriter=_workspace_path_rewriter(
             source_dir=_card_base_dir(card_source),
             workspace_dir=workspace_dir,
