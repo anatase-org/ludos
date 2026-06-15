@@ -702,6 +702,8 @@ def _resolve_manifest_metadata(
                     spec_paths,
                     target,
                     package_id_by_nevra,
+                    dnf_resolve_dir,
+                    tuple(repo_images),
                 )
                 spec_builder_package_list.extend(target_builder_packages)
                 if target != arch:
@@ -716,6 +718,8 @@ def _resolve_manifest_metadata(
                             target_builder_packages,
                             target,
                             package_id_by_nevra,
+                            dnf_resolve_dir,
+                            tuple(repo_images),
                         )
                     )
             spec_builder_packages = _unique_packages(tuple(spec_builder_package_list))
@@ -2014,9 +2018,10 @@ def _run_cached_transaction_preview(
     cmd: list[str],
     resolve_cache_dir: Path,
     repo_images: tuple[str, ...],
+    extra_hash_inputs: tuple[tuple[str, str], ...] = tuple(),
 ) -> subprocess.CompletedProcess[str]:
     repo_tags = tuple(_image_tag(image) for image in repo_images)
-    cache_key = _resolve_cache_key(cmd, repo_tags)
+    cache_key = _resolve_cache_key(cmd, repo_tags, extra_hash_inputs)
     cache_file = resolve_cache_dir / f"{cache_key}.json"
     if cache_file.exists():
         data = json.loads(cache_file.read_text(encoding="utf-8"))
@@ -2037,6 +2042,7 @@ def _run_cached_transaction_preview(
     payload = {
         "args": cmd,
         "repo_tags": repo_tags,
+        "extra_hash_inputs": extra_hash_inputs,
         "returncode": transaction_preview.returncode,
         "stdout": transaction_preview.stdout,
         "stderr": transaction_preview.stderr,
@@ -2047,10 +2053,15 @@ def _run_cached_transaction_preview(
     return transaction_preview
 
 
-def _resolve_cache_key(cmd: list[str], repo_tags: tuple[str, ...]) -> str:
+def _resolve_cache_key(
+    cmd: list[str],
+    repo_tags: tuple[str, ...],
+    extra_hash_inputs: tuple[tuple[str, str], ...] = tuple(),
+) -> str:
     payload = json.dumps(
         {
             "cmd": cmd,
+            "extra_hash_inputs": extra_hash_inputs,
             "repo_tags": repo_tags,
         },
         sort_keys=True,
@@ -2835,6 +2846,8 @@ def _resolve_spec_build_requires(
     spec_paths: tuple[Path, ...],
     arch: str,
     package_id_by_nevra: dict[str, tuple[str, str]],
+    resolve_cache_dir: Path,
+    repo_images: tuple[str, ...],
     *,
     include_dependencies: bool = True,
 ) -> tuple[str, ...]:
@@ -2849,31 +2862,32 @@ def _resolve_spec_build_requires(
         workspace_dir,
         "/ludos/specs:ro",
     )
-    transaction_preview = subprocess.run(
-        [
-            *dnf_base,
-            "--assumeno",
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--setopt=install_weak_deps=False",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            "--installroot=/ludos/resolve-root",
-            f"--releasever={releasever}",
-            "builddep",
-            "--allowerasing",
-            "--define",
-            f"_target_cpu {arch}",
-            "--define",
-            f"_target {arch}-redhat-linux-gnu",
-            "--spec",
-            *spec_args,
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
+    cmd = [
+        *dnf_base,
+        "--assumeno",
+        "--setopt=reposdir=/ludos/dnf/repos",
+        "--setopt=cachedir=/ludos/dnf/cache",
+        "--setopt=persistdir=/ludos/dnf/persist",
+        "--setopt=logdir=/ludos/dnf/log",
+        "--setopt=install_weak_deps=False",
+        "--disable-repo=*",
+        "--enable-repo=*",
+        "--installroot=/ludos/resolve-root",
+        f"--releasever={releasever}",
+        "builddep",
+        "--allowerasing",
+        "--define",
+        f"_target_cpu {arch}",
+        "--define",
+        f"_target {arch}-redhat-linux-gnu",
+        "--spec",
+        *spec_args,
+    ]
+    transaction_preview = _run_cached_transaction_preview(
+        cmd,
+        resolve_cache_dir,
+        repo_images,
+        _resolve_spec_hash_inputs(workspace_dir, spec_paths),
     )
     output = transaction_preview.stdout + "\n" + transaction_preview.stderr
     if transaction_preview.returncode not in (0, 1):
@@ -2890,6 +2904,8 @@ def _resolve_package_arch_variants(
     packages: tuple[str, ...],
     arch: str,
     package_id_by_nevra: dict[str, tuple[str, str]],
+    resolve_cache_dir: Path,
+    repo_images: tuple[str, ...],
 ) -> tuple[str, ...]:
     candidates = tuple(
         _package_with_arch(package, arch)
@@ -2899,24 +2915,25 @@ def _resolve_package_arch_variants(
     if not candidates:
         return tuple()
 
-    query = subprocess.run(
-        [
-            *orchestrator_dnf_base,
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            f"--releasever={releasever}",
-            "repoquery",
-            "--queryformat",
-            "%{name}\\t%{name}-%{evr}.%{arch}\\n",
-            *candidates,
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
+    cmd = [
+        *orchestrator_dnf_base,
+        "--setopt=reposdir=/ludos/dnf/repos",
+        "--setopt=cachedir=/ludos/dnf/cache",
+        "--setopt=persistdir=/ludos/dnf/persist",
+        "--setopt=logdir=/ludos/dnf/log",
+        "--disable-repo=*",
+        "--enable-repo=*",
+        f"--releasever={releasever}",
+        "repoquery",
+        "--queryformat",
+        "%{name}\\t%{name}-%{evr}.%{arch}\\n",
+        *candidates,
+    ]
+    query = _run_cached_transaction_preview(
+        cmd,
+        resolve_cache_dir,
+        repo_images,
+        _resolve_package_id_hash_inputs(packages, package_id_by_nevra),
     )
     output = query.stdout + "\n" + query.stderr
     if query.returncode != 0:
@@ -2935,6 +2952,37 @@ def _resolve_package_arch_variants(
             package_id_by_nevra[package] = (name, arch)
             variants.append(package)
     return _unique_packages(tuple(variants))
+
+
+def _resolve_spec_hash_inputs(
+    workspace_dir: Path,
+    spec_paths: tuple[Path, ...],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (
+            spec_path.relative_to(workspace_dir).as_posix(),
+            _hash_file(spec_path),
+        )
+        for spec_path in spec_paths
+    )
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _resolve_package_id_hash_inputs(
+    packages: tuple[str, ...],
+    package_id_by_nevra: dict[str, tuple[str, str]],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        ("package-id", f"{package}:{name}:{arch}")
+        for package in packages
+        for name, arch in (package_id_by_nevra.get(package, ("", "")),)
+        if name and arch
+    )
 
 
 def _package_with_arch(package: str, arch: str) -> str:
