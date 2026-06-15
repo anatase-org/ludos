@@ -10,6 +10,7 @@ from .build import build_manifest
 from .cleanup import cleanup_local_images
 from .logging import LOGO_STR, configure_tracebacks, error, log
 from .model import ConfigError, validate_manifest
+from .contrib.package import package_target
 from .contrib.patchwork import patch_target
 from .contrib.update import update_targets
 
@@ -114,6 +115,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     patch_apply.add_argument("target", help="Patch target as <card>:<spec>.")
     patch_apply.set_defaults(func=patch_command)
+
+    package = subcommands.add_parser(
+        "package",
+        help="Work with dist-git package repos.",
+    )
+    package_subcommands = package.add_subparsers(
+        dest="package_action",
+        required=True,
+    )
+    package_fork = package_subcommands.add_parser(
+        "fork",
+        help="Fork a dist-git package repo into a card source location.",
+    )
+    package_fork.add_argument("git_url", help="Package dist-git URL to clone.")
+    package_fork.add_argument(
+        "location",
+        type=Path,
+        help="Destination directory for copied package files.",
+    )
+    package_fork.add_argument(
+        "--card",
+        type=Path,
+        default=None,
+        help="Card YAML file to append. Defaults to <location>/card.yml.",
+    )
+    package_fork.set_defaults(func=package_command)
 
     cleanup = subcommands.add_parser(
         "cleanup",
@@ -230,6 +257,15 @@ def patch_command(args: argparse.Namespace) -> int:
         args.patch_action,
         args.target,
         patchwork_dir=args.patchwork_dir,
+    )
+
+
+def package_command(args: argparse.Namespace) -> int:
+    return package_target(
+        args.package_action,
+        args.git_url,
+        args.location,
+        card=args.card,
     )
 
 
