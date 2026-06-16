@@ -66,7 +66,7 @@ class LudosHandler(logging.Handler):
         else:
             timestamp = _datetime.datetime.fromtimestamp(created).strftime("%H:%M")
             time_prefix = (
-                f"[{timestamp}]" if timestamp != self._last_timestamp else ""
+                f"[{timestamp}]" if timestamp != self._last_timestamp else " " * 7
             )
             self._last_timestamp = timestamp
         target = error_console if levelno >= logging.WARNING else console
