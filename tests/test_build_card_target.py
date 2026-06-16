@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, sentinel
 
 from ludos.build import (
     BuildImageOutputs,
@@ -11,7 +11,9 @@ from ludos.build import (
     PackageImagePlan,
     ResolvedBuildMetadata,
     build_manifest,
+    _cleanup_dnf_workspaces,
     _resolve_manifest_metadata,
+    _resolve_cache_key,
 )
 from ludos.model import ConfigError
 
@@ -116,8 +118,13 @@ class TargetCardBuildTests(unittest.TestCase):
         self._write_build_manifest()
         hhd_source = self.root / "cards" / "gaming" / "hhd.yml"
 
-        def resolve_packages(_base, _releasever, packages, *_args, **_kwargs):
-            return tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+        def resolve_packages(
+            _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
+        ):
+            resolved = tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+            for package, resolved_package in zip(packages, resolved):
+                package_id_by_nevra[resolved_package] = (package, "x86_64")
+            return resolved
 
         with (
             patch("ludos.build.shutil.which", side_effect=lambda command: command),
@@ -158,8 +165,13 @@ class TargetCardBuildTests(unittest.TestCase):
     def test_spec_hash_is_part_of_builder_image_hash(self) -> None:
         self._write_build_manifest()
 
-        def resolve_packages(_base, _releasever, packages, *_args, **_kwargs):
-            return tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+        def resolve_packages(
+            _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
+        ):
+            resolved = tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+            for package, resolved_package in zip(packages, resolved):
+                package_id_by_nevra[resolved_package] = (package, "x86_64")
+            return resolved
 
         builder_images = []
         for spec_hash in ("first", "second"):
@@ -185,6 +197,115 @@ class TargetCardBuildTests(unittest.TestCase):
             builder_images.append(metadata.build_images[0].builder_image)
 
         self.assertNotEqual(builder_images[0], builder_images[1])
+
+    def test_metadata_uses_random_dnf_workspace(self) -> None:
+        self._write_build_manifest()
+
+        def resolve_packages(
+            _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
+        ):
+            resolved = tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+            for package, resolved_package in zip(packages, resolved):
+                package_id_by_nevra[resolved_package] = (package, "x86_64")
+            return resolved
+
+        with (
+            patch("ludos.build.shutil.which", side_effect=lambda command: command),
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._extract_image_paths"),
+            patch(
+                "ludos.build._card_specs_hash",
+                return_value=("scxhash", tuple()),
+            ),
+            patch("ludos.build._stage_card_specs", return_value=tuple()),
+            patch(
+                "ludos.build._resolve_staged_spec_builder_packages",
+                return_value=("spec-builddep",),
+            ),
+            patch("ludos.build._resolve_packages", side_effect=resolve_packages),
+        ):
+            metadata = _resolve_manifest_metadata(self.manifest)
+
+        try:
+            workspace = Path(metadata.dnf_workspace_dir)
+            self.assertEqual(
+                workspace.parent,
+                self.root / "cache" / "f44-x86_64" / "dnf",
+            )
+            self.assertTrue(workspace.name.startswith("run-"))
+            self.assertEqual(Path(metadata.repo_dir), workspace / "repos")
+            self.assertEqual(Path(metadata.dnf_cache_dir), workspace / "cache")
+            self.assertEqual(Path(metadata.dnf_persist_dir), workspace / "persist")
+            self.assertEqual(Path(metadata.dnf_log_dir), workspace / "log")
+            self.assertTrue(workspace.exists())
+        finally:
+            _cleanup_dnf_workspaces((metadata,))
+
+    def test_build_manifest_removes_dnf_workspace_after_success(self) -> None:
+        metadata = self._metadata()
+        workspace = Path(metadata.dnf_workspace_dir)
+        workspace.mkdir(parents=True)
+
+        with (
+            patch("ludos.build.resolve_build_manifests", return_value=(metadata,)),
+            patch("ludos.build.build_package_card_images"),
+            patch(
+                "ludos.build.build_build_images",
+                return_value=BuildImageOutputs(),
+            ),
+            patch(
+                "ludos.build.build_final_manifest_images",
+                return_value=(sentinel.result,),
+            ),
+        ):
+            result = build_manifest(self.manifest)
+
+        self.assertIs(result, sentinel.result)
+        self.assertFalse(workspace.exists())
+
+    def test_build_manifest_removes_dnf_workspace_after_failure(self) -> None:
+        metadata = self._metadata()
+        workspace = Path(metadata.dnf_workspace_dir)
+        workspace.mkdir(parents=True)
+
+        with (
+            patch("ludos.build.resolve_build_manifests", return_value=(metadata,)),
+            patch(
+                "ludos.build.build_package_card_images",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                build_manifest(self.manifest)
+
+        self.assertFalse(workspace.exists())
+
+    def test_resolve_cache_key_ignores_random_dnf_workspace(self) -> None:
+        first = [
+            "podman",
+            "run",
+            "--volume",
+            "/tmp/cache/f44-x86_64/dnf/run-first/repos:/ludos/dnf/repos:ro",
+            "--volume",
+            "/tmp/cache/f44-x86_64/dnf/run-first/cache:/ludos/dnf/cache",
+            "dnf5",
+            "repoquery",
+        ]
+        second = [
+            "podman",
+            "run",
+            "--volume",
+            "/tmp/cache/f44-x86_64/dnf/run-second/repos:/ludos/dnf/repos:ro",
+            "--volume",
+            "/tmp/cache/f44-x86_64/dnf/run-second/cache:/ludos/dnf/cache",
+            "dnf5",
+            "repoquery",
+        ]
+
+        self.assertEqual(
+            _resolve_cache_key(first, ("repo:tag",)),
+            _resolve_cache_key(second, ("repo:tag",)),
+        )
 
     def _metadata(
         self,
@@ -240,6 +361,7 @@ class TargetCardBuildTests(unittest.TestCase):
             spec_source_cache_dir=str(cache / "spec-sources"),
             build_artifact_cache_dir=str(cache / "artifacts"),
             ccache_dir=str(cache / "ccache"),
+            dnf_workspace_dir=str(cache / "dnf-run"),
             dnf_cache_dir=str(cache / "dnf-cache"),
             dnf_persist_dir=str(cache / "dnf-persist"),
             dnf_log_dir=str(cache / "dnf-log"),

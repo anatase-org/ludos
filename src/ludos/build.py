@@ -116,6 +116,7 @@ class ResolvedBuildMetadata:
     spec_source_cache_dir: str
     build_artifact_cache_dir: str
     ccache_dir: str | None
+    dnf_workspace_dir: str
     dnf_cache_dir: str
     dnf_persist_dir: str
     dnf_log_dir: str
@@ -179,38 +180,42 @@ def build_manifest(
     ccache: bool = True,
     card: str | None = None,
 ) -> BuildResult:
-    metadata = resolve_build_manifests(
-        (manifest_path,),
-        cards_dir=cards_dir,
-        cache_dir=cache_dir,
-        cache_version=cache_version,
-        cache_only=cache_only,
-        ccache=ccache,
-        card=card,
-    )
-    if card is not None:
-        target = _resolve_target_card(
-            metadata[0],
-            manifest_path=manifest_path,
+    metadata: tuple[ResolvedBuildMetadata, ...] = tuple()
+    try:
+        metadata = resolve_build_manifests(
+            (manifest_path,),
             cards_dir=cards_dir,
+            cache_dir=cache_dir,
+            cache_version=cache_version,
+            cache_only=cache_only,
+            ccache=ccache,
             card=card,
         )
-        build_builder_images(metadata, targets=(target,), cache_only=cache_only)
-        build_outputs = build_build_images(
-            metadata,
-            targets=(target,),
-            cache_only=cache_only,
-        )
-        return _target_card_build_result(metadata[0], target, build_outputs)
+        if card is not None:
+            target = _resolve_target_card(
+                metadata[0],
+                manifest_path=manifest_path,
+                cards_dir=cards_dir,
+                card=card,
+            )
+            build_builder_images(metadata, targets=(target,), cache_only=cache_only)
+            build_outputs = build_build_images(
+                metadata,
+                targets=(target,),
+                cache_only=cache_only,
+            )
+            return _target_card_build_result(metadata[0], target, build_outputs)
 
-    build_package_card_images(metadata, cache_only=cache_only)
-    build_outputs = build_build_images(metadata, cache_only=cache_only)
-    return build_final_manifest_images(
-        metadata,
-        build_outputs=build_outputs,
-        mode="combined" if ci else "separated",
-        cache_only=cache_only,
-    )[0]
+        build_package_card_images(metadata, cache_only=cache_only)
+        build_outputs = build_build_images(metadata, cache_only=cache_only)
+        return build_final_manifest_images(
+            metadata,
+            build_outputs=build_outputs,
+            mode="combined" if ci else "separated",
+            cache_only=cache_only,
+        )[0]
+    finally:
+        _cleanup_dnf_workspaces(metadata)
 
 
 def _resolve_target_card(
@@ -247,19 +252,25 @@ def resolve_build_manifests(
         raise ConfigError("at least one manifest is required")
     if card is not None and len(manifest_paths) != 1:
         raise ConfigError("targeted card builds require exactly one manifest")
-    metadata = tuple(
-        _resolve_manifest_metadata(
-            manifest_path,
-            cards_dir=cards_dir,
-            cache_dir=cache_dir,
-            cache_version=cache_version,
-            cache_only=cache_only,
-            ccache=ccache,
-            target_card=card,
+    dnf_workspace_dirs: list[Path] = []
+    try:
+        metadata = tuple(
+            _resolve_manifest_metadata(
+                manifest_path,
+                cards_dir=cards_dir,
+                cache_dir=cache_dir,
+                cache_version=cache_version,
+                cache_only=cache_only,
+                ccache=ccache,
+                target_card=card,
+                dnf_workspace_dirs=dnf_workspace_dirs,
+            )
+            for manifest_path in manifest_paths
         )
-        for manifest_path in manifest_paths
-    )
-    return _merge_common_packages(metadata)
+        return _merge_common_packages(metadata)
+    except Exception:
+        _cleanup_dnf_workspace_paths(tuple(dnf_workspace_dirs))
+        raise
 
 
 def _resolve_manifest_metadata(
@@ -270,6 +281,7 @@ def _resolve_manifest_metadata(
     cache_only: bool = False,
     ccache: bool = True,
     target_card: str | None = None,
+    dnf_workspace_dirs: list[Path] | None = None,
 ) -> ResolvedBuildMetadata:
     log(f"Validating manifest: {manifest_path}")
     validation = validate_manifest(manifest_path, cards_dir)
@@ -328,16 +340,20 @@ def _resolve_manifest_metadata(
     dnf_dir = distro_cache_dir / "dnf"
     build_dir = distro_cache_dir / "build" / image
     card_build_dir = distro_cache_dir / "cards"
-    repo_dir = dnf_dir / "repos"
-    dnf_cache_dir = dnf_dir / "cache"
-    dnf_persist_dir = dnf_dir / "persist"
-    dnf_log_dir = dnf_dir / "log"
     dnf_resolve_dir = dnf_dir / "resolves"
     build_artifact_cache_dir = distro_cache_dir / "build-artifacts"
     spec_source_cache_dir = cache_dir / "spec-sources" / "git"
     ccache_dir = cache_dir / "ccache" if ccache else None
 
     distro_cache_dir.mkdir(parents=True, exist_ok=True)
+    dnf_dir.mkdir(parents=True, exist_ok=True)
+    dnf_workspace_dir = Path(tempfile.mkdtemp(prefix="run-", dir=dnf_dir))
+    if dnf_workspace_dirs is not None:
+        dnf_workspace_dirs.append(dnf_workspace_dir)
+    repo_dir = dnf_workspace_dir / "repos"
+    dnf_cache_dir = dnf_workspace_dir / "cache"
+    dnf_persist_dir = dnf_workspace_dir / "persist"
+    dnf_log_dir = dnf_workspace_dir / "log"
     package_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
     card_build_dir.mkdir(parents=True, exist_ok=True)
@@ -384,13 +400,7 @@ def _resolve_manifest_metadata(
         )
     orchestrator = orchestrator_image
 
-    log("Resetting DNF metadata workspace")
-    for existing in repo_dir.glob("*.repo"):
-        existing.unlink()
-    shutil.rmtree(dnf_cache_dir)
-    shutil.rmtree(dnf_persist_dir)
-    dnf_cache_dir.mkdir(parents=True, exist_ok=True)
-    dnf_persist_dir.mkdir(parents=True, exist_ok=True)
+    log(f"Using DNF metadata workspace: {dnf_workspace_dir}")
 
     repo_images = []
     for repo in validation.repos:
@@ -971,6 +981,7 @@ def _resolve_manifest_metadata(
         spec_source_cache_dir=str(spec_source_cache_dir),
         build_artifact_cache_dir=str(build_artifact_cache_dir),
         ccache_dir=str(ccache_dir) if ccache_dir is not None else None,
+        dnf_workspace_dir=str(dnf_workspace_dir),
         dnf_cache_dir=str(dnf_cache_dir),
         dnf_persist_dir=str(dnf_persist_dir),
         dnf_log_dir=str(dnf_log_dir),
@@ -1015,14 +1026,18 @@ def resolve_manifest_images(
     cache_dir: Path | None = None,
     cache_version: str | None = None,
 ) -> BuildResult:
-    metadata = resolve_build_manifests(
-        (manifest_path,),
-        cards_dir=cards_dir,
-        cache_dir=cache_dir,
-        cache_version=cache_version,
-        cache_only=True,
-    )[0]
-    return _metadata_build_result(metadata)
+    metadata: tuple[ResolvedBuildMetadata, ...] = tuple()
+    try:
+        metadata = resolve_build_manifests(
+            (manifest_path,),
+            cards_dir=cards_dir,
+            cache_dir=cache_dir,
+            cache_version=cache_version,
+            cache_only=True,
+        )
+        return _metadata_build_result(metadata[0])
+    finally:
+        _cleanup_dnf_workspaces(metadata)
 
 
 def _merge_common_packages(
@@ -2275,7 +2290,13 @@ def _run_cached_transaction_preview(
         "stdout": transaction_preview.stdout,
         "stderr": transaction_preview.stderr,
     }
-    temp_file = cache_file.with_suffix(".json.tmp")
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f"{cache_file.stem}.",
+        suffix=".tmp",
+        dir=resolve_cache_dir,
+    )
+    os.close(fd)
+    temp_file = Path(temp_name)
     temp_file.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     temp_file.replace(cache_file)
     return transaction_preview
@@ -2288,7 +2309,7 @@ def _resolve_cache_key(
 ) -> str:
     payload = json.dumps(
         {
-            "cmd": cmd,
+            "cmd": _normalized_dnf_workspace_mounts(cmd),
             "extra_hash_inputs": extra_hash_inputs,
             "repo_tags": repo_tags,
         },
@@ -2296,6 +2317,20 @@ def _resolve_cache_key(
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalized_dnf_workspace_mounts(cmd: list[str]) -> list[str]:
+    normalized = []
+    for arg in cmd:
+        normalized.append(
+            re.sub(
+                r"[^:]+/dnf/run-[^:/]+/(repos|cache|persist|log)"
+                r":/ludos/dnf/\1(?=(:ro)?$)",
+                r"<dnf-workspace>/\1:/ludos/dnf/\1",
+                arg,
+            )
+        )
+    return normalized
 
 
 def _parse_resolved_package_entries(
@@ -4468,6 +4503,20 @@ def _remove_tree(path: Path, *, podman: str | None = None) -> None:
         subprocess.run([podman, "unshare", "rm", "-rf", str(path)], check=False)
     if path.exists():
         raise ConfigError(f"failed to remove cache directory: {path}")
+
+
+def _cleanup_dnf_workspaces(metadata: tuple[ResolvedBuildMetadata, ...]) -> None:
+    workspaces = {
+        Path(manifest.dnf_workspace_dir): manifest.podman
+        for manifest in metadata
+    }
+    for workspace, podman in workspaces.items():
+        _remove_tree(workspace, podman=podman)
+
+
+def _cleanup_dnf_workspace_paths(paths: tuple[Path, ...]) -> None:
+    for path in dict.fromkeys(paths):
+        _remove_tree(path)
 
 
 def _containerfile_error_location(containerfile: Path, output: str) -> str | None:
