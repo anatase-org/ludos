@@ -187,8 +187,7 @@ def _select_target_spec(
 ) -> SpecBuild:
     matches = []
     for spec in specs:
-        spec_path = Path(spec.spec)
-        if spec_key in (spec.spec, spec_path.name, spec_path.stem):
+        if spec_key in _target_spec_keys(card_source, spec):
             matches.append(spec)
 
     if not matches:
@@ -203,6 +202,22 @@ def _select_target_spec(
     if not _spec_packages_for_arch(spec, arch):
         raise ConfigError(f"{card_source}: spec '{spec_key}' has no packages on {arch}")
     return spec
+
+
+def _target_spec_keys(card_source: Path, spec: SpecBuild) -> tuple[str, ...]:
+    spec_path = Path(spec.spec)
+    keys = [spec.spec, spec_path.name, spec_path.stem]
+    if spec.patch is not None and spec.patch.type == "git":
+        if spec.patch.name:
+            keys.append(spec.patch.name)
+        elif not _is_git_source(spec.spec):
+            source_dir = spec_path.parent
+            if not source_dir.is_absolute() and ".." not in source_dir.parts:
+                source_key = source_dir.as_posix()
+                if source_key == ".":
+                    source_key = _card_base_dir(card_source).name
+                keys.append(source_key)
+    return tuple(dict.fromkeys(keys))
 
 
 def build_manifest(

@@ -247,6 +247,48 @@ class TargetCardBuildTests(unittest.TestCase):
             ("scx-tools.spec",),
         )
 
+    def test_targeted_spec_accepts_patch_source_key(self) -> None:
+        self._write_build_manifest(
+            scx_specs=(
+                ("gamescope/gamescope.spec", "gamescope"),
+                ("xserver/xorg-x11-server-Xwayland.spec", "xorg-x11-server-Xwayland"),
+            ),
+            scx_patch_specs={"xserver/xorg-x11-server-Xwayland.spec"},
+        )
+
+        def resolve_packages(
+            _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
+        ):
+            resolved = tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+            for package, resolved_package in zip(packages, resolved):
+                package_id_by_nevra[resolved_package] = (package, "x86_64")
+            return resolved
+
+        with (
+            patch("ludos.build.shutil.which", side_effect=lambda command: command),
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._extract_image_paths"),
+            patch("ludos.build._stage_card_specs", return_value=tuple()),
+            patch(
+                "ludos.build._resolve_staged_spec_builder_packages",
+                return_value=("spec-builddep",),
+            ),
+            patch("ludos.build._resolve_packages", side_effect=resolve_packages),
+        ):
+            metadata = _resolve_manifest_metadata(
+                self.manifest,
+                target_card="cards/base/scx:xserver",
+            )
+
+        self.assertEqual(
+            tuple(
+                spec.spec
+                for _card, specs in metadata.card_specs
+                for spec in specs
+            ),
+            ("xserver/xorg-x11-server-Xwayland.spec",),
+        )
+
     def test_metadata_uses_random_dnf_workspace(self) -> None:
         self._write_build_manifest()
 
@@ -435,7 +477,9 @@ class TargetCardBuildTests(unittest.TestCase):
         self,
         *,
         scx_specs: tuple[tuple[str, str], ...] = (("scx.spec", "scx"),),
+        scx_patch_specs: set[str] | None = None,
     ) -> None:
+        scx_patch_specs = scx_patch_specs or set()
         (self.root / "repos").mkdir()
         (self.root / "repos" / "fedora.repo").write_text(
             "[fedora]\nname=Fedora\nbaseurl=https://example.com\n",
@@ -484,12 +528,25 @@ class TargetCardBuildTests(unittest.TestCase):
                         f"  - spec: {spec_file}",
                         "    packages:",
                         f"      - {package}",
+                        *(
+                            (
+                                "    patch:",
+                                "      type: git",
+                                "      url: https://example.com/source.git",
+                                "      ref: v${spec:Version}",
+                                "      file: overrides.patch",
+                            )
+                            if spec_file in scx_patch_specs
+                            else ()
+                        ),
                     )
                 ),
             ),
         )
         for spec_file, package in scx_specs:
-            (self.scx_source.parent / spec_file).write_text(
+            spec_path = self.scx_source.parent / spec_file
+            spec_path.parent.mkdir(parents=True, exist_ok=True)
+            spec_path.write_text(
                 f"Name: {package}\nVersion: 1\n",
                 encoding="utf-8",
             )
