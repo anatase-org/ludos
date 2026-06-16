@@ -400,6 +400,8 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         self.assertIn('spec_source_cache="$source_cache/scx_scheds"', script)
         self.assertIn('[ ! -f "$spec_source_cache/$source_name" ]', script)
         self.assertIn('spectool -g -C "$spec_source_cache"', script)
+        self.assertIn('cp -f -t "$topdir/SOURCES"', script)
+        self.assertNotIn('cp -n -t "$topdir/SOURCES"', script)
 
     def test_cross_arch_variants_are_discovered_from_builddep_dependencies(self) -> None:
         package_id_by_nevra: dict[str, tuple[str, str]] = {}

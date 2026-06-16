@@ -3339,7 +3339,7 @@ def _specs_build_script(
                 "  if [ \"$missing_sources\" -eq 1 ]; then",
                 f"    spectool -g -C \"$spec_source_cache\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
                 "  fi",
-                '  find "$spec_source_cache" -maxdepth 1 -type f -exec cp -n -t "$topdir/SOURCES" {} +',
+                '  find "$spec_source_cache" -maxdepth 1 -type f -exec cp -f -t "$topdir/SOURCES" {} +',
                 "  fi",
                 "fi",
                 f"for target in {targets}; do",
