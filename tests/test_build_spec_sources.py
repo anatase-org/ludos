@@ -365,9 +365,11 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
             spec_path = workspace_dir / "pkg.spec"
             spec_path.write_text("Name: pkg\nBuildRequires: cargo\n", encoding="utf-8")
             seen_commands = []
+            seen_hash_inputs = []
 
-            def preview(cmd, *_args, **_kwargs):
+            def preview(cmd, _resolve_cache_dir, _repo_images, extra_hash_inputs=()):
                 seen_commands.append(cmd)
+                seen_hash_inputs.append(extra_hash_inputs)
                 return subprocess.CompletedProcess(
                     args=cmd,
                     returncode=1,
@@ -397,6 +399,8 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
 
         self.assertEqual(packages, ("cargo-0:1.94.1-1.fc44.x86_64",))
         self.assertIn("--no-best", seen_commands[0])
+        self.assertEqual(seen_hash_inputs[0][0][0], "pkg.spec")
+        self.assertEqual(len(seen_hash_inputs[0][0][1]), 64)
 
     def test_builddep_resolution_rejects_failed_empty_transaction(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

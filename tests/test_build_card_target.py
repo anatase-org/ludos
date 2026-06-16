@@ -166,7 +166,7 @@ class TargetCardBuildTests(unittest.TestCase):
         self.assertEqual(Path(specs_hash.call_args.args[0]), self.scx_source)
         self.assertNotEqual(Path(specs_hash.call_args.args[0]), hhd_source)
 
-    def test_spec_hash_is_part_of_builder_image_hash(self) -> None:
+    def test_spec_hash_is_not_part_of_builder_image_hash(self) -> None:
         self._write_build_manifest()
 
         def resolve_packages(
@@ -200,7 +200,7 @@ class TargetCardBuildTests(unittest.TestCase):
                 )
             builder_images.append(metadata.build_images[0].builder_image)
 
-        self.assertNotEqual(builder_images[0], builder_images[1])
+        self.assertEqual(builder_images[0], builder_images[1])
 
     def test_targeted_spec_filters_build_specs_only(self) -> None:
         self._write_build_manifest(

@@ -941,12 +941,7 @@ def _resolve_manifest_metadata(
             build_declared_package_map[card_name] = tuple(
                 dict.fromkeys(declared_package_ids)
             )
-        builder_hash_inputs = (("packages", _nevra_hash(builder_packages)),)
-        if card_name in card_spec_hashes:
-            builder_hash_inputs += (("specs", card_spec_hashes[card_name]),)
-        elif card_name in card_hashes:
-            builder_hash_inputs += (("build", card_hashes[card_name]),)
-        builder_hash = _builder_hash(builder_hash_inputs)
+        builder_hash = _nevra_hash(builder_packages)
         builder_image = _local_image(
             local_prefix,
             "builders",
@@ -3683,15 +3678,6 @@ def _package_hash(packages: tuple[str, ...]) -> str:
 
 def _nevra_hash(nevras: tuple[str, ...]) -> str:
     return _package_hash(nevras)
-
-
-def _builder_hash(inputs: tuple[tuple[str, str], ...]) -> str:
-    payload = json.dumps(
-        inputs,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:HASH_LENGTH]
 
 
 def _card_build_hash(
