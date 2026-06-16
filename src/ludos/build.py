@@ -2746,8 +2746,13 @@ def _stage_card_specs(
         )
         staged_source_dir = workspace_dir / relative_dir
         if spec.files:
-            shutil.rmtree(staged_source_dir, ignore_errors=True)
             staged_source_dir.mkdir(parents=True, exist_ok=True)
+            _remove_staged_spec_files(
+                spec_source.spec_path.parent,
+                staged_source_dir,
+                (spec_source.spec_path.name, *spec.files),
+                card_source,
+            )
             shutil.copy2(
                 spec_source.spec_path,
                 staged_source_dir / spec_source.spec_path.name,
@@ -2784,6 +2789,36 @@ def _stage_card_specs(
             )
         )
     return tuple(staged)
+
+
+def _remove_staged_spec_files(
+    source_dir: Path,
+    destination_dir: Path,
+    patterns: tuple[str, ...],
+    card_source: Path,
+) -> None:
+    source_dir = source_dir.resolve()
+    for pattern in patterns:
+        pattern_path = Path(pattern)
+        if pattern_path.is_absolute() or ".." in pattern_path.parts:
+            raise ConfigError(
+                f"{card_source}: spec files entry '{pattern}' escapes the card"
+            )
+        matches = sorted(source_dir.glob(pattern))
+        if not matches:
+            continue
+        for source_path in matches:
+            try:
+                relative_path = source_path.resolve().relative_to(source_dir).as_posix()
+            except ValueError as exc:
+                raise ConfigError(
+                    f"{card_source}: spec files entry '{pattern}' escapes the card"
+                ) from exc
+            target_path = destination_dir / relative_path
+            if target_path.is_dir() and not target_path.is_symlink():
+                shutil.rmtree(target_path)
+            elif target_path.exists() or target_path.is_symlink():
+                target_path.unlink()
 
 
 def _copy_spec_files(

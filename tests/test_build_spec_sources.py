@@ -127,6 +127,47 @@ class GitSpecSourceTests(unittest.TestCase):
             ["hhd-ui.spec", "hhd.spec"],
         )
 
+    def test_multiple_root_local_specs_do_not_delete_each_other(self) -> None:
+        (self.card_dir / "scx-tools.spec").write_text(
+            "Name: scx-tools\nVersion: 1\n",
+            encoding="utf-8",
+        )
+        (self.card_dir / "scx-scheds.spec").write_text(
+            "Name: scx-scheds\nVersion: 1\n",
+            encoding="utf-8",
+        )
+        specs = (
+            SpecBuild(
+                spec="scx-tools.spec",
+                packages={"*": ("scx-tools",)},
+                files=("scx-tools.spec",),
+            ),
+            SpecBuild(
+                spec="scx-scheds.spec",
+                packages={"*": ("scx-scheds",)},
+                files=("scx-scheds.spec",),
+            ),
+        )
+
+        staged = _stage_card_specs(
+            card_source=self.card_source,
+            specs=specs,
+            card_env={},
+            workspace_dir=self.workspace_dir,
+            arch="x86_64",
+            spec_source_cache_dir=self.cache_dir,
+            cache_only=True,
+        )
+
+        self.assertEqual(
+            sorted(spec.spec_path.name for spec in staged),
+            ["scx-scheds.spec", "scx-tools.spec"],
+        )
+        self.assertEqual(
+            sorted(path.name for path in self.workspace_dir.rglob("*.spec")),
+            ["scx-scheds.spec", "scx-tools.spec"],
+        )
+
     def test_hash_ignores_unselected_files_by_default(self) -> None:
         self._write("hhd.spec", "Name: hhd\nVersion: 1\n")
         self._write("README.md", "first\n")

@@ -44,7 +44,7 @@ def fork_package(
     subdir: str = "",
 ) -> int:
     destination = location.expanduser().resolve()
-    _guard_empty_destination(destination)
+    _guard_destination(destination)
     card_path = _resolve_card_path(destination, card)
     upstream_subdir = _clean_subdir(subdir)
 
@@ -52,6 +52,7 @@ def fork_package(
         repo_dir = Path(temp_dir) / "repo"
         run(["git", "clone", "--depth", "1", git_url, str(repo_dir)])
         package_dir = _package_dir(repo_dir, upstream_subdir)
+        branch = _default_branch(repo_dir)
         spec_paths = _discover_specs(package_dir)
         if not spec_paths:
             raise ConfigError(f"{git_url}: package repo has no spec files")
@@ -63,10 +64,12 @@ def fork_package(
             destination=destination,
             card_path=card_path,
             git_url=git_url,
+            branch=branch,
             subdir=upstream_subdir,
             spec_paths=spec_paths,
         )
         _guard_duplicate_specs(specs, entries, card_path)
+        _guard_copy_conflicts(package_dir, destination)
 
         _copy_repo_contents(package_dir, destination)
         specs.extend(entries)
@@ -79,11 +82,9 @@ def fork_package(
     return 0
 
 
-def _guard_empty_destination(destination: Path) -> None:
+def _guard_destination(destination: Path) -> None:
     if destination.exists() and not destination.is_dir():
         raise ConfigError(f"{destination}: package location exists but is not a directory")
-    if destination.exists() and any(destination.iterdir()):
-        raise ConfigError(f"{destination}: package location exists but is not empty")
 
 
 def _resolve_card_path(destination: Path, card: Path | None) -> Path:
@@ -106,6 +107,17 @@ def _package_dir(repo_dir: Path, subdir: str) -> Path:
     if not package_dir.is_dir():
         raise ConfigError(f"{subdir}: package subdir does not exist")
     return package_dir
+
+
+def _default_branch(repo_dir: Path) -> str:
+    result = run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=repo_dir,
+        check=False,
+        capture=True,
+    )
+    branch = result.stdout.strip()
+    return branch or DEFAULT_BRANCH
 
 
 def _discover_specs(package_dir: Path) -> tuple[Path, ...]:
@@ -154,6 +166,7 @@ def _spec_entries(
     destination: Path,
     card_path: Path,
     git_url: str,
+    branch: str,
     subdir: str,
     spec_paths: tuple[Path, ...],
 ) -> list[dict[str, Any]]:
@@ -169,7 +182,7 @@ def _spec_entries(
             upstream = {
                 "type": "dist-git",
                 "url": git_url,
-                "branch": DEFAULT_BRANCH,
+                "branch": branch,
             }
             if subdir:
                 upstream["subdir"] = subdir
@@ -215,6 +228,35 @@ def _guard_duplicate_specs(
         raise ConfigError(f"{card_path}: duplicate spec entries: {duplicate_list}")
 
 
+def _guard_copy_conflicts(package_dir: Path, destination: Path) -> None:
+    conflicts = [
+        path.relative_to(destination).as_posix()
+        for path in _copy_conflicts(package_dir, destination)
+    ]
+    if conflicts:
+        conflict_list = ", ".join(conflicts)
+        raise ConfigError(
+            f"{destination}: package files already exist: {conflict_list}"
+        )
+
+
+def _copy_conflicts(source_dir: Path, destination_dir: Path) -> tuple[Path, ...]:
+    conflicts = []
+    for child in source_dir.iterdir():
+        if child.name in VCS_DIR_NAMES:
+            continue
+        target = destination_dir / child.name
+        if child.is_dir() and not child.is_symlink():
+            if target.exists() and (not target.is_dir() or target.is_symlink()):
+                conflicts.append(target)
+            elif target.is_dir():
+                conflicts.extend(_copy_conflicts(child, target))
+            continue
+        if target.exists() or target.is_symlink():
+            conflicts.append(target)
+    return tuple(conflicts)
+
+
 def _copy_repo_contents(repo_dir: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     for child in repo_dir.iterdir():
@@ -224,7 +266,10 @@ def _copy_repo_contents(repo_dir: Path, destination: Path) -> None:
         if child.is_symlink():
             os.symlink(os.readlink(child), target)
         elif child.is_dir():
-            shutil.copytree(child, target, symlinks=True)
+            if target.exists() and not target.is_symlink():
+                _copy_repo_contents(child, target)
+            else:
+                shutil.copytree(child, target, symlinks=True)
         else:
             shutil.copy2(child, target)
 

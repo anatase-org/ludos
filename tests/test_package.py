@@ -54,7 +54,7 @@ class PackageForkTests(unittest.TestCase):
                 "upstream": {
                     "type": "dist-git",
                     "url": self.repo.as_uri(),
-                    "branch": "rawhide",
+                    "branch": self._current_branch(),
                 },
             },
         )
@@ -131,7 +131,7 @@ class PackageForkTests(unittest.TestCase):
             {
                 "type": "dist-git",
                 "url": self.repo.as_uri(),
-                "branch": "rawhide",
+                "branch": self._current_branch(),
                 "subdir": "sources/scx-tools",
             },
         )
@@ -156,15 +156,49 @@ class PackageForkTests(unittest.TestCase):
 
         self.assertFalse((location / "pkg.spec").exists())
 
-    def test_non_empty_destination_fails(self) -> None:
+    def test_appends_to_non_empty_destination(self) -> None:
         self._write_repo("pkg.spec", "Name: pkg\nVersion: 1\n")
         self._commit("package")
         location = self.root / "cards" / "pkg"
         location.mkdir(parents=True)
         (location / "local.txt").write_text("keep\n", encoding="utf-8")
+        (location / "card.yml").write_text(
+            "version: 1\nspecs:\n- spec: existing.spec\n",
+            encoding="utf-8",
+        )
 
-        with self.assertRaisesRegex(ValueError, "exists but is not empty"):
+        fork_package(self.repo.as_uri(), location)
+
+        self.assertEqual(
+            (location / "local.txt").read_text(encoding="utf-8"),
+            "keep\n",
+        )
+        self.assertEqual(
+            (location / "pkg.spec").read_text(encoding="utf-8"),
+            "Name: pkg\nVersion: 1\n",
+        )
+        card = self._load_yaml(location / "card.yml")
+        self.assertEqual(card["specs"][0], {"spec": "existing.spec"})
+        self.assertEqual(card["specs"][1]["spec"], "pkg.spec")
+
+    def test_existing_package_file_fails_without_copying(self) -> None:
+        self._write_repo("pkg.spec", "Name: pkg\nVersion: 1\n")
+        self._write_repo("sources", "hash  pkg.tar.xz\n")
+        self._commit("package")
+        location = self.root / "cards" / "pkg"
+        location.mkdir(parents=True)
+        (location / "pkg.spec").write_text("Name: local\nVersion: 1\n", encoding="utf-8")
+        (location / "card.yml").write_text("version: 1\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "package files already exist: pkg.spec"):
             fork_package(self.repo.as_uri(), location)
+
+        self.assertEqual(
+            (location / "pkg.spec").read_text(encoding="utf-8"),
+            "Name: local\nVersion: 1\n",
+        )
+        self.assertFalse((location / "sources").exists())
+        self.assertEqual(self._load_yaml(location / "card.yml"), {"version": 1})
 
     def test_package_fork_parser(self) -> None:
         args = build_parser().parse_args(
@@ -194,6 +228,16 @@ class PackageForkTests(unittest.TestCase):
     def _commit(self, message: str) -> None:
         self._git(["add", "."], cwd=self.repo)
         self._git(["commit", "-m", message], cwd=self.repo)
+
+    def _current_branch(self) -> str:
+        return subprocess.run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=self.repo,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout.strip()
 
     def _git(self, args: list[str], *, cwd: Path) -> None:
         subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
