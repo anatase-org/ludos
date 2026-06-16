@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 from .logging import log, stream
-from .model import ConfigError, SpecBuild, validate_manifest
+from .model import ConfigError, SpecBuild, _resolve_card_path, validate_manifest
 
 
 HASH_LENGTH = 8
@@ -177,6 +177,7 @@ def build_manifest(
     cache_only: bool = False,
     ci: bool = False,
     ccache: bool = True,
+    card: str | None = None,
 ) -> BuildResult:
     metadata = resolve_build_manifests(
         (manifest_path,),
@@ -185,7 +186,23 @@ def build_manifest(
         cache_version=cache_version,
         cache_only=cache_only,
         ccache=ccache,
+        card=card,
     )
+    if card is not None:
+        target = _resolve_target_card(
+            metadata[0],
+            manifest_path=manifest_path,
+            cards_dir=cards_dir,
+            card=card,
+        )
+        build_builder_images(metadata, targets=(target,), cache_only=cache_only)
+        build_outputs = build_build_images(
+            metadata,
+            targets=(target,),
+            cache_only=cache_only,
+        )
+        return _target_card_build_result(metadata[0], target, build_outputs)
+
     build_package_card_images(metadata, cache_only=cache_only)
     build_outputs = build_build_images(metadata, cache_only=cache_only)
     return build_final_manifest_images(
@@ -196,6 +213,27 @@ def build_manifest(
     )[0]
 
 
+def _resolve_target_card(
+    metadata: ResolvedBuildMetadata,
+    *,
+    manifest_path: Path,
+    cards_dir: Path | None,
+    card: str,
+) -> str:
+    root_dir = manifest_path.resolve().parent
+    target_source = _resolve_card_path(card, root_dir, cards_dir).resolve()
+    blocks_by_source = {
+        Path(source).resolve(): block
+        for block, source in metadata.card_sources
+    }
+    target = blocks_by_source.get(target_source)
+    if target is None:
+        raise ConfigError(f"{manifest_path}: card not listed in manifest: {card}")
+    if target not in {plan.block for plan in metadata.build_images}:
+        raise ConfigError(f"{target_source}: card has no build or specs")
+    return target
+
+
 def resolve_build_manifests(
     manifest_paths: tuple[Path, ...],
     cards_dir: Path | None = None,
@@ -203,9 +241,12 @@ def resolve_build_manifests(
     cache_version: str | None = None,
     cache_only: bool = False,
     ccache: bool = True,
+    card: str | None = None,
 ) -> tuple[ResolvedBuildMetadata, ...]:
     if not manifest_paths:
         raise ConfigError("at least one manifest is required")
+    if card is not None and len(manifest_paths) != 1:
+        raise ConfigError("targeted card builds require exactly one manifest")
     metadata = tuple(
         _resolve_manifest_metadata(
             manifest_path,
@@ -214,6 +255,7 @@ def resolve_build_manifests(
             cache_version=cache_version,
             cache_only=cache_only,
             ccache=ccache,
+            target_card=card,
         )
         for manifest_path in manifest_paths
     )
@@ -227,6 +269,7 @@ def _resolve_manifest_metadata(
     cache_version: str | None = None,
     cache_only: bool = False,
     ccache: bool = True,
+    target_card: str | None = None,
 ) -> ResolvedBuildMetadata:
     log(f"Validating manifest: {manifest_path}")
     validation = validate_manifest(manifest_path, cards_dir)
@@ -423,6 +466,18 @@ def _resolve_manifest_metadata(
         card_entries.append((card.priority, insertion_order, card_name, card))
 
     card_entries.sort(key=lambda entry: (entry[0], entry[1]))
+    target_card_name = None
+    if target_card is not None:
+        target_source = _resolve_card_path(target_card, root_dir, cards_dir).resolve()
+        for _priority, _insertion_order, card_name, card in card_entries:
+            if card.source is not None and card.source.resolve() == target_source:
+                target_card_name = card_name
+                break
+        if target_card_name is None:
+            raise ConfigError(
+                f"{manifest_path}: card not listed in manifest: {target_card}"
+            )
+
     card_requests = []
     card_names = []
     card_file_sets = []
@@ -467,8 +522,9 @@ def _resolve_manifest_metadata(
         bootstrap_env.update(prepared_env)
 
     inherited_env = dict(manifest_env)
-    requested_packages = list(bootstrap_packages)
+    requested_packages = [] if target_card_name is not None else list(bootstrap_packages)
     for _priority, _insertion_order, card_name, card in card_entries:
+        active_target = target_card_name is None or card_name == target_card_name
         if card.source is None:
             raise ConfigError(f"card '{card_name}' has no source path")
         if card.build.strip() and card.specs:
@@ -481,15 +537,16 @@ def _resolve_manifest_metadata(
         if card.prepare.strip():
             card_prepare_scripts[card_name] = card.prepare.rstrip()
         card_packages = list(_packages_for_arch(card.packages, arch))
-        for package in card_packages:
-            requested_packages.append(package)
+        if target_card_name is None:
+            for package in card_packages:
+                requested_packages.append(package)
         card_requests.append(tuple(card_packages))
         parsed_file_refs = tuple(_parse_file_ref(file_ref) for file_ref in card.files)
         card_file_sets.append((card_name, card.source, parsed_file_refs))
-        if card.build.strip():
+        if active_target and card.build.strip():
             card_builds[card_name] = card.build.rstrip()
             card_build_deps[card_name] = card.build_deps
-        if card.specs:
+        if active_target and card.specs:
             active_specs = tuple(
                 spec for spec in card.specs if _spec_packages_for_arch(spec, arch)
             )
@@ -515,14 +572,18 @@ def _resolve_manifest_metadata(
         if card.postprocess.strip():
             postprocess_blocks.append((card_name, card.postprocess.rstrip()))
     build_card_names = set(card_builds) | set(card_specs)
+    if target_card_name is not None and target_card_name not in build_card_names:
+        target_source = Path(card_sources[target_card_name]).resolve()
+        raise ConfigError(f"{target_source}: card has no build or specs")
     package_id_by_nevra: dict[str, tuple[str, str]] = {}
     requested_packages = tuple(requested_packages)
     if not requested_packages and not build_card_names:
         raise ConfigError(f"{manifest_path}: no packages requested by cards")
-    log(
-        f"Collected {len(requested_packages)} requested packages from "
-        f"bootstrap and {len(card_entries)} cards"
-    )
+    if target_card_name is None:
+        log(
+            f"Collected {len(requested_packages)} requested packages from "
+            f"bootstrap and {len(card_entries)} cards"
+        )
     if build_card_names:
         log(f"Collected {len(build_card_names)} build cards")
 
@@ -548,151 +609,176 @@ def _resolve_manifest_metadata(
         "dnf5",
     ]
 
-    locally_built_package_ids_by_card = _locally_built_package_ids_by_card(
-        card_specs,
-        arch,
-    )
-    locally_built_package_ids = set().union(
-        *locally_built_package_ids_by_card.values()
-    ) if locally_built_package_ids_by_card else set()
+    if target_card_name is not None:
+        log(
+            "Skipping package transaction resolution for targeted card build: "
+            f"{target_card_name}"
+        )
+        bootstrap_resolved_packages = tuple()
+        card_resolutions = [tuple() for _card_name in card_names]
+        common_packages = []
+        package_blocks = tuple()
+        package_block_hashes = tuple()
+        resolved_packages = tuple()
+    else:
+        locally_built_package_ids_by_card = _locally_built_package_ids_by_card(
+            card_specs,
+            arch,
+        )
+        locally_built_package_ids = set().union(
+            *locally_built_package_ids_by_card.values()
+        ) if locally_built_package_ids_by_card else set()
 
-    log("Resolving package transaction for bootstrap")
-    bootstrap_resolved_packages = _resolve_packages(
-        orchestrator_dnf_base,
-        releasever,
-        bootstrap_packages,
-        package_id_by_nevra,
-        dnf_resolve_dir,
-        tuple(repo_images),
-    )
-    if not bootstrap_resolved_packages:
-        raise ConfigError("dnf did not resolve packages for bootstrap")
-    bootstrap_package_set = set(bootstrap_resolved_packages)
-
-    card_resolutions = []
-    for card_name, card_packages in zip(card_names, card_requests):
-        if not card_packages:
-            if card_name in build_card_names:
-                log(f"Package resolution not needed for build-only card: {card_name}")
-            else:
-                log(f"Skipping package resolution for package-less card: {card_name}")
-            card_resolutions.append(tuple())
-            continue
-
-        log(f"Resolving package transaction for card: {card_name}")
-        card_resolved_package_list = _resolve_packages(
+        log("Resolving package transaction for bootstrap")
+        bootstrap_resolved_packages = _resolve_packages(
             orchestrator_dnf_base,
             releasever,
-            card_packages,
+            bootstrap_packages,
             package_id_by_nevra,
             dnf_resolve_dir,
             tuple(repo_images),
         )
-        if not card_resolved_package_list:
-            raise ConfigError(f"dnf did not resolve packages for {card_name}")
-        card_resolutions.append(tuple(card_resolved_package_list))
+        if not bootstrap_resolved_packages:
+            raise ConfigError("dnf did not resolve packages for bootstrap")
+        bootstrap_package_set = set(bootstrap_resolved_packages)
 
-    log("Resolving package transactions with prior-card context")
-    contextual_requests = []
-    previous_contextual_resolved = set()
-    for index, (card_name, card_packages) in enumerate(zip(card_names, card_requests)):
-        if not card_packages:
-            continue
-        contextual_requests.extend(card_packages)
-        contextual_resolved = _resolve_packages(
-            orchestrator_dnf_base,
-            releasever,
-            tuple(contextual_requests),
-            package_id_by_nevra,
-            dnf_resolve_dir,
-            tuple(repo_images),
-        )
-        contextual_additions = tuple(
-            package
-            for package in contextual_resolved
-            if package not in previous_contextual_resolved
-            and package not in card_resolutions[index]
-        )
-        if contextual_additions:
-            log(
-                f"Adding {len(contextual_additions)} contextual dependencies to card: {card_name}"
-            )
-            card_resolutions[index] = (
-                *card_resolutions[index],
-                *contextual_additions,
-            )
-        previous_contextual_resolved = set(contextual_resolved)
+        card_resolutions = []
+        for card_name, card_packages in zip(card_names, card_requests):
+            if not card_packages:
+                if card_name in build_card_names:
+                    log(
+                        "Package resolution not needed for build-only card: "
+                        f"{card_name}"
+                    )
+                else:
+                    log(
+                        "Skipping package resolution for package-less card: "
+                        f"{card_name}"
+                    )
+                card_resolutions.append(tuple())
+                continue
 
-    if previous_contextual_resolved:
-        pruned_count = 0
-        filtered_card_resolutions = []
-        for card_resolution in card_resolutions:
-            filtered_resolution = tuple(
+            log(f"Resolving package transaction for card: {card_name}")
+            card_resolved_package_list = _resolve_packages(
+                orchestrator_dnf_base,
+                releasever,
+                card_packages,
+                package_id_by_nevra,
+                dnf_resolve_dir,
+                tuple(repo_images),
+            )
+            if not card_resolved_package_list:
+                raise ConfigError(f"dnf did not resolve packages for {card_name}")
+            card_resolutions.append(tuple(card_resolved_package_list))
+
+        log("Resolving package transactions with prior-card context")
+        contextual_requests = []
+        previous_contextual_resolved = set()
+        for index, (card_name, card_packages) in enumerate(
+            zip(card_names, card_requests)
+        ):
+            if not card_packages:
+                continue
+            contextual_requests.extend(card_packages)
+            contextual_resolved = _resolve_packages(
+                orchestrator_dnf_base,
+                releasever,
+                tuple(contextual_requests),
+                package_id_by_nevra,
+                dnf_resolve_dir,
+                tuple(repo_images),
+            )
+            contextual_additions = tuple(
                 package
-                for package in card_resolution
-                if package in previous_contextual_resolved
+                for package in contextual_resolved
+                if package not in previous_contextual_resolved
+                and package not in card_resolutions[index]
             )
-            pruned_count += len(card_resolution) - len(filtered_resolution)
-            filtered_card_resolutions.append(filtered_resolution)
-        card_resolutions = filtered_card_resolutions
-        if pruned_count:
-            log(
-                f"Pruned {pruned_count} replaced packages from package transactions"
-            )
+            if contextual_additions:
+                log(
+                    f"Adding {len(contextual_additions)} contextual dependencies to card: {card_name}"
+                )
+                card_resolutions[index] = (
+                    *card_resolutions[index],
+                    *contextual_additions,
+                )
+            previous_contextual_resolved = set(contextual_resolved)
 
-    log("Grouping resolved packages into install blocks")
-    package_counts = {}
-    for card_resolution in card_resolutions:
-        for package in set(card_resolution):
-            package_counts[package] = package_counts.get(package, 0) + 1
+        if previous_contextual_resolved:
+            pruned_count = 0
+            filtered_card_resolutions = []
+            for card_resolution in card_resolutions:
+                filtered_resolution = tuple(
+                    package
+                    for package in card_resolution
+                    if package in previous_contextual_resolved
+                )
+                pruned_count += len(card_resolution) - len(filtered_resolution)
+                filtered_card_resolutions.append(filtered_resolution)
+            card_resolutions = filtered_card_resolutions
+            if pruned_count:
+                log(
+                    f"Pruned {pruned_count} replaced packages from package transactions"
+                )
 
-    common_package_set = {
-        package for package, count in package_counts.items() if count > 1
-    }
-    common_package_set = {
-        package for package in common_package_set if package not in bootstrap_package_set
-    }
-    seen_common_packages = set()
-    package_blocks = []
-    common_packages = []
-    for card_resolution in card_resolutions:
-        for package in card_resolution:
-            if package not in common_package_set or package in seen_common_packages:
-                continue
-            seen_common_packages.add(package)
-            common_packages.append(package)
-    common_block_packages = tuple((*bootstrap_resolved_packages, *common_packages))
-    package_blocks.append(("common", common_block_packages))
-    package_block_hashes = [_nevra_hash(common_block_packages)]
+        log("Grouping resolved packages into install blocks")
+        package_counts = {}
+        for card_resolution in card_resolutions:
+            for package in set(card_resolution):
+                package_counts[package] = package_counts.get(package, 0) + 1
 
-    resolved_package_list = list(bootstrap_resolved_packages)
-    resolved_package_list.extend(common_packages)
-    for card_name, card_resolution in zip(card_names, card_resolutions):
-        card_packages = []
-        for package in card_resolution:
-            if package in bootstrap_package_set or package in common_package_set:
+        common_package_set = {
+            package for package, count in package_counts.items() if count > 1
+        }
+        common_package_set = {
+            package
+            for package in common_package_set
+            if package not in bootstrap_package_set
+        }
+        seen_common_packages = set()
+        package_blocks = []
+        common_packages = []
+        for card_resolution in card_resolutions:
+            for package in card_resolution:
+                if (
+                    package not in common_package_set
+                    or package in seen_common_packages
+                ):
+                    continue
+                seen_common_packages.add(package)
+                common_packages.append(package)
+        common_block_packages = tuple((*bootstrap_resolved_packages, *common_packages))
+        package_blocks.append(("common", common_block_packages))
+        package_block_hashes = [_nevra_hash(common_block_packages)]
+
+        resolved_package_list = list(bootstrap_resolved_packages)
+        resolved_package_list.extend(common_packages)
+        for card_name, card_resolution in zip(card_names, card_resolutions):
+            card_packages = []
+            for package in card_resolution:
+                if package in bootstrap_package_set or package in common_package_set:
+                    continue
+                if (
+                    _resolved_package_id(package_id_by_nevra, package)
+                    in locally_built_package_ids
+                ):
+                    continue
+                card_packages.append(package)
+            if not card_packages and card_name not in build_card_names:
                 continue
-            if (
-                _resolved_package_id(package_id_by_nevra, package)
-                in locally_built_package_ids
-            ):
-                continue
-            card_packages.append(package)
-        if not card_packages and card_name not in build_card_names:
-            continue
-        card_packages = tuple(card_packages)
-        package_blocks.append((card_name, card_packages))
-        package_block_hashes.append(_nevra_hash(card_packages))
-        resolved_package_list.extend(card_packages)
-    package_blocks = tuple(package_blocks)
-    package_block_hashes = tuple(package_block_hashes)
-    resolved_packages = tuple(resolved_package_list)
-    if not resolved_packages and not package_blocks:
-        raise ConfigError("dnf did not resolve any packages")
-    log(
-        f"Resolved {len(resolved_packages)} packages into "
-        f"{len(package_blocks)} install blocks"
-    )
+            card_packages = tuple(card_packages)
+            package_blocks.append((card_name, card_packages))
+            package_block_hashes.append(_nevra_hash(card_packages))
+            resolved_package_list.extend(card_packages)
+        package_blocks = tuple(package_blocks)
+        package_block_hashes = tuple(package_block_hashes)
+        resolved_packages = tuple(resolved_package_list)
+        if not resolved_packages and not package_blocks:
+            raise ConfigError("dnf did not resolve any packages")
+        log(
+            f"Resolved {len(resolved_packages)} packages into "
+            f"{len(package_blocks)} install blocks"
+        )
 
     builder_images = {}
     builder_package_map = {}
@@ -786,7 +872,12 @@ def _resolve_manifest_metadata(
         )
         package_images_by_block[block_name] = package_image
 
-    for block_name, block_packages in package_blocks:
+    build_image_blocks = package_blocks
+    if target_card_name is not None:
+        target_index = card_names.index(target_card_name)
+        build_image_blocks = ((target_card_name, card_requests[target_index]),)
+
+    for block_name, block_packages in build_image_blocks:
         if block_name not in build_card_names:
             continue
         if block_name in card_spec_hashes:
@@ -961,7 +1052,6 @@ def build_package_card_images(
     cache_only: bool = False,
 ) -> None:
     created: set[str] = set()
-    built_builders: set[str] = set()
     for manifest in metadata:
         for plan in manifest.package_images:
             if not plan.packages or plan.image in created:
@@ -986,7 +1076,26 @@ def build_package_card_images(
             )
             created.add(plan.image)
 
+    build_builder_images(metadata, cache_only=cache_only)
+
+
+def build_builder_images(
+    metadata: tuple[ResolvedBuildMetadata, ...],
+    *,
+    targets: tuple[str, ...] = tuple(),
+    cache_only: bool = False,
+) -> None:
+    target_set = set(targets)
+    built_builders: set[str] = set()
+    for manifest in metadata:
         for plan in manifest.build_images:
+            if (
+                target_set
+                and plan.block not in target_set
+                and plan.image not in target_set
+                and plan.builder_image not in target_set
+            ):
+                continue
             if plan.builder_image in built_builders:
                 continue
             if _image_exists(manifest.podman, plan.builder_image):
@@ -1762,6 +1871,42 @@ def _metadata_build_result(
         build_images=tuple(build_images_by_block.values()),
         build_blocks=tuple(build_images_by_block),
         builder_images=tuple(plan.builder_image for plan in metadata.build_images),
+    )
+
+
+def _target_card_build_result(
+    metadata: ResolvedBuildMetadata,
+    target: str,
+    build_outputs: BuildImageOutputs,
+) -> BuildResult:
+    package_blocks = tuple(
+        (block_name, block_packages)
+        for block_name, block_packages in metadata.card_packages
+        if block_name == target
+    )
+    build_images_by_block = dict(build_outputs.images_by_block)
+    build_plans = tuple(plan for plan in metadata.build_images if plan.block == target)
+    return BuildResult(
+        image=metadata.image,
+        distro=metadata.distro,
+        orchestrator=metadata.orchestrator,
+        output_image=metadata.output_image,
+        requested_packages=metadata.requested_packages,
+        resolved_packages=tuple(
+            package
+            for _block_name, block_packages in package_blocks
+            for package in block_packages
+        ),
+        package_blocks=package_blocks,
+        package_dir=Path(metadata.package_dir),
+        repo_dir=Path(metadata.repo_dir),
+        podman=metadata.podman,
+        cache_version=metadata.cache_version,
+        repo_images=metadata.repo_images,
+        package_images=tuple(),
+        build_images=tuple(build_images_by_block.values()),
+        build_blocks=tuple(build_images_by_block),
+        builder_images=tuple(plan.builder_image for plan in build_plans),
     )
 
 

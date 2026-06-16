@@ -92,3 +92,14 @@ class BuildCcacheTests(unittest.TestCase):
 
         self.assertFalse(enabled.no_ccache)
         self.assertTrue(disabled.no_ccache)
+
+    def test_build_parser_accepts_target_card(self) -> None:
+        parser = build_parser()
+
+        default = parser.parse_args(["build", "manifest.yml"])
+        targeted = parser.parse_args(
+            ["build", "--card", "cards/base/scx", "manifest.yml"]
+        )
+
+        self.assertIsNone(default.card)
+        self.assertEqual(targeted.card, "cards/base/scx")
