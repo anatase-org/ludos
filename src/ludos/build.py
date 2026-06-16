@@ -3314,11 +3314,14 @@ def _specs_build_script(
         source_dir = f"/workspace/{staged.source_dir.relative_to(workspace_dir).as_posix()}"
         spec_path = f"/workspace/{staged.spec_path.relative_to(workspace_dir).as_posix()}"
         spec_name = staged.spec_path.name
+        spec_source_cache_name = _identifier(staged.spec_path.stem)
         targets = " ".join(shlex.quote(target) for target in staged.targets)
         lines.extend(
             [
                 f"find {shlex.quote(source_dir)} -maxdepth 1 -type f ! -name '*.spec' -exec cp -f -t \"$topdir/SOURCES\" {{}} +",
                 f"cp -f {shlex.quote(spec_path)} \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
+                f"spec_source_cache=\"$source_cache/{spec_source_cache_name}\"",
+                'mkdir -p "$spec_source_cache"',
                 f"if spectool -l \"$topdir/SPECS/{shlex.quote(spec_name)}\" > \"$topdir/sources.list\"; then",
                 "  if grep -Eq '^(Source|Patch)[0-9]*:[[:space:]]+https?://' \"$topdir/sources.list\"; then",
                 "  missing_sources=0",
@@ -3328,15 +3331,15 @@ def _specs_build_script(
                 "    case \"$source_url\" in http://*|https://*) ;; *) continue ;; esac",
                 "    source_name=${source_url##*/}",
                 "    source_name=${source_name%%\\?*}",
-                "    if [ ! -f \"$source_cache/$source_name\" ]; then",
+                "    if [ ! -f \"$spec_source_cache/$source_name\" ]; then",
                 "      missing_sources=1",
                 "      break",
                 "    fi",
                 "  done < \"$topdir/sources.list\"",
                 "  if [ \"$missing_sources\" -eq 1 ]; then",
-                f"    spectool -g -C \"$source_cache\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
+                f"    spectool -g -C \"$spec_source_cache\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
                 "  fi",
-                '  find "$source_cache" -maxdepth 1 -type f -exec cp -n -t "$topdir/SOURCES" {} +',
+                '  find "$spec_source_cache" -maxdepth 1 -type f -exec cp -n -t "$topdir/SOURCES" {} +',
                 "  fi",
                 "fi",
                 f"for target in {targets}; do",

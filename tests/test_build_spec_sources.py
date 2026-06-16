@@ -375,6 +375,32 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         self.assertIn("i686-redhat-linux", script)
         self.assertIn("export CPLUS_INCLUDE_PATH=", script)
 
+    def test_remote_sources_are_cached_per_spec_name(self) -> None:
+        workspace_dir = Path("/workspace")
+        staged_specs = (
+            StagedSpec(
+                spec=SpecBuild(spec="scx-tools.spec"),
+                spec_path=workspace_dir / "scx-tools.spec",
+                source_dir=workspace_dir,
+                packages=("scx-tools",),
+                targets=("x86_64",),
+            ),
+            StagedSpec(
+                spec=SpecBuild(spec="scx-scheds.spec"),
+                spec_path=workspace_dir / "scx-scheds.spec",
+                source_dir=workspace_dir,
+                packages=("scx-scheds",),
+                targets=("x86_64",),
+            ),
+        )
+
+        script = _specs_build_script(staged_specs, workspace_dir, "x86_64")
+
+        self.assertIn('spec_source_cache="$source_cache/scx_tools"', script)
+        self.assertIn('spec_source_cache="$source_cache/scx_scheds"', script)
+        self.assertIn('[ ! -f "$spec_source_cache/$source_name" ]', script)
+        self.assertIn('spectool -g -C "$spec_source_cache"', script)
+
     def test_cross_arch_variants_are_discovered_from_builddep_dependencies(self) -> None:
         package_id_by_nevra: dict[str, tuple[str, str]] = {}
         workspace_dir = Path("/workspace")
