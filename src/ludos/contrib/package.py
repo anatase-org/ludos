@@ -29,36 +29,46 @@ def package_target(
     location: Path,
     *,
     card: Path | None = None,
+    subdir: str = "",
 ) -> int:
     if action == "fork":
-        return fork_package(git_url, location, card=card)
+        return fork_package(git_url, location, card=card, subdir=subdir)
     raise ConfigError(f"unsupported package action: {action}")
 
 
-def fork_package(git_url: str, location: Path, *, card: Path | None = None) -> int:
+def fork_package(
+    git_url: str,
+    location: Path,
+    *,
+    card: Path | None = None,
+    subdir: str = "",
+) -> int:
     destination = location.expanduser().resolve()
     _guard_empty_destination(destination)
     card_path = _resolve_card_path(destination, card)
+    upstream_subdir = _clean_subdir(subdir)
 
     with tempfile.TemporaryDirectory(prefix="ludos-package-") as temp_dir:
         repo_dir = Path(temp_dir) / "repo"
         run(["git", "clone", "--depth", "1", git_url, str(repo_dir)])
-        spec_paths = _discover_specs(repo_dir)
+        package_dir = _package_dir(repo_dir, upstream_subdir)
+        spec_paths = _discover_specs(package_dir)
         if not spec_paths:
             raise ConfigError(f"{git_url}: package repo has no spec files")
 
         card_data = _load_card(card_path)
         specs = _card_specs(card_data, card_path)
         entries = _spec_entries(
-            repo_dir=repo_dir,
+            package_dir=package_dir,
             destination=destination,
             card_path=card_path,
             git_url=git_url,
+            subdir=upstream_subdir,
             spec_paths=spec_paths,
         )
         _guard_duplicate_specs(specs, entries, card_path)
 
-        _copy_repo_contents(repo_dir, destination)
+        _copy_repo_contents(package_dir, destination)
         specs.extend(entries)
         _write_card(card_path, card_data)
 
@@ -82,15 +92,31 @@ def _resolve_card_path(destination: Path, card: Path | None) -> Path:
     return destination / "card.yml"
 
 
-def _discover_specs(repo_dir: Path) -> tuple[Path, ...]:
+def _clean_subdir(subdir: str) -> str:
+    if not subdir:
+        return ""
+    path = Path(subdir)
+    if path.is_absolute() or ".." in path.parts:
+        raise ConfigError(f"{subdir}: package subdir must not escape the repository")
+    return path.as_posix().strip("/")
+
+
+def _package_dir(repo_dir: Path, subdir: str) -> Path:
+    package_dir = repo_dir / subdir if subdir else repo_dir
+    if not package_dir.is_dir():
+        raise ConfigError(f"{subdir}: package subdir does not exist")
+    return package_dir
+
+
+def _discover_specs(package_dir: Path) -> tuple[Path, ...]:
     return tuple(
         sorted(
             (
                 path
-                for path in repo_dir.rglob("*.spec")
-                if path.is_file() and not _has_vcs_part(path.relative_to(repo_dir))
+                for path in package_dir.rglob("*.spec")
+                if path.is_file() and not _has_vcs_part(path.relative_to(package_dir))
             ),
-            key=lambda path: path.relative_to(repo_dir).as_posix(),
+            key=lambda path: path.relative_to(package_dir).as_posix(),
         )
     )
 
@@ -124,37 +150,41 @@ def _card_specs(card_data: dict[str, Any], card_path: Path) -> list[dict[str, An
 
 def _spec_entries(
     *,
-    repo_dir: Path,
+    package_dir: Path,
     destination: Path,
     card_path: Path,
     git_url: str,
+    subdir: str,
     spec_paths: tuple[Path, ...],
 ) -> list[dict[str, Any]]:
     entries = []
     for index, spec_path in enumerate(spec_paths):
-        destination_spec = destination / spec_path.relative_to(repo_dir)
+        destination_spec = destination / spec_path.relative_to(package_dir)
         entry: dict[str, Any] = {
             "spec": _relative_path(card_path.parent, destination_spec),
-            "files": _spec_files(repo_dir, spec_path),
+            "files": _spec_files(package_dir, spec_path),
             "packages": [_spec_name(spec_path)],
         }
         if index == 0:
-            entry["upstream"] = {
+            upstream = {
                 "type": "dist-git",
                 "url": git_url,
                 "branch": DEFAULT_BRANCH,
             }
+            if subdir:
+                upstream["subdir"] = subdir
+            entry["upstream"] = upstream
         entries.append(entry)
     return entries
 
 
-def _spec_files(repo_dir: Path, spec_path: Path) -> list[str]:
+def _spec_files(package_dir: Path, spec_path: Path) -> list[str]:
     spec_dir = spec_path.parent
     files = [
         path.relative_to(spec_dir).as_posix()
         for path in spec_dir.rglob("*")
         if path.is_file()
-        and not _has_vcs_part(path.relative_to(repo_dir))
+        and not _has_vcs_part(path.relative_to(package_dir))
         and not _has_vcs_part(path.relative_to(spec_dir))
     ]
     return sorted(files)

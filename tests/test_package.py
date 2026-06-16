@@ -10,6 +10,7 @@ import yaml
 
 from ludos.__main__ import build_parser
 from ludos.contrib.package import fork_package
+from ludos.model import Card
 
 
 class PackageForkTests(unittest.TestCase):
@@ -101,6 +102,44 @@ class PackageForkTests(unittest.TestCase):
         self.assertNotIn("patch", card["specs"][0])
         self.assertNotIn("patch", card["specs"][1])
 
+    def test_forks_subdir_as_package_root(self) -> None:
+        self._write_repo("sources/scx-tools/scx.spec", "Name: scx\nVersion: 1\n")
+        self._write_repo("sources/scx-tools/sources", "hash  scx.tar.xz\n")
+        self._write_repo("sources/other/other.spec", "Name: other\nVersion: 1\n")
+        self._commit("packages")
+        location = self.root / "cards" / "base" / "scx"
+
+        fork_package(
+            self.repo.as_uri(),
+            location,
+            subdir="sources/scx-tools",
+        )
+
+        self.assertEqual(
+            (location / "scx.spec").read_text(encoding="utf-8"),
+            "Name: scx\nVersion: 1\n",
+        )
+        self.assertEqual(
+            (location / "sources").read_text(encoding="utf-8"),
+            "hash  scx.tar.xz\n",
+        )
+        self.assertFalse((location / "other.spec").exists())
+        card = self._load_yaml(location / "card.yml")
+        self.assertEqual(card["specs"][0]["spec"], "scx.spec")
+        self.assertEqual(
+            card["specs"][0]["upstream"],
+            {
+                "type": "dist-git",
+                "url": self.repo.as_uri(),
+                "branch": "rawhide",
+                "subdir": "sources/scx-tools",
+            },
+        )
+        parsed = Card.from_file(location / "card.yml")
+        self.assertIsNotNone(parsed.specs[0].upstream)
+        assert parsed.specs[0].upstream is not None
+        self.assertEqual(parsed.specs[0].upstream.subdir, "sources/scx-tools")
+
     def test_duplicate_spec_entry_fails_without_copying(self) -> None:
         self._write_repo("pkg.spec", "Name: pkg\nVersion: 1\n")
         self._commit("package")
@@ -136,6 +175,8 @@ class PackageForkTests(unittest.TestCase):
                 "./cards/pkg",
                 "--card",
                 "./cards/gaming.yml",
+                "--subdir",
+                "sources/scx-tools",
             ]
         )
 
@@ -143,6 +184,7 @@ class PackageForkTests(unittest.TestCase):
         self.assertEqual(args.git_url, "https://src.fedoraproject.org/rpms/pkg")
         self.assertEqual(args.location, Path("./cards/pkg"))
         self.assertEqual(args.card, Path("./cards/gaming.yml"))
+        self.assertEqual(args.subdir, "sources/scx-tools")
 
     def _write_repo(self, relative: str, text: str) -> None:
         path = self.repo / relative

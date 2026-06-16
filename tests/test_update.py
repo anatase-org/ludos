@@ -64,6 +64,56 @@ class DistGitUpdateTests(unittest.TestCase):
             conflict_text,
         )
 
+    def test_dist_git_merge_uses_upstream_subdir(self) -> None:
+        self._write_repo("sources/scx-tools/scx.spec", "Name: scx\nVersion: 1\n")
+        self._write_repo("outside.spec", "Name: outside\nVersion: 1\n")
+        self._commit("initial")
+        old_sha = self._rev_parse("HEAD")
+
+        self._write_repo(
+            "sources/scx-tools/scx.spec",
+            "Name: scx\nVersion: 2-upstream\n",
+        )
+        self._commit("upstream update")
+        new_sha = self._rev_parse("HEAD")
+
+        (self.card_dir / "scx.spec").write_text(
+            "Name: scx\nVersion: 2-local\n",
+            encoding="utf-8",
+        )
+        source = UpstreamSource(
+            key="scx",
+            source_dir=self.card_dir,
+            spec=SpecBuild(spec="scx.spec", files=("scx.spec",)),
+            upstream=UpstreamRef(
+                type="dist-git",
+                url=self.repo.as_uri(),
+                subdir="sources/scx-tools",
+            ),
+        )
+
+        conflicts = _merge_dist_git_update(
+            repo_dir=self.repo,
+            source=source,
+            old_sha=old_sha,
+            new_sha=new_sha,
+        )
+
+        self.assertEqual(conflicts, ("scx.spec",))
+        self.assertFalse((self.repo / "scx.spec").exists())
+        conflict_text = (self.repo / "sources" / "scx-tools" / "scx.spec").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "<<<<<<< HEAD\nVersion: 2-upstream\n"
+            "=======\nVersion: 2-local\n>>>>>>>",
+            conflict_text,
+        )
+        self.assertEqual(
+            (self.repo / "outside.spec").read_text(encoding="utf-8"),
+            "Name: outside\nVersion: 1\n",
+        )
+
     def _write_repo(self, relative: str, text: str) -> None:
         path = self.repo / relative
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -167,6 +167,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Card YAML file to append. Defaults to <location>/card.yml.",
     )
+    package_fork.add_argument(
+        "--subdir",
+        default="",
+        help="Repository subdirectory to copy and track.",
+    )
     package_fork.set_defaults(func=package_command)
 
     cleanup = subcommands.add_parser(
@@ -298,6 +303,7 @@ def package_command(args: argparse.Namespace) -> int:
         args.git_url,
         args.location,
         card=args.card,
+        subdir=args.subdir,
     )
 
 

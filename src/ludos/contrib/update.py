@@ -345,10 +345,11 @@ def _merge_dist_git_update(
     _rev_parse(repo_dir, old_sha)
     _rev_parse(repo_dir, new_sha)
     _run_git(repo_dir, ["checkout", "--detach", old_sha], capture=True)
+    upstream_dir = _upstream_worktree_dir(repo_dir, source.upstream)
     if source.spec.files:
-        _overlay_spec_files(repo_dir, source)
+        _overlay_spec_files(upstream_dir, source)
     else:
-        _replace_worktree_contents(repo_dir, source.source_dir)
+        _replace_worktree_contents(upstream_dir, source.source_dir)
     _run_git(repo_dir, ["add", "-A"])
     local_sha = old_sha
     if not _git_tree_clean(repo_dir):
@@ -399,10 +400,52 @@ def _merge_dist_git_update(
         check=False,
     )
     if conflicts.returncode == 0 and conflicts.stdout.strip():
-        return tuple(conflicts.stdout.splitlines())
+        return _source_relative_conflict_paths(
+            repo_dir,
+            source,
+            conflicts.stdout.splitlines(),
+        )
     raise ConfigError(
         f"{repo_dir}: git merge failed with exit status {merge.returncode}"
     )
+
+
+def _upstream_worktree_dir(repo_dir: Path, upstream: UpstreamRef) -> Path:
+    if not upstream.subdir:
+        return repo_dir
+    subdir = Path(upstream.subdir)
+    worktree_dir = (repo_dir / subdir).resolve()
+    try:
+        worktree_dir.relative_to(repo_dir.resolve())
+    except ValueError as exc:
+        raise ConfigError(f"{repo_dir}: upstream subdir escapes repository") from exc
+    if not worktree_dir.is_dir():
+        raise ConfigError(
+            f"{repo_dir}: upstream subdir does not exist: {upstream.subdir}"
+        )
+    return worktree_dir
+
+
+def _source_relative_conflict_paths(
+    repo_dir: Path,
+    source: UpstreamSource,
+    conflict_paths: list[str],
+) -> tuple[str, ...]:
+    if not source.upstream.subdir:
+        return tuple(conflict_paths)
+
+    subdir = Path(source.upstream.subdir)
+    relative_paths = []
+    for conflict_path in conflict_paths:
+        path = Path(conflict_path)
+        try:
+            relative_paths.append(path.relative_to(subdir).as_posix())
+        except ValueError as exc:
+            raise ConfigError(
+                f"{repo_dir}: merge conflict outside upstream subdir "
+                f"'{source.upstream.subdir}': {conflict_path}"
+            ) from exc
+    return tuple(relative_paths)
 
 
 def _update_patch_source(
@@ -528,7 +571,11 @@ def _conflict_summary(
     *,
     dry_run: bool,
 ) -> str:
-    base_dir = repo_dir if dry_run else source.source_dir
+    base_dir = (
+        _upstream_worktree_dir(repo_dir, source.upstream)
+        if dry_run
+        else source.source_dir
+    )
     return "\n".join(f" - {_display_path(base_dir / path)}" for path in conflict_paths)
 
 
@@ -560,31 +607,32 @@ def _copy_worktree_to_source(repo_dir: Path, source_dir: Path) -> None:
 
 
 def _copy_merged_source(repo_dir: Path, source: UpstreamSource) -> None:
+    upstream_dir = _upstream_worktree_dir(repo_dir, source.upstream)
     if source.spec.files:
-        _copy_merged_spec_files(repo_dir, source)
+        _copy_merged_spec_files(upstream_dir, source)
     else:
-        _copy_worktree_to_source(repo_dir, source.source_dir)
+        _copy_worktree_to_source(upstream_dir, source.source_dir)
 
 
-def _overlay_spec_files(repo_dir: Path, source: UpstreamSource) -> None:
+def _overlay_spec_files(upstream_dir: Path, source: UpstreamSource) -> None:
     spec_name = Path(source.spec.spec).name
-    shutil.copy2(source.source_dir / spec_name, repo_dir / spec_name)
+    shutil.copy2(source.source_dir / spec_name, upstream_dir / spec_name)
     for pattern in source.spec.files:
         matches = sorted(source.source_dir.glob(pattern))
         if not matches:
             continue
-        _remove_matches(repo_dir, pattern)
+        _remove_matches(upstream_dir, pattern)
         for path in matches:
-            _copy_relative_path(path, source.source_dir, repo_dir)
+            _copy_relative_path(path, source.source_dir, upstream_dir)
 
 
-def _copy_merged_spec_files(repo_dir: Path, source: UpstreamSource) -> None:
+def _copy_merged_spec_files(upstream_dir: Path, source: UpstreamSource) -> None:
     spec_name = Path(source.spec.spec).name
-    shutil.copy2(repo_dir / spec_name, source.source_dir / spec_name)
+    shutil.copy2(upstream_dir / spec_name, source.source_dir / spec_name)
     for pattern in source.spec.files:
         _remove_matches(source.source_dir, pattern)
-        for path in sorted(repo_dir.glob(pattern)):
-            _copy_relative_path(path, repo_dir, source.source_dir)
+        for path in sorted(upstream_dir.glob(pattern)):
+            _copy_relative_path(path, upstream_dir, source.source_dir)
 
 
 def _remove_matches(base_dir: Path, pattern: str) -> None:

@@ -19,6 +19,7 @@ class UpstreamRef:
     url: str
     branch: str = ""
     ref: str = ""
+    subdir: str = ""
 
 
 @dataclass(frozen=True)
@@ -479,6 +480,7 @@ def _upstream_ref(
     url = value.get("url")
     branch = value.get("branch", "")
     ref = value.get("ref", "")
+    subdir = value.get("subdir", "")
     if not isinstance(upstream_type, str) or not upstream_type.strip():
         raise ConfigError(f"{path}: '{label}.{key}.type' must be a non-empty string")
     if not isinstance(url, str) or not url.strip():
@@ -487,7 +489,20 @@ def _upstream_ref(
         raise ConfigError(
             f"{path}: '{label}.{key}.branch' and '{label}.{key}.ref' must be strings"
         )
-    return UpstreamRef(type=upstream_type, url=url, branch=branch, ref=ref)
+    if not isinstance(subdir, str):
+        raise ConfigError(f"{path}: '{label}.{key}.subdir' must be a string")
+    subdir_path = Path(subdir)
+    if subdir and (subdir_path.is_absolute() or ".." in subdir_path.parts):
+        raise ConfigError(
+            f"{path}: '{label}.{key}.subdir' must not escape the repository"
+        )
+    return UpstreamRef(
+        type=upstream_type,
+        url=url,
+        branch=branch,
+        ref=ref,
+        subdir=subdir_path.as_posix().strip("/") if subdir else "",
+    )
 
 
 def _patch_ref(
