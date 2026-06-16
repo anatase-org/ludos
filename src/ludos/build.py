@@ -170,6 +170,41 @@ class SpecSource:
     stage_prefix: Path = Path(".")
 
 
+def _split_target_card(value: str) -> tuple[str, str | None]:
+    card_text, separator, spec = value.rpartition(":")
+    if not separator:
+        return value, None
+    if not card_text or not spec:
+        raise ConfigError("targeted card spec must be '<card>:<spec>'")
+    return card_text, spec
+
+
+def _select_target_spec(
+    card_source: Path,
+    specs: tuple[SpecBuild, ...],
+    spec_key: str,
+    arch: str,
+) -> SpecBuild:
+    matches = []
+    for spec in specs:
+        spec_path = Path(spec.spec)
+        if spec_key in (spec.spec, spec_path.name, spec_path.stem):
+            matches.append(spec)
+
+    if not matches:
+        available = ", ".join(spec.spec for spec in specs)
+        raise ConfigError(
+            f"{card_source}: spec '{spec_key}' not found. Available: {available}"
+        )
+    if len(matches) > 1:
+        raise ConfigError(f"{card_source}: ambiguous spec '{spec_key}'")
+
+    spec = matches[0]
+    if not _spec_packages_for_arch(spec, arch):
+        raise ConfigError(f"{card_source}: spec '{spec_key}' has no packages on {arch}")
+    return spec
+
+
 def build_manifest(
     manifest_path: Path,
     cards_dir: Path | None = None,
@@ -226,7 +261,8 @@ def _resolve_target_card(
     card: str,
 ) -> str:
     root_dir = manifest_path.resolve().parent
-    target_source = _resolve_card_path(card, root_dir, cards_dir).resolve()
+    target_card, _target_spec = _split_target_card(card)
+    target_source = _resolve_card_path(target_card, root_dir, cards_dir).resolve()
     blocks_by_source = {
         Path(source).resolve(): block
         for block, source in metadata.card_sources
@@ -477,8 +513,14 @@ def _resolve_manifest_metadata(
 
     card_entries.sort(key=lambda entry: (entry[0], entry[1]))
     target_card_name = None
+    target_spec = None
     if target_card is not None:
-        target_source = _resolve_card_path(target_card, root_dir, cards_dir).resolve()
+        target_card_path, target_spec = _split_target_card(target_card)
+        target_source = _resolve_card_path(
+            target_card_path,
+            root_dir,
+            cards_dir,
+        ).resolve()
         for _priority, _insertion_order, card_name, card in card_entries:
             if card.source is not None and card.source.resolve() == target_source:
                 target_card_name = card_name
@@ -493,9 +535,11 @@ def _resolve_manifest_metadata(
     card_file_sets = []
     card_builds = {}
     card_specs = {}
+    card_build_specs = {}
     card_build_deps = {}
     card_hashes = {}
     card_spec_hashes = {}
+    card_build_spec_hashes = {}
     spec_source_revisions = {}
     card_envs = {}
     card_sources = {}
@@ -564,6 +608,15 @@ def _resolve_manifest_metadata(
                 card_specs[card_name] = active_specs
             else:
                 log(f"Skipping specs for card without packages on {arch}: {card_name}")
+            if target_spec is not None and active_specs:
+                card_build_specs[card_name] = (
+                    _select_target_spec(
+                        card.source,
+                        card.specs,
+                        target_spec,
+                        arch,
+                    ),
+                )
         if card_name in card_specs:
             card_build_deps[card_name] = card.build_deps
             card_spec_hash, card_spec_revisions = _card_specs_hash(
@@ -577,6 +630,19 @@ def _resolve_manifest_metadata(
             card_spec_hashes[card_name] = card_spec_hash
             if card_spec_revisions:
                 spec_source_revisions[card_name] = card_spec_revisions
+            build_specs = card_build_specs.get(card_name)
+            if build_specs is not None and build_specs != card_specs[card_name]:
+                build_spec_hash, _ = _card_specs_hash(
+                    card.source,
+                    build_specs,
+                    card_env,
+                    card.prepare.rstrip(),
+                    spec_source_cache_dir,
+                    cache_only=cache_only,
+                )
+                card_build_spec_hashes[card_name] = build_spec_hash
+        if active_target and target_spec is not None and not card.specs:
+            raise ConfigError(f"{card.source}: card has no specs")
         if card.hash.strip():
             card_hashes[card_name] = card.hash.strip()
         if card.postprocess.strip():
@@ -853,7 +919,7 @@ def _resolve_manifest_metadata(
         builder_package_map[card_name] = builder_packages
         if card_name in card_specs:
             declared_package_ids = []
-            for spec in card_specs[card_name]:
+            for spec in card_build_specs.get(card_name, card_specs[card_name]):
                 declared_package_ids.extend(
                     _package_request_ids(_spec_packages_for_arch(spec, arch), arch)
                 )
@@ -895,7 +961,9 @@ def _resolve_manifest_metadata(
     for block_name, block_packages in build_image_blocks:
         if block_name not in build_card_names:
             continue
-        if block_name in card_spec_hashes:
+        if block_name in card_build_spec_hashes:
+            build_hash = card_build_spec_hashes[block_name]
+        elif block_name in card_spec_hashes:
             build_hash = card_spec_hashes[block_name]
         else:
             build_hash = _card_build_hash(
@@ -1011,7 +1079,13 @@ def _resolve_manifest_metadata(
         ),
         card_prepare_scripts=tuple(card_prepare_scripts.items()),
         card_builds=tuple(card_builds.items()),
-        card_specs=tuple(card_specs.items()),
+        card_specs=tuple(
+            (
+                card_name,
+                card_build_specs.get(card_name, specs),
+            )
+            for card_name, specs in card_specs.items()
+        ),
         spec_source_revisions=tuple(
             (card_name, spec_source, revision)
             for card_name, revisions in spec_source_revisions.items()

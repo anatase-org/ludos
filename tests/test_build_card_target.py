@@ -32,7 +32,11 @@ class TargetCardBuildTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_targeted_build_accepts_manifest_card_path_forms(self) -> None:
-        for selector in ("cards/base/scx", "cards/base/scx/card.yml"):
+        for selector in (
+            "cards/base/scx",
+            "cards/base/scx/card.yml",
+            "cards/base/scx/card.yml:scx.spec",
+        ):
             with self.subTest(selector=selector):
                 metadata = self._metadata()
                 build_outputs = BuildImageOutputs(
@@ -197,6 +201,51 @@ class TargetCardBuildTests(unittest.TestCase):
             builder_images.append(metadata.build_images[0].builder_image)
 
         self.assertNotEqual(builder_images[0], builder_images[1])
+
+    def test_targeted_spec_filters_build_specs_only(self) -> None:
+        self._write_build_manifest(
+            scx_specs=(
+                ("scx.spec", "scx"),
+                ("scx-tools.spec", "scx-tools"),
+            ),
+        )
+
+        def resolve_packages(
+            _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
+        ):
+            resolved = tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+            for package, resolved_package in zip(packages, resolved):
+                package_id_by_nevra[resolved_package] = (package, "x86_64")
+            return resolved
+
+        with (
+            patch("ludos.build.shutil.which", side_effect=lambda command: command),
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._extract_image_paths"),
+            patch("ludos.build._stage_card_specs", return_value=tuple()) as stage,
+            patch(
+                "ludos.build._resolve_staged_spec_builder_packages",
+                return_value=("spec-builddep",),
+            ),
+            patch("ludos.build._resolve_packages", side_effect=resolve_packages),
+        ):
+            metadata = _resolve_manifest_metadata(
+                self.manifest,
+                target_card="cards/base/scx:scx-tools.spec",
+            )
+
+        self.assertEqual(
+            tuple(spec.spec for spec in stage.call_args.kwargs["specs"]),
+            ("scx.spec", "scx-tools.spec"),
+        )
+        self.assertEqual(
+            tuple(
+                spec.spec
+                for _card, specs in metadata.card_specs
+                for spec in specs
+            ),
+            ("scx-tools.spec",),
+        )
 
     def test_metadata_uses_random_dnf_workspace(self) -> None:
         self._write_build_manifest()
@@ -382,7 +431,11 @@ class TargetCardBuildTests(unittest.TestCase):
             spec_source_revisions=(),
         )
 
-    def _write_build_manifest(self) -> None:
+    def _write_build_manifest(
+        self,
+        *,
+        scx_specs: tuple[tuple[str, str], ...] = (("scx.spec", "scx"),),
+    ) -> None:
         (self.root / "repos").mkdir()
         (self.root / "repos" / "fedora.repo").write_text(
             "[fedora]\nname=Fedora\nbaseurl=https://example.com\n",
@@ -424,11 +477,22 @@ class TargetCardBuildTests(unittest.TestCase):
                 "build-deps:",
                 "  - rpm-build",
                 "specs:",
-                "  - spec: scx.spec",
-                "    packages:",
-                "      - scx",
+                *tuple(
+                    line
+                    for spec_file, package in scx_specs
+                    for line in (
+                        f"  - spec: {spec_file}",
+                        "    packages:",
+                        f"      - {package}",
+                    )
+                ),
             ),
         )
+        for spec_file, package in scx_specs:
+            (self.scx_source.parent / spec_file).write_text(
+                f"Name: {package}\nVersion: 1\n",
+                encoding="utf-8",
+            )
         self._write_card(
             self.root / "cards" / "gaming" / "hhd.yml",
             (
