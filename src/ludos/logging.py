@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as _datetime
 import logging
+import os
 import shutil
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -15,6 +16,7 @@ from rich.traceback import install as install_rich_traceback
 console = Console()
 error_console = Console(stderr=True)
 
+AGENT = os.environ.get("CODEX_CI") == "1" or os.environ.get("AGENT") == "1"
 STREAM_HISTORY_LIMIT = 15
 STREAM_TRUNCATED_LINE = "| ... <truncated>"
 INFO_MESSAGE_INDENT = 8
@@ -59,20 +61,36 @@ class LudosHandler(logging.Handler):
     def _emit_lines(
         self, levelno: int, levelname: str, created: float, lines: list[str]
     ) -> None:
-        timestamp = _datetime.datetime.fromtimestamp(created).strftime("%H:%M")
-        time_prefix = f"[{timestamp}]" if timestamp != self._last_timestamp else " " * 7
-        self._last_timestamp = timestamp
+        if AGENT:
+            time_prefix = ""
+        else:
+            timestamp = _datetime.datetime.fromtimestamp(created).strftime("%H:%M")
+            time_prefix = (
+                f"[{timestamp}]" if timestamp != self._last_timestamp else ""
+            )
+            self._last_timestamp = timestamp
         target = error_console if levelno >= logging.WARNING else console
         for index, line in enumerate(lines):
             if index == 0:
                 line_prefix = Text(time_prefix, no_wrap=True)
+                prefix_has_text = bool(time_prefix)
                 if levelno >= logging.ERROR:
-                    line_prefix.append(f" {levelname}:", style="red")
+                    if prefix_has_text:
+                        line_prefix.append(" ")
+                    line_prefix.append(f"{levelname}:", style="red")
+                    prefix_has_text = True
                 elif levelno >= logging.WARNING:
-                    line_prefix.append(f" {levelname}:", style="yellow")
-                line_prefix.append(" ")
+                    if prefix_has_text:
+                        line_prefix.append(" ")
+                    line_prefix.append(f"{levelname}:", style="yellow")
+                    prefix_has_text = True
+                if prefix_has_text:
+                    line_prefix.append(" ")
             else:
-                width = 8 + (len(levelname) + 2 if levelno >= logging.WARNING else 0)
+                width = (
+                    (len(time_prefix) + 1 if time_prefix else 0)
+                    + (len(levelname) + 2 if levelno >= logging.WARNING else 0)
+                )
                 line_prefix = Text(" " * width, no_wrap=True)
             try:
                 target.print(line_prefix, line, sep="")
@@ -95,7 +113,7 @@ class LudosHandler(logging.Handler):
         return [f"| {line}" for line in message.splitlines() or [""]]
 
     def _supports_ephemeral_stream(self) -> bool:
-        return console.is_terminal
+        return console.is_terminal and not AGENT
 
     def _stream_display_limit(self) -> int:
         terminal_lines = shutil.get_terminal_size(fallback=(80, 24)).lines
