@@ -1805,6 +1805,11 @@ def _image_tag(image: str) -> str:
     return image.rsplit(":", 1)[-1]
 
 
+def _latest_image(image: str) -> str:
+    repository, _tag = image.rsplit(":", 1)
+    return f"{repository}:latest"
+
+
 def _image_exists(podman: str, image: str) -> bool:
     return subprocess.run([podman, "image", "exists", image], check=False).returncode == 0
 
@@ -1829,6 +1834,7 @@ def _create_orchestrator_image(
 
     if not packages:
         subprocess.run([podman, "tag", source, image], check=True)
+        subprocess.run([podman, "tag", image, _latest_image(image)], check=True)
         return
 
     package_args = " ".join(shlex.quote(package) for package in packages)
@@ -1883,6 +1889,7 @@ def _create_orchestrator_image(
         raise ConfigError(
             f"orchestrator image build failed with exit status {returncode}"
         )
+    subprocess.run([podman, "tag", image, _latest_image(image)], check=True)
 
 
 def _repo_id(rendered_repo: str, source: Path) -> str:

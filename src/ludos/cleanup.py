@@ -15,6 +15,7 @@ from .model import ConfigError
 VERSIONED_CLEANUP_REPOSITORIES = ("orchestrator", "repos")
 RESOLVED_CLEANUP_REPOSITORIES = ("cards", "builds", "builders")
 CLEANUP_REPOSITORIES = (*VERSIONED_CLEANUP_REPOSITORIES, *RESOLVED_CLEANUP_REPOSITORIES)
+LATEST_CLEANUP_REPOSITORIES = ("orchestrator",)
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,10 @@ def _stale_local_images(
         f"localhost/{local_prefix}{repository}"
         for repository in VERSIONED_CLEANUP_REPOSITORIES
     }
+    latest_cache_repositories = {
+        f"localhost/{local_prefix}{repository}"
+        for repository in LATEST_CLEANUP_REPOSITORIES
+    }
     resolved_cache_repositories = {
         f"localhost/{local_prefix}{repository}"
         for repository in RESOLVED_CLEANUP_REPOSITORIES
@@ -166,6 +171,7 @@ def _stale_local_images(
                 repository,
                 tag,
                 versioned_cache_repositories,
+                latest_cache_repositories,
                 resolved_cache_repositories,
                 manifest_repositories,
                 manifest_keep_refs,
@@ -282,6 +288,7 @@ def _keep_named_image(
     repository: str,
     tag: str,
     versioned_cache_repositories: set[str],
+    latest_cache_repositories: set[str],
     resolved_cache_repositories: set[str],
     manifest_repositories: set[str],
     manifest_keep_refs: set[str],
@@ -291,6 +298,8 @@ def _keep_named_image(
         return True
     if repository in resolved_cache_repositories:
         return False
+    if repository in latest_cache_repositories and tag == "latest":
+        return True
     if repository in versioned_cache_repositories:
         return tag.endswith(current_suffix)
     if repository in manifest_repositories:
