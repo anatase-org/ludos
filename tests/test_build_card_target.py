@@ -155,6 +155,37 @@ class TargetCardBuildTests(unittest.TestCase):
         self.assertEqual(Path(specs_hash.call_args.args[0]), self.scx_source)
         self.assertNotEqual(Path(specs_hash.call_args.args[0]), hhd_source)
 
+    def test_spec_hash_is_part_of_builder_image_hash(self) -> None:
+        self._write_build_manifest()
+
+        def resolve_packages(_base, _releasever, packages, *_args, **_kwargs):
+            return tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+
+        builder_images = []
+        for spec_hash in ("first", "second"):
+            with (
+                patch("ludos.build.shutil.which", side_effect=lambda command: command),
+                patch("ludos.build._image_exists", return_value=True),
+                patch("ludos.build._extract_image_paths"),
+                patch(
+                    "ludos.build._card_specs_hash",
+                    return_value=(spec_hash, tuple()),
+                ),
+                patch("ludos.build._stage_card_specs", return_value=tuple()),
+                patch(
+                    "ludos.build._resolve_staged_spec_builder_packages",
+                    return_value=("spec-builddep",),
+                ),
+                patch("ludos.build._resolve_packages", side_effect=resolve_packages),
+            ):
+                metadata = _resolve_manifest_metadata(
+                    self.manifest,
+                    target_card="cards/base/scx",
+                )
+            builder_images.append(metadata.build_images[0].builder_image)
+
+        self.assertNotEqual(builder_images[0], builder_images[1])
+
     def _metadata(
         self,
         *,

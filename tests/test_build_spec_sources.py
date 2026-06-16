@@ -11,11 +11,12 @@ from ludos.build import (
     StagedSpec,
     _card_specs_hash,
     _git_source_cache_key,
+    _resolve_spec_build_requires,
     _resolve_staged_spec_builder_packages,
     _stage_card_specs,
     _specs_build_script,
 )
-from ludos.model import Card, SpecBuild
+from ludos.model import Card, ConfigError, SpecBuild
 
 
 class GitSpecSourceTests(unittest.TestCase):
@@ -358,6 +359,76 @@ class GitSpecSourceTests(unittest.TestCase):
 
 
 class SpecBuildRequiresResolutionTests(unittest.TestCase):
+    def test_builddep_resolution_uses_no_best_and_keeps_direct_requires(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_dir = Path(temp_dir)
+            spec_path = workspace_dir / "pkg.spec"
+            spec_path.write_text("Name: pkg\nBuildRequires: cargo\n", encoding="utf-8")
+            seen_commands = []
+
+            def preview(cmd, *_args, **_kwargs):
+                seen_commands.append(cmd)
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="\n".join(
+                        (
+                            "Package Arch Version Repository Size",
+                            "Installing:",
+                            " cargo x86_64 0:1.94.1-1.fc44 fedora 23.2 MiB",
+                            "Transaction Summary:",
+                        )
+                    ),
+                    stderr="",
+                )
+
+            with patch("ludos.build._run_cached_transaction_preview", preview):
+                packages = _resolve_spec_build_requires(
+                    [],
+                    "44",
+                    workspace_dir,
+                    (spec_path,),
+                    "x86_64",
+                    {},
+                    workspace_dir / "resolve",
+                    tuple(),
+                    include_dependencies=False,
+                )
+
+        self.assertEqual(packages, ("cargo-0:1.94.1-1.fc44.x86_64",))
+        self.assertIn("--no-best", seen_commands[0])
+
+    def test_builddep_resolution_rejects_failed_empty_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_dir = Path(temp_dir)
+            spec_path = workspace_dir / "pkg.spec"
+            spec_path.write_text("Name: pkg\nBuildRequires: cargo\n", encoding="utf-8")
+
+            def preview(cmd, *_args, **_kwargs):
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="Failed to resolve the transaction:\nProblem 1: conflict\n",
+                    stderr="",
+                )
+
+            with patch("ludos.build._run_cached_transaction_preview", preview):
+                with self.assertRaisesRegex(
+                    ConfigError,
+                    "dnf did not resolve spec BuildRequires",
+                ):
+                    _resolve_spec_build_requires(
+                        [],
+                        "44",
+                        workspace_dir,
+                        (spec_path,),
+                        "x86_64",
+                        {},
+                        workspace_dir / "resolve",
+                        tuple(),
+                        include_dependencies=False,
+                    )
+
     def test_i686_build_script_exports_multilib_cxx_include_path(self) -> None:
         workspace_dir = Path("/workspace")
         staged_specs = (
