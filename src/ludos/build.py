@@ -1588,7 +1588,16 @@ LUDOS_BOOTSTRAP
                 not in all_built_package_ids
             ),
         )
-        mounts = [("type=bind", f"from={common_stage}", "source=/rpms", "target=/rpms/common", "ro")]
+        mounts = [
+            (
+                "type=bind",
+                f"from={common_stage}",
+                "source=/rpms",
+                "target=/rpms/common",
+                "ro",
+            )
+        ]
+        build_images = []
         for card_name in metadata.card_order:
             card_block_packages = card_packages.get(card_name, tuple())
             if card_block_packages and card_name in package_stage_names:
@@ -1616,6 +1625,7 @@ LUDOS_BOOTSTRAP
                         "ro",
                     )
                 )
+                build_images.append(build_images_by_block[card_name])
                 install_paths += tuple(
                     f"/rpms/{_identifier(card_name)}-build/{rpm_file}"
                     for rpm_file in build_rpm_files
@@ -1625,7 +1635,11 @@ LUDOS_BOOTSTRAP
                 _run_with_mounts(
                     mounts,
                     "LUDOS_INSTALL",
-                    _dnf_install_script(metadata.releasever, install_paths),
+                    _dnf_install_script(
+                        metadata.releasever,
+                        install_paths,
+                        cache_images=tuple(build_images),
+                    ),
                 )
             )
         postprocess_steps.append(
@@ -1651,6 +1665,7 @@ LUDOS_BOOTSTRAP
                     "ro",
                 )
             ]
+            build_images = []
             common_needed = tuple(
                 package
                 for package in card_resolutions.get(card_name, tuple())
@@ -1693,6 +1708,7 @@ LUDOS_BOOTSTRAP
                         "ro",
                     )
                 )
+                build_images.append(build_images_by_block[card_name])
                 install_paths += tuple(
                     f"/rpms/{_identifier(card_name)}-build/{rpm_file}"
                     for rpm_file in build_rpm_files
@@ -1706,7 +1722,11 @@ LUDOS_BOOTSTRAP
 {_run_with_mounts(
     mounts,
     f"LUDOS_INSTALL_{_identifier(card_name)}",
-    _dnf_install_script(metadata.releasever, install_paths),
+    _dnf_install_script(
+        metadata.releasever,
+        install_paths,
+        cache_images=tuple(build_images),
+    ),
 )}
 """
                 )
@@ -1753,15 +1773,17 @@ def _dnf_install_script(
     rpm_paths: tuple[str, ...],
     *,
     installroot: str | None = None,
+    cache_images: tuple[str, ...] = tuple(),
 ) -> str:
+    cache_comments = _mounted_image_cache_comments(cache_images)
     if not rpm_paths:
-        return "set -e\nexit 0\n"
+        return f"{cache_comments}set -e\nexit 0\n"
     installroot_line = f"    --installroot={installroot} \\\n" if installroot else ""
     clean_root = installroot or ""
     clean_cache = f"{clean_root}/var/cache/dnf".replace("//", "/")
     clean_logs = f"{clean_root}/var/log/dnf*".replace("//", "/")
     rpm_lines = " \\\n".join(f"    {shlex.quote(path)}" for path in rpm_paths)
-    return f"""set -e
+    return f"""{cache_comments}set -e
 dnf5 -y \\
 {installroot_line}    --releasever={releasever} \\
     --setopt=reposdir=/ludos/dnf/repos \\
@@ -1779,6 +1801,10 @@ dnf5 -y \\
     && \\
     rm -rf {clean_cache} {clean_logs}
 """
+
+
+def _mounted_image_cache_comments(images: tuple[str, ...]) -> str:
+    return "".join(f"# build-image: {_image_tag(image)}\n" for image in images)
 
 
 def _run_with_mounts(

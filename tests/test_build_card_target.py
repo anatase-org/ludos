@@ -14,6 +14,7 @@ from ludos.build import (
     build_manifest,
     _cleanup_dnf_workspaces,
     _build_final_manifest_image,
+    _render_final_containerfile,
     _resolve_manifest_metadata,
     _resolve_cache_key,
 )
@@ -416,6 +417,50 @@ class TargetCardBuildTests(unittest.TestCase):
             check=True,
         )
         self.assertEqual(result.output_image, "localhost/anatase:f44-x86_64")
+
+    def test_install_heredocs_include_build_image_refs_for_cache(self) -> None:
+        metadata = self._metadata()
+        common_packages = ("bash-0:1-1.fc44.x86_64",)
+        package_blocks = (
+            ("common", common_packages),
+            *metadata.package_blocks,
+        )
+        package_images_by_block = {
+            "common": "localhost/cards:f44-x86_64-common-11111111",
+            "base-scx": "localhost/cards:f44-x86_64-base-scx-22222222",
+        }
+        build_images_by_block = {
+            "base-scx": "localhost/builds:f44-x86_64-base-scx-33333333",
+        }
+        metadata = replace(
+            metadata,
+            bootstrap_packages=common_packages,
+            package_ids=(("jq-0:1-1.fc44.x86_64", "jq", "x86_64"),),
+        )
+
+        containerfile = _render_final_containerfile(
+            metadata,
+            mode="separated",
+            package_blocks=package_blocks,
+            package_images_by_block=package_images_by_block,
+            build_images_by_block=build_images_by_block,
+            build_rpm_files_by_block={"base-scx": ("base-scx-1-1.x86_64.rpm",)},
+            card_file_cards=set(),
+            build_file_blocks=set(),
+        )
+
+        self.assertNotIn(
+            "# build-image: f44-x86_64-common-11111111",
+            containerfile,
+        )
+        self.assertNotIn(
+            "# build-image: f44-x86_64-base-scx-22222222",
+            containerfile,
+        )
+        self.assertIn(
+            "# build-image: f44-x86_64-base-scx-33333333",
+            containerfile,
+        )
 
     def test_resolve_cache_key_ignores_random_dnf_workspace(self) -> None:
         first = [
