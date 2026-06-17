@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
-from .build import _run_streamed_command
-from .logging import log
+from .build import _terminate_process_group
+from .logging import log, piter, pstream
 from .model import ConfigError
 
 
@@ -15,6 +18,8 @@ DEFAULT_ORCHESTRATOR = "orchestrator"
 DEFAULT_OSTREE_REF = "master"
 SOURCE_MOUNT = "/ludos/source"
 OSTREE_MOUNT = "/ludos/ostree"
+PROGRESS_TOTAL_PREFIX = "__LUDOS_OSTREE_APPROX_TOTAL__ "
+COMMIT_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def ostree_import(
@@ -52,14 +57,16 @@ def ostree_import(
             '  ostree --repo="$repo" init --mode=bare-user',
             '  ostree --repo="$repo" config set core.fsync false',
             "fi",
-            'ostree --repo="$repo" commit \\',
+            'approx_entries=$(find "$source" -mindepth 1 -printf ".\\n" | wc -l)',
+            'approx_total=$((approx_entries * 2 + 1))',
+            f'printf "{PROGRESS_TOTAL_PREFIX}%s\\n" "$approx_total" >&2',
+            'commit=$(env -u G_MESSAGES_DEBUG ostree --repo="$repo" commit -v \\',
             '  -b "$LUDOS_OSTREE_REF" \\',
             '  --tree=dir="$source" \\',
             "  --bootable \\",
             '  --selinux-policy="$source" \\',
-            "  --selinux-labeling-epoch=1",
-            'commit=$(ostree --repo="$repo" rev-parse "$LUDOS_OSTREE_REF")',
-            'printf "Imported OSTree commit: %s\\n" "$commit"',
+            "  --selinux-labeling-epoch=1)",
+            'printf "%s\\n" "$commit"',
         ]
     )
 
@@ -80,12 +87,136 @@ def ostree_import(
         "-ceu",
         script,
     ]
-    returncode, _output = _run_streamed_command(command)
+    returncode, output = _run_ostree_import_command(command, ostree_dir)
     if returncode != 0:
         raise ConfigError(f"bootc ostree import failed with exit status {returncode}")
+    commit = _parse_commit(output)
 
-    log(f"Imported {ref} as {ostree_ref} in {ostree_dir}")
+    log(f"Imported {ref} as {ostree_ref} ({commit}) in {ostree_dir}")
     return 0
+
+
+def _run_ostree_import_command(command: list[str], ostree_dir: Path) -> tuple[int, str]:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        text=True,
+    )
+    stdout_chunks: list[str] = []
+    baseline = _count_repo_objects(ostree_dir)
+    stop_counter = threading.Event()
+
+    with piter(
+        total=None,
+        desc="Importing OSTree",
+        unit="objects",
+        leave=False,
+    ) as progress:
+        stderr_thread = threading.Thread(
+            target=_read_ostree_stderr,
+            args=(process, progress),
+            daemon=True,
+        )
+        stdout_thread = threading.Thread(
+            target=_read_stdout,
+            args=(process, stdout_chunks),
+            daemon=True,
+        )
+        counter_thread = threading.Thread(
+            target=_count_repo_objects_until_done,
+            args=(ostree_dir, baseline, progress, stop_counter),
+            daemon=True,
+        )
+        stderr_thread.start()
+        stdout_thread.start()
+        counter_thread.start()
+        try:
+            returncode = process.wait()
+        finally:
+            stop_counter.set()
+            if process.poll() is None:
+                _terminate_process_group(process)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            stdout_thread.join()
+            stderr_thread.join()
+            counter_thread.join()
+
+    return returncode, "".join(stdout_chunks)
+
+
+def _read_stdout(process: subprocess.Popen[str], output: list[str]) -> None:
+    assert process.stdout is not None
+    for chunk in process.stdout:
+        output.append(chunk)
+
+
+def _read_ostree_stderr(process: subprocess.Popen[str], progress: object) -> None:
+    assert process.stderr is not None
+    for raw_line in process.stderr:
+        line = raw_line.rstrip("\n")
+        if line.startswith(PROGRESS_TOTAL_PREFIX):
+            total = _parse_progress_total(line)
+            if total is not None:
+                progress.total = total
+                progress.refresh()
+            continue
+        pstream(line)
+
+
+def _parse_progress_total(line: str) -> int | None:
+    value = line.removeprefix(PROGRESS_TOTAL_PREFIX).strip()
+    try:
+        total = int(value)
+    except ValueError:
+        return None
+    return max(total, 0)
+
+
+def _count_repo_objects_until_done(
+    ostree_dir: Path,
+    baseline: int,
+    progress: object,
+    stop: threading.Event,
+) -> None:
+    while not stop.wait(0.25):
+        _update_object_progress(ostree_dir, baseline, progress)
+    _update_object_progress(ostree_dir, baseline, progress)
+
+
+def _update_object_progress(ostree_dir: Path, baseline: int, progress: object) -> None:
+    imported = max(0, _count_repo_objects(ostree_dir) - baseline)
+    if imported > progress.n:
+        progress.update(imported - progress.n)
+
+
+def _count_repo_objects(ostree_dir: Path) -> int:
+    objects = ostree_dir / "objects"
+    if not objects.is_dir():
+        return 0
+    count = 0
+    for root, _dirs, files in os.walk(objects):
+        if root.endswith("/tmp"):
+            continue
+        count += sum(
+            1
+            for file in files
+            if file.endswith((".file", ".dirtree", ".dirmeta", ".commit"))
+        )
+    return count
+
+
+def _parse_commit(output: str) -> str:
+    commits = [
+        line.strip() for line in output.splitlines() if COMMIT_RE.match(line.strip())
+    ]
+    if not commits:
+        raise ConfigError("bootc ostree import did not emit an OSTree commit hash")
+    return commits[-1]
 
 
 def _require_image(podman: str, image: str, description: str) -> None:

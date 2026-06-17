@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.errors import MarkupError
 from rich.text import Text
 from rich.traceback import install as install_rich_traceback
+from tqdm.auto import tqdm
 
 
 console = Console()
@@ -263,6 +264,19 @@ def error(message: object = "") -> None:
 
 def stream(message: str) -> None:
     logger.info("%s", message, extra={"ludos_stream": True})
+
+
+def piter(*args: object, **kwargs: object) -> tqdm:
+    kwargs.setdefault("disable", not (console.is_terminal and not AGENT))
+    kwargs.setdefault("file", console.file)
+    return tqdm(*args, **kwargs)
+
+
+def pstream(message: str) -> None:
+    if not (console.is_terminal and not AGENT):
+        stream(message)
+        return
+    tqdm.write(f"{' ' * INFO_MESSAGE_INDENT}| {message}")
 
 
 def main() -> None:
