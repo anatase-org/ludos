@@ -277,6 +277,10 @@ def _prepare_projection(source: Path, base: Path, final: Path) -> None:
     for name in ("dev", "proc", "run", "sys", "var", "sysroot", "boot"):
         _ensure_dir(base / name)
     _ensure_dir(base / "tmp", 0o1777)
+    _symlink("usr/bin", base / "bin")
+    _symlink("usr/lib", base / "lib")
+    _symlink("usr/lib64", base / "lib64")
+    _symlink("usr/sbin", base / "sbin")
     _symlink("var/home", base / "home")
     _symlink("var/roothome", base / "root")
     _symlink("sysroot/ostree", base / "ostree")
@@ -285,7 +289,6 @@ def _prepare_projection(source: Path, base: Path, final: Path) -> None:
     _symlink("run/media", base / "media")
     _symlink("var/opt", base / "opt")
     _symlink("../var/usrlocal", base / "usr/local")
-    _symlink("../../usr/share/rpm", base / "var/lib/rpm")
     _symlink("../../share/rpm", base / "usr/lib/sysimage/rpm")
 
     _write(final / "usr/lib/rpm/macros.d/macros.rpm-ostree", "%_dbpath /usr/share/rpm\n")
