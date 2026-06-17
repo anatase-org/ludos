@@ -1,0 +1,3 @@
+[submodule "ostree-ext-cli/bootc"]
+	path = ostree-ext-cli/bootc
+	url = https://github.com/bootc-dev/bootc.git
