@@ -13,6 +13,10 @@ import tempfile
 from pathlib import Path
 
 
+# This projection intentionally leaves mutable /var content out of the commit.
+# rpm-ostree generates /var structure from tmpfiles; if we later need factory
+# defaults, compare against the reference image before copying /var/lib into
+# /usr/lib or /var into /usr/share/factory/var.
 KNOWN_STATE_FILES = {
     "var/lib/systemd/random-seed",
     "var/lib/systemd/catalog/database",
@@ -87,6 +91,9 @@ def import_processed_rootfs(
                     source,
                     "usr",
                     excludes=(
+                        # Build IDs are useful locally but churn between builds
+                        # and act as a cache buster for our generated commits.
+                        "usr/lib/.build-id/*",
                         "usr/lib/sysimage/rpm",
                         "usr/lib/sysimage/rpm/*",
                         "usr/local",
@@ -102,20 +109,26 @@ def import_processed_rootfs(
                 _tar_args(
                     source,
                     "etc",
-                    excludes=("etc/machine-id",),
+                    excludes=(
+                        # Those lock files can cause some pain
+                        "etc/.pwd.lock",
+                        "etc/passwd-",
+                        "etc/group-",
+                        "etc/shadow-",
+                        "etc/gshadow-",
+                        "etc/subuid-",
+                        "etc/subgid-",
+                        # We recreate it as empty
+                        "etc/machine-id",
+                    ),
                     transform="s,^etc,usr/etc,",
                 )
             )
 
-        if (source / "boot").exists():
-            start_tar(
-                _tar_args(
-                    source,
-                    "boot",
-                    excludes=("boot/loader", "boot/loader/*"),
-                )
-            )
-
+        # Reference rpm-ostree images keep top-level /boot empty in the commit.
+        # Boot assets from container builds are runtime/deployment state here, so
+        # we synthesize the empty directory in the base projection instead of
+        # importing source /boot.
         rpmdb_source = _rpmdb_source(source)
         if rpmdb_source is not None:
             rpmdb_parent, rpmdb_name, writes_usr_share = rpmdb_source
@@ -166,6 +179,8 @@ def _tar_args(
     args = [
         "tar",
         "--xattrs",
+        # Added by the container engine
+        "--xattrs-exclude=user.overlay.impure",
         "--acls",
         "--selinux",
         "--numeric-owner",
@@ -244,7 +259,6 @@ def _approx_entries(source: Path, base: Path, final: Path) -> int:
     roots = [
         source / "usr",
         source / "etc",
-        source / "boot",
         source / "var",
         base,
         final,
@@ -262,6 +276,7 @@ def _prepare_projection(source: Path, base: Path, final: Path) -> None:
     _ensure_dir(base)
     for name in ("dev", "proc", "run", "sys", "var", "sysroot", "boot"):
         _ensure_dir(base / name)
+    _ensure_dir(base / "tmp", 0o1777)
     _symlink("var/home", base / "home")
     _symlink("var/roothome", base / "root")
     _symlink("sysroot/ostree", base / "ostree")
@@ -274,6 +289,7 @@ def _prepare_projection(source: Path, base: Path, final: Path) -> None:
     _symlink("../../share/rpm", base / "usr/lib/sysimage/rpm")
 
     _write(final / "usr/lib/rpm/macros.d/macros.rpm-ostree", "%_dbpath /usr/share/rpm\n")
+    _write(final / "usr/etc/machine-id", "")
     _write(
         final / "usr/lib/tmpfiles.d/rpm-ostree-0-integration.conf",
         "d /var/home 0755 root root -\n"
@@ -315,7 +331,7 @@ def _prepare_projection(source: Path, base: Path, final: Path) -> None:
         _write(final / "usr/etc/passwd", passwd_split[0])
         _write(final / "usr/lib/passwd", passwd_split[1])
 
-    group_split = _split_colon_file(source / "etc/group")
+    group_split = _split_colon_file(source / "etc/group", ("root", "wheel"))
     if group_split is not None:
         _write(final / "usr/etc/group", group_split[0])
         _write(final / "usr/lib/group", group_split[1])
@@ -465,7 +481,7 @@ def _update_useradd(contents: str) -> str:
     return "\n".join(output) + "\n"
 
 
-def _split_colon_file(path: Path, root_name: str = "root") -> tuple[str, str] | None:
+def _split_colon_file(path: Path, root_names: tuple[str, ...] = ("root",)) -> tuple[str, str] | None:
     contents = _read_text(path)
     if contents is None:
         return None
@@ -476,7 +492,7 @@ def _split_colon_file(path: Path, root_name: str = "root") -> tuple[str, str] | 
             root_lines.append(line)
             continue
         name = line.split(":", 1)[0]
-        if name == root_name:
+        if name in root_names:
             root_lines.append(line)
         else:
             alt_lines.append(line)

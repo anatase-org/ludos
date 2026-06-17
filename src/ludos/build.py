@@ -1755,12 +1755,6 @@ WORKDIR /workspace/repos
 {install_step_lines}
 
 #
-# Normalize root
-#
-
-RUN rm -rf /etc/machine-id /var/lib/dbus/machine-id
-
-#
 # Run postprocessing
 #
 
