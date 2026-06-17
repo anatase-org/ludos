@@ -17,6 +17,7 @@ DEFAULT_CACHE_DIR = Path("cache")
 DEFAULT_OSTREE_REF = "master"
 SOURCE_MOUNT = "/ludos/source"
 OSTREE_MOUNT = "/ludos/ostree"
+POSTPROCESS_MOUNT = "/ludos/postprocess.py"
 PROGRESS_TOTAL_PREFIX = "__LUDOS_OSTREE_APPROX_TOTAL__ "
 COMMIT_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -27,6 +28,7 @@ def ostree_import(
     cache_dir: Path | None = None,
     orchestrator: str | None = None,
     ostree_ref: str = DEFAULT_OSTREE_REF,
+    process: bool = True,
 ) -> int:
     if not ref.strip():
         raise ConfigError("container ref must not be empty")
@@ -49,8 +51,66 @@ def ostree_import(
 
     log(f"Importing {ref} into OSTree repo: {ostree_dir}")
     log(f"Using orchestrator image: {orchestrator} ({orchestrator_display_ref})")
+    if process:
+        log("Postprocessing image root before OSTree import")
+    else:
+        log("Importing image root without postprocessing")
 
-    script = "\n".join(
+    command = [
+        podman,
+        "run",
+        "--rm",
+        "--mount",
+        f"type=image,source={ref},target={SOURCE_MOUNT}",
+        "--mount",
+        f"type=bind,source={ostree_dir},target={OSTREE_MOUNT}",
+    ]
+    if process:
+        command.extend(
+            [
+                "--mount",
+                (
+                    "type=bind,"
+                    f"source={Path(__file__).with_name('postprocess.py').resolve()},"
+                    f"target={POSTPROCESS_MOUNT},ro"
+                ),
+            ]
+        )
+    command.extend(
+        [
+            "--env",
+            f"LUDOS_OSTREE_REF={ostree_ref}",
+            "--workdir",
+            "/ludos",
+            orchestrator,
+        ]
+    )
+    if process:
+        command.extend(
+            [
+                "python3",
+                POSTPROCESS_MOUNT,
+                "--progress-total-prefix",
+                PROGRESS_TOTAL_PREFIX,
+                SOURCE_MOUNT,
+                OSTREE_MOUNT,
+                ostree_ref,
+            ]
+        )
+    else:
+        command.extend(["/bin/sh", "-ceu", _unprocessed_ostree_import_script()])
+
+    returncode, output = _run_ostree_import_command(command, ostree_dir)
+    if returncode != 0:
+        raise ConfigError(f"bootc ostree import failed with exit status {returncode}")
+    commit = _parse_commit(output)
+
+    log(f"Imported {ref} as {ostree_ref} ({commit}) in {ostree_dir}")
+    return 0
+
+
+def _unprocessed_ostree_import_script() -> str:
+    return "\n".join(
         [
             'repo="/ludos/ostree"',
             'source="/ludos/source"',
@@ -70,31 +130,6 @@ def ostree_import(
             'printf "%s\\n" "$commit"',
         ]
     )
-
-    command = [
-        podman,
-        "run",
-        "--rm",
-        "--mount",
-        f"type=image,source={ref},target={SOURCE_MOUNT}",
-        "--mount",
-        f"type=bind,source={ostree_dir},target={OSTREE_MOUNT}",
-        "--env",
-        f"LUDOS_OSTREE_REF={ostree_ref}",
-        "--workdir",
-        "/ludos",
-        orchestrator,
-        "/bin/sh",
-        "-ceu",
-        script,
-    ]
-    returncode, output = _run_ostree_import_command(command, ostree_dir)
-    if returncode != 0:
-        raise ConfigError(f"bootc ostree import failed with exit status {returncode}")
-    commit = _parse_commit(output)
-
-    log(f"Imported {ref} as {ostree_ref} ({commit}) in {ostree_dir}")
-    return 0
 
 
 def _run_ostree_import_command(command: list[str], ostree_dir: Path) -> tuple[int, str]:

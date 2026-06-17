@@ -209,6 +209,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="master",
         help="OSTree ref to write in the cache repo. Defaults to master.",
     )
+    ostree_import_parser.add_argument(
+        "--no-process",
+        action="store_true",
+        help="Import the container root as-is without OSTree rootfs postprocessing.",
+    )
     ostree_import_parser.set_defaults(func=bootc_command)
 
     cleanup = subcommands.add_parser(
@@ -359,6 +364,7 @@ def bootc_command(args: argparse.Namespace) -> int:
             cache_dir=args.cache_dir,
             orchestrator=args.orchestrator,
             ostree_ref=args.ostree_ref,
+            process=not args.no_process,
         )
     raise ConfigError(f"unknown bootc action: {args.bootc_action}")
 

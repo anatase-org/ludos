@@ -40,7 +40,20 @@ class BootcCommandTests(unittest.TestCase):
         self.assertEqual(args.cache_dir, Path("custom-cache"))
         self.assertEqual(args.orchestrator, "localhost/orchestrator:latest")
         self.assertEqual(args.ostree_ref, "anatase")
+        self.assertFalse(args.no_process)
         self.assertEqual(args.ref, "localhost/anatase:latest")
+
+    def test_parser_accepts_ostree_import_no_process(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "bootc",
+                "ostree-import",
+                "--no-process",
+                "localhost/anatase:latest",
+            ]
+        )
+
+        self.assertTrue(args.no_process)
 
     def test_parser_defaults_ostree_import_orchestrator_to_ref(self) -> None:
         args = build_parser().parse_args(
@@ -119,7 +132,7 @@ class BootcCommandTests(unittest.TestCase):
             "(localhost/anatase:latest)"
         )
         command, _repo = run_import.call_args.args
-        self.assertEqual(command[-4], "localhost/anatase:latest")
+        self.assertIn("localhost/anatase:latest", command)
 
     def test_ostree_import_mounts_image_and_cache_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,17 +212,72 @@ class BootcCommandTests(unittest.TestCase):
             f"type=bind,source={ostree_dir.resolve()},target=/ludos/ostree",
             command,
         )
+        self.assertTrue(
+            any(
+                item.startswith("type=bind,")
+                and "postprocess.py,target=/ludos/postprocess.py,ro" in item
+                for item in command
+            )
+        )
         self.assertIn("LUDOS_OSTREE_REF=anatase", command)
         self.assertIn("orchestrator", command)
-        script = command[-1]
-        self.assertIn('ostree --repo="$repo" init --mode=bare-user', script)
-        self.assertIn(
-            'commit=$(env -u G_MESSAGES_DEBUG ostree --repo="$repo" commit -v \\',
-            script,
+        self.assertEqual(
+            command[-7:],
+            [
+                "python3",
+                "/ludos/postprocess.py",
+                "--progress-total-prefix",
+                "__LUDOS_OSTREE_APPROX_TOTAL__ ",
+                "/ludos/source",
+                "/ludos/ostree",
+                "anatase",
+            ],
         )
-        self.assertIn('__LUDOS_OSTREE_APPROX_TOTAL__', script)
-        self.assertIn('printf "%s\\n" "$commit"', script)
+
+    def test_ostree_import_no_process_uses_raw_source_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache-root"
+            image_exists = subprocess.CompletedProcess(
+                ["podman", "image", "exists"], 0
+            )
+            inspect = subprocess.CompletedProcess(
+                ["podman", "image", "inspect"],
+                0,
+                stdout=(
+                    '{"RepoTags":["localhost/orchestrator:latest"],'
+                    '"RepoDigests":["localhost/orchestrator@sha256:'
+                    'abcdef1234567890"]}\n'
+                ),
+            )
+
+            with (
+                patch("ludos.bootc.shutil.which", return_value="podman"),
+                patch("ludos.bootc.subprocess.run") as run,
+                patch("ludos.bootc.log"),
+                patch(
+                    "ludos.bootc._run_ostree_import_command",
+                    return_value=(
+                        0,
+                        "abcdef1234567890abcdef1234567890"
+                        "abcdef1234567890abcdef1234567890\n",
+                    ),
+                ) as run_import,
+            ):
+                run.side_effect = [image_exists, image_exists, inspect]
+
+                result = ostree_import(
+                    "localhost/anatase:latest",
+                    cache_dir=cache_dir,
+                    orchestrator="orchestrator",
+                    ostree_ref="anatase",
+                    process=False,
+                )
+
+        self.assertEqual(result, 0)
+        command, _repo = run_import.call_args.args
+        script = command[-1]
         self.assertIn('--tree=dir="$source"', script)
+        self.assertNotIn("--tar-autocreate-parents", script)
 
     def test_short_digest_handles_repo_digest_and_image_id(self) -> None:
         self.assertEqual(
