@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch, sentinel
 
@@ -12,6 +13,7 @@ from ludos.build import (
     ResolvedBuildMetadata,
     build_manifest,
     _cleanup_dnf_workspaces,
+    _build_final_manifest_image,
     _resolve_manifest_metadata,
     _resolve_cache_key,
 )
@@ -370,6 +372,50 @@ class TargetCardBuildTests(unittest.TestCase):
                 build_manifest(self.manifest)
 
         self.assertFalse(workspace.exists())
+
+    def test_final_manifest_image_tags_latest(self) -> None:
+        metadata = self._metadata()
+        metadata = replace(
+            metadata,
+            common_packages=("bash-0:1-1.fc44.x86_64",),
+            bootstrap_packages=("bash-0:1-1.fc44.x86_64",),
+            package_images=(
+                PackageImagePlan(
+                    block="common",
+                    packages=("bash-0:1-1.fc44.x86_64",),
+                    image="localhost/cards:f44-x86_64-common",
+                ),
+                *metadata.package_images,
+            ),
+            package_blocks=(
+                ("common", ("bash-0:1-1.fc44.x86_64",)),
+                *metadata.package_blocks,
+            ),
+        )
+        Path(metadata.build_dir).mkdir(parents=True)
+
+        with (
+            patch("ludos.build._run_container_build") as container_build,
+            patch("ludos.build.subprocess.run") as run,
+        ):
+            result = _build_final_manifest_image(
+                metadata,
+                build_outputs=BuildImageOutputs(),
+                mode="separated",
+                cache_only=False,
+            )
+
+        container_build.assert_called_once()
+        run.assert_called_once_with(
+            [
+                "podman",
+                "tag",
+                "localhost/anatase:f44-x86_64",
+                "localhost/anatase:latest",
+            ],
+            check=True,
+        )
+        self.assertEqual(result.output_image, "localhost/anatase:f44-x86_64")
 
     def test_resolve_cache_key_ignores_random_dnf_workspace(self) -> None:
         first = [

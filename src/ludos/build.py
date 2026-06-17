@@ -1497,6 +1497,10 @@ def _build_final_manifest_image(
         ],
         containerfile,
     )
+    subprocess.run(
+        [metadata.podman, "tag", metadata.output_image, _latest_image(metadata.output_image)],
+        check=True,
+    )
 
     return _metadata_build_result(
         metadata,
