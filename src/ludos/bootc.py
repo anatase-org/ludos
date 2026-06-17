@@ -14,7 +14,6 @@ from .model import ConfigError
 
 
 DEFAULT_CACHE_DIR = Path("cache")
-DEFAULT_ORCHESTRATOR = "orchestrator"
 DEFAULT_OSTREE_REF = "master"
 SOURCE_MOUNT = "/ludos/source"
 OSTREE_MOUNT = "/ludos/ostree"
@@ -26,13 +25,14 @@ def ostree_import(
     ref: str,
     *,
     cache_dir: Path | None = None,
-    orchestrator: str = DEFAULT_ORCHESTRATOR,
+    orchestrator: str | None = None,
     ostree_ref: str = DEFAULT_OSTREE_REF,
 ) -> int:
     if not ref.strip():
         raise ConfigError("container ref must not be empty")
     if not ostree_ref.strip():
         raise ConfigError("ostree ref must not be empty")
+    orchestrator = orchestrator or ref
 
     podman = shutil.which("podman")
     if podman is None:
@@ -43,7 +43,8 @@ def ostree_import(
     ostree_dir.mkdir(parents=True, exist_ok=True)
 
     _require_image(podman, ref, "source image")
-    _require_image(podman, orchestrator, "orchestrator image")
+    if orchestrator != ref:
+        _require_image(podman, orchestrator, "orchestrator image")
     orchestrator_display_ref = _image_display_ref(podman, orchestrator)
 
     log(f"Importing {ref} into OSTree repo: {ostree_dir}")

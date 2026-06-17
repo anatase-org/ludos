@@ -201,8 +201,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ostree_import_parser.add_argument(
         "--orchestrator",
-        default="orchestrator",
-        help="Local orchestrator image to run. Defaults to orchestrator.",
+        default=None,
+        help="Local orchestrator image to run. Defaults to the imported ref.",
     )
     ostree_import_parser.add_argument(
         "--ostree-ref",

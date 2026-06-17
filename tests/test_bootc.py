@@ -42,6 +42,85 @@ class BootcCommandTests(unittest.TestCase):
         self.assertEqual(args.ostree_ref, "anatase")
         self.assertEqual(args.ref, "localhost/anatase:latest")
 
+    def test_parser_defaults_ostree_import_orchestrator_to_ref(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "bootc",
+                "ostree-import",
+                "localhost/anatase:latest",
+            ]
+        )
+
+        self.assertIsNone(args.orchestrator)
+        self.assertEqual(args.ref, "localhost/anatase:latest")
+
+    def test_ostree_import_defaults_orchestrator_to_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache-root"
+            image_exists = subprocess.CompletedProcess(
+                ["podman", "image", "exists"], 0
+            )
+            inspect = subprocess.CompletedProcess(
+                ["podman", "image", "inspect"],
+                0,
+                stdout=(
+                    '{"RepoTags":["localhost/anatase:latest"],'
+                    '"RepoDigests":["localhost/anatase@sha256:'
+                    'abcdef1234567890"]}\n'
+                ),
+            )
+
+            with (
+                patch("ludos.bootc.shutil.which", return_value="podman"),
+                patch("ludos.bootc.subprocess.run") as run,
+                patch("ludos.bootc.log") as log,
+                patch(
+                    "ludos.bootc._run_ostree_import_command",
+                    return_value=(
+                        0,
+                        "abcdef1234567890abcdef1234567890"
+                        "abcdef1234567890abcdef1234567890\n",
+                    ),
+                ) as run_import,
+            ):
+                run.side_effect = [image_exists, inspect]
+
+                result = ostree_import(
+                    "localhost/anatase:latest",
+                    cache_dir=cache_dir,
+                    ostree_ref="anatase",
+                )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            run.call_args_list,
+            [
+                call(
+                    ["podman", "image", "exists", "localhost/anatase:latest"],
+                    check=False,
+                ),
+                call(
+                    [
+                        "podman",
+                        "image",
+                        "inspect",
+                        "localhost/anatase:latest",
+                        "--format",
+                        "{{json .}}",
+                    ],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    text=True,
+                ),
+            ],
+        )
+        log.assert_any_call(
+            "Using orchestrator image: localhost/anatase:latest "
+            "(localhost/anatase:latest)"
+        )
+        command, _repo = run_import.call_args.args
+        self.assertEqual(command[-4], "localhost/anatase:latest")
+
     def test_ostree_import_mounts_image_and_cache_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "cache-root"
