@@ -4,6 +4,7 @@ import argparse
 import glob
 import grp
 import os
+import posixpath
 import pwd
 import shlex
 import stat
@@ -321,9 +322,11 @@ def _prepare_projection(source: Path, base: Path, final: Path) -> None:
     if var_tmpfiles:
         _write(final / "usr/lib/tmpfiles.d/rpm-ostree-1-autovar.conf", var_tmpfiles)
 
-    nsswitch = _read_text(source / "etc/nsswitch.conf")
+    nsswitch = _read_text(_source_path(source, "etc/nsswitch.conf"))
     if nsswitch is not None:
-        _write(final / "usr/etc/nsswitch.conf", _add_altfiles(nsswitch))
+        nsswitch_path = _projected_etc_overlay_path(source, "nsswitch.conf")
+        if nsswitch_path is not None:
+            _write(final / nsswitch_path, _add_altfiles(nsswitch))
 
     useradd = _read_text(source / "etc/default/useradd")
     if useradd is not None:
@@ -372,6 +375,40 @@ def _read_text(path: Path) -> str | None:
         return None
     except UnicodeDecodeError:
         return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _source_path(source: Path, relpath: str) -> Path:
+    path = source / relpath
+    if not path.is_symlink():
+        return path
+
+    target = os.readlink(path)
+    if target.startswith("/"):
+        projected = posixpath.normpath(target).removeprefix("/")
+    else:
+        projected = posixpath.normpath(posixpath.join(posixpath.dirname(relpath), target))
+    if projected == "." or projected.startswith("../"):
+        return path
+    return source / projected
+
+
+def _projected_etc_overlay_path(source: Path, relpath: str) -> Path | None:
+    path = source / "etc" / relpath
+    if not path.is_symlink():
+        return Path("usr/etc") / relpath
+
+    target = os.readlink(path)
+    if target.startswith("/"):
+        abs_target = posixpath.normpath(target)
+    else:
+        abs_target = posixpath.normpath(posixpath.join("/etc", posixpath.dirname(relpath), target))
+
+    if abs_target == "/etc":
+        return Path("usr/etc")
+    if abs_target.startswith("/etc/"):
+        return Path("usr/etc") / abs_target.removeprefix("/etc/")
+
+    return None
 
 
 def _user_name(uid: int) -> str:
