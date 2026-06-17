@@ -269,7 +269,9 @@ def stream(message: str) -> None:
 def piter(*args: object, **kwargs: object) -> tqdm:
     kwargs.setdefault("disable", not (console.is_terminal and not AGENT))
     kwargs.setdefault("file", console.file)
-    return tqdm(*args, **kwargs)
+    if "desc" in kwargs:
+        kwargs['desc'] = " " * 8 + kwargs["desc"] # type: ignore
+    return tqdm(*args, **kwargs) # type: ignore
 
 
 def pstream(message: str) -> None:
