@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .bootc import ostree_import
 from .build import build_manifest
 from .cleanup import cleanup_local_images
 from .logging import LOGO_STR, configure_tracebacks, error, log
@@ -179,6 +180,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     package_fork.set_defaults(func=package_command)
 
+    bootc = subcommands.add_parser(
+        "bootc",
+        help="Work with bootc image artifacts.",
+    )
+    bootc_subcommands = bootc.add_subparsers(dest="bootc_action", required=True)
+    ostree_import_parser = bootc_subcommands.add_parser(
+        "ostree-import",
+        help="Import a local container image root into an OSTree repo.",
+    )
+    ostree_import_parser.add_argument(
+        "ref",
+        help="Local container image reference to import.",
+    )
+    ostree_import_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory containing the OSTree repo. Defaults to ./cache.",
+    )
+    ostree_import_parser.add_argument(
+        "--orchestrator",
+        default="orchestrator",
+        help="Local orchestrator image to run. Defaults to orchestrator.",
+    )
+    ostree_import_parser.add_argument(
+        "--ostree-ref",
+        default="master",
+        help="OSTree ref to write in the cache repo. Defaults to master.",
+    )
+    ostree_import_parser.set_defaults(func=bootc_command)
+
     cleanup = subcommands.add_parser(
         "cleanup",
         help="Remove stale local Ludos cache images.",
@@ -318,6 +350,17 @@ def package_command(args: argparse.Namespace) -> int:
         card=args.card,
         subdir=args.subdir,
     )
+
+
+def bootc_command(args: argparse.Namespace) -> int:
+    if args.bootc_action == "ostree-import":
+        return ostree_import(
+            args.ref,
+            cache_dir=args.cache_dir,
+            orchestrator=args.orchestrator,
+            ostree_ref=args.ostree_ref,
+        )
+    raise ConfigError(f"unknown bootc action: {args.bootc_action}")
 
 
 def main() -> int:
