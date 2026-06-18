@@ -41,6 +41,7 @@ RPM_ARCH_SUFFIXES = frozenset(
         "x86_64",
     )
 )
+ENV_ALWAYS_AVAILABLE = ("arch", "releasever")
 
 
 @dataclass(frozen=True)
@@ -602,6 +603,7 @@ def _resolve_manifest_metadata(
         inherited_env.update(card_env)
         card_names.append(card_name)
         card_envs[card_name] = card_env
+        # log(f"{card_name}: {card_env} {inherited_env}")
         card_sources[card_name] = card.source
         if card.prepare.strip():
             card_prepare_scripts[card_name] = card.prepare.rstrip()
@@ -4300,8 +4302,7 @@ def _card_env(
     values = dict(manifest_env)
     for key, value in card_env.items():
         values[key] = _expand_expression(str(value), values, None)
-    return values
-
+    return {k: values[k] for k in ENV_ALWAYS_AVAILABLE + tuple(card_env) if k in values}
 
 def _expand_expression(
     value: str, variables: dict[str, str], base_dir: Path | None
