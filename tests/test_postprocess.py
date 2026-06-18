@@ -31,12 +31,7 @@ class PostprocessTests(unittest.TestCase):
                 "hosts:      files dns\n",
             )
 
-    def test_add_altfiles_is_idempotent(self) -> None:
-        contents = "passwd: files altfiles systemd\ngroup: files altfiles systemd\n"
-
-        self.assertEqual(postprocess._add_altfiles(contents), contents)
-
-    def test_prepare_projection_skips_symlinked_nsswitch(self) -> None:
+    def test_prepare_projection_ignores_symlinked_nsswitch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "source"
@@ -44,11 +39,7 @@ class PostprocessTests(unittest.TestCase):
             final = root / "final"
             (source / "etc/authselect").mkdir(parents=True)
             (source / "etc/authselect/nsswitch.conf").write_text(
-                "passwd: files systemd\n",
-                encoding="utf-8",
-            )
-            (source / "etc/authselect/authselect.conf").write_text(
-                "local\nwith-silent-lastlog\n",
+                "passwd: files altfiles systemd\n",
                 encoding="utf-8",
             )
             (source / "etc/nsswitch.conf").symlink_to("authselect/nsswitch.conf")
@@ -56,18 +47,11 @@ class PostprocessTests(unittest.TestCase):
             postprocess._prepare_projection(source, base, final)
 
             self.assertFalse((final / "usr/etc/nsswitch.conf").exists())
-            self.assertEqual(
-                (final / "usr/etc/authselect/authselect.conf").read_text(encoding="utf-8"),
-                "local\nwith-silent-lastlog\nwith-altfiles\n",
-            )
 
-    def test_authselect_altfiles_feature_is_idempotent(self) -> None:
-        contents = "local\nwith-altfiles\nwith-silent-lastlog\n"
+    def test_add_altfiles_is_idempotent(self) -> None:
+        contents = "passwd: files altfiles systemd\ngroup: files altfiles systemd\n"
 
-        self.assertEqual(
-            postprocess._add_authselect_feature(contents, "with-altfiles"),
-            contents,
-        )
+        self.assertEqual(postprocess._add_altfiles(contents), contents)
 
     def test_prepare_source_overrides_moves_selinux_store_to_etc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

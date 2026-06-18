@@ -27,7 +27,6 @@ KNOWN_STATE_FILES = {
 }
 
 PRESERVED_ETC_GROUPS = ("wheel",)
-AUTHSELECT_ALTFILES_FEATURE = "with-altfiles"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -342,28 +341,7 @@ def _prepare_projection(source: Path, base: Path, final: Path) -> None:
     if nsswitch_path.is_file() and not nsswitch_path.is_symlink():
         nsswitch = _read_text(nsswitch_path)
         if nsswitch is not None:
-            updated_nsswitch = _add_altfiles(nsswitch)
-            _write(final / "usr/etc/nsswitch.conf", updated_nsswitch)
-            if updated_nsswitch == nsswitch:
-                _info("Regular /etc/nsswitch.conf already has altfiles")
-            else:
-                _info("Updated regular /etc/nsswitch.conf with altfiles")
-    elif nsswitch_path.is_symlink():
-        _info("Leaving symlinked /etc/nsswitch.conf untouched")
-    else:
-        _info("No /etc/nsswitch.conf found to update")
-
-    authselect = _read_text(source / "etc/authselect/authselect.conf")
-    if authselect is not None:
-        updated_authselect = _add_authselect_feature(authselect, AUTHSELECT_ALTFILES_FEATURE)
-        _write(
-            final / "usr/etc/authselect/authselect.conf",
-            updated_authselect,
-        )
-        if updated_authselect == authselect:
-            _info(f"Authselect feature {AUTHSELECT_ALTFILES_FEATURE} already present")
-        else:
-            _info(f"Added authselect feature {AUTHSELECT_ALTFILES_FEATURE}")
+            _write(final / "usr/etc/nsswitch.conf", _add_altfiles(nsswitch))
 
     useradd = _read_text(source / "etc/default/useradd")
     if useradd is not None:
@@ -517,14 +495,6 @@ def _add_altfiles(contents: str) -> str:
         if not matched:
             output.append(line)
     return "\n".join(output) + "\n"
-
-
-def _add_authselect_feature(contents: str, feature: str) -> str:
-    lines = contents.splitlines()
-    if feature in lines:
-        return "\n".join(lines) + "\n"
-    lines.append(feature)
-    return "\n".join(lines) + "\n"
 
 
 def _update_useradd(contents: str) -> str:
