@@ -5,6 +5,7 @@ import glob
 import grp
 import os
 import pwd
+import shutil
 import shlex
 import stat
 import subprocess
@@ -72,6 +73,7 @@ def import_processed_rootfs(
         work = Path(work_text)
         base = work / "base"
         final = work / "final"
+        _prepare_source_overrides(source)
         _prepare_projection(source, base, final)
 
         tar_trees: list[str] = []
@@ -127,7 +129,6 @@ def import_processed_rootfs(
                     transform="s,^etc,usr/etc,",
                 )
             )
-
         # Reference rpm-ostree images keep top-level /boot empty in the commit.
         # Boot assets from container builds are runtime/deployment state here, so
         # we synthesize the empty directory in the base projection instead of
@@ -275,6 +276,19 @@ def _approx_entries(source: Path, base: Path, final: Path) -> int:
     return total
 
 
+def _prepare_source_overrides(source: Path) -> None:
+    semanage = _read_text(source / "etc/selinux/semanage.conf")
+    if semanage is not None:
+        _write(source / "etc/selinux/semanage.conf", _update_semanage(semanage))
+        _copy_selinux_store(source)
+
+    for path in glob.glob(str(source / "etc/selinux/*/contexts/files/file_contexts.subs_dist")):
+        src = Path(path)
+        contents = _read_text(src)
+        if contents is not None:
+            _write(src, _update_subs_dist(contents))
+
+
 def _prepare_projection(source: Path, base: Path, final: Path) -> None:
     _ensure_dir(base)
     for name in ("dev", "proc", "run", "sys", "var", "sysroot", "boot"):
@@ -368,15 +382,8 @@ def _prepare_projection(source: Path, base: Path, final: Path) -> None:
         _write(final / "usr/etc/group", group_split[0])
         _write(final / "usr/lib/group", group_split[1])
         _info("Split group into /usr/etc/group and /usr/lib/group")
-        _print_provenance_file("/usr/etc/passwd", group_split[0])
-        _print_provenance_file("/usr/lib/passwd", group_split[1])
-
-    for path in glob.glob(str(source / "etc/selinux/*/contexts/files/file_contexts.subs_dist")):
-        src = Path(path)
-        rel = src.relative_to(source / "etc")
-        contents = _read_text(src)
-        if contents is not None:
-            _write(final / "usr/etc" / rel, _update_subs_dist(contents))
+        _print_provenance_file("/usr/etc/group", group_split[0])
+        _print_provenance_file("/usr/lib/group", group_split[1])
 
 
 def _ensure_dir(path: Path, mode: int = 0o755) -> None:
@@ -532,6 +539,34 @@ def _update_useradd(contents: str) -> str:
     if not changed:
         output.append("HOME=/var/home")
     return "\n".join(output) + "\n"
+
+
+def _update_semanage(contents: str) -> str:
+    if "\nstore-root=/etc/selinux\n" in f"\n{contents}":
+        _info("SELinux semanage store root already points at /etc/selinux")
+        return contents if contents.endswith("\n") else contents + "\n"
+    _info("Updated SELinux semanage store root to /etc/selinux")
+    return contents + "\nstore-root=/etc/selinux\n"
+
+
+def _copy_selinux_store(source: Path) -> None:
+    store_root = source / "var/lib/selinux"
+    if not store_root.is_dir():
+        return
+    for policy in store_root.iterdir():
+        if not (policy / "active/modules").exists():
+            continue
+        destination = source / "etc/selinux" / policy.name
+        _ensure_dir(destination)
+        for child in policy.iterdir():
+            if child.name.endswith(".LOCK"):
+                continue
+            target = destination / child.name
+            if child.is_dir():
+                shutil.copytree(child, target, symlinks=True, dirs_exist_ok=True)
+            elif child.is_file():
+                shutil.copy2(child, target)
+        _info(f"Copied SELinux policy store {policy.name} to /etc/selinux/{policy.name}")
 
 
 def _split_passwd_file(path: Path) -> tuple[str, str] | None:

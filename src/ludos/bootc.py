@@ -61,7 +61,7 @@ def ostree_import(
         "run",
         "--rm",
         "--mount",
-        f"type=image,source={ref},target={SOURCE_MOUNT}",
+        f"type=image,source={ref},target={SOURCE_MOUNT},rw=true",
         "--mount",
         f"type=bind,source={ostree_dir},target={OSTREE_MOUNT}",
     ]

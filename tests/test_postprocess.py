@@ -69,6 +69,40 @@ class PostprocessTests(unittest.TestCase):
             contents,
         )
 
+    def test_prepare_source_overrides_moves_selinux_store_to_etc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            (source / "etc/selinux").mkdir(parents=True)
+            (source / "etc/selinux/semanage.conf").write_text(
+                "module-store = direct\n",
+                encoding="utf-8",
+            )
+            store = source / "var/lib/selinux/targeted"
+            (store / "active/modules").mkdir(parents=True)
+            (store / "active/file_contexts").write_text("policy\n", encoding="utf-8")
+            (store / "semanage.read.LOCK").write_text("", encoding="utf-8")
+            subs = source / "etc/selinux/targeted/contexts/files/file_contexts.subs_dist"
+            subs.parent.mkdir(parents=True)
+            subs.write_text("/etc/example /var/example\n", encoding="utf-8")
+
+            postprocess._prepare_source_overrides(source)
+
+            self.assertEqual(
+                (source / "etc/selinux/semanage.conf").read_text(encoding="utf-8"),
+                "module-store = direct\n\nstore-root=/etc/selinux\n",
+            )
+            self.assertEqual(
+                (source / "etc/selinux/targeted/active/file_contexts").read_text(
+                    encoding="utf-8"
+                ),
+                "policy\n",
+            )
+            self.assertFalse((source / "etc/selinux/targeted/semanage.read.LOCK").exists())
+            subs_contents = subs.read_text(encoding="utf-8")
+            self.assertIn("/usr/etc /etc\n", subs_contents)
+            self.assertIn("/usr/etc/example /var/example\n", subs_contents)
+
     def test_split_passwd_keeps_uid_zero_in_etc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             passwd = Path(tmp) / "passwd"
