@@ -466,7 +466,6 @@ def _resolve_manifest_metadata(
             repo_variables,
         )
         repo_lines = rendered_repo.rstrip().splitlines()
-        repo_lines.append(f"priority={repo.ref.priority}")
         repo_lines.append("metadata_expire=never")
         rendered_repo = "\n".join(repo_lines) + "\n"
         repo_id = _repo_id(rendered_repo, repo.source)
@@ -487,6 +486,7 @@ def _resolve_manifest_metadata(
                     "persist": dnf_persist_dir,
                 },
             )
+            _apply_repo_priority(repo_dir / repo.source.name, repo.ref.priority)
             continue
         if load_only_version or cache_only:
             raise ConfigError(
@@ -514,6 +514,7 @@ def _resolve_manifest_metadata(
                 "persist": dnf_persist_dir,
             },
         )
+        _apply_repo_priority(repo_dir / repo.source.name, repo.ref.priority)
 
     card_entries = []
     used_card_names = set()
@@ -2176,6 +2177,16 @@ def _repo_id(rendered_repo: str, source: Path) -> str:
         if match:
             return match.group(1)
     raise ConfigError(f"{source}: repository definition does not contain a repo id")
+
+
+def _apply_repo_priority(repo_file: Path, priority: int) -> None:
+    lines = [
+        line
+        for line in repo_file.read_text(encoding="utf-8").rstrip().splitlines()
+        if not line.strip().startswith("priority=")
+    ]
+    lines.append(f"priority={priority}")
+    repo_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _build_deps(card_build_deps: tuple[str, ...]) -> tuple[str, ...]:
