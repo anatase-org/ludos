@@ -95,7 +95,9 @@ def get_files(dir: str):
     else:
         all_files = {}
 
-        for line in run(f"'{sys.executable}' -m rechunk.walker '{dir}'").splitlines():
+        for line in run(
+            f"'{sys.executable}' -m ludos.rechunk.walker '{dir}'"
+        ).splitlines():
             idx = line.index(" ")
             size = int(line[:idx])
             name = line[idx + 1 :]

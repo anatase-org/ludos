@@ -8,8 +8,6 @@ import subprocess
 import threading
 from pathlib import Path
 
-from rechunk.alg import main as rechunk_main
-
 from .build import (
     _cleanup_dnf_workspaces,
     _run_streamed_command,
@@ -21,6 +19,7 @@ from .build import (
 )
 from .logging import log, piter, pstream
 from .model import ConfigError
+from .rechunk.alg import main as rechunk_main
 
 
 DEFAULT_CACHE_DIR = Path("cache")

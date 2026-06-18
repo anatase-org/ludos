@@ -7,10 +7,8 @@ from typing import Any, Sequence, cast
 import numpy as np
 import yaml
 
-from rechunk.model import MetaPackage, Package
-
 from .fedora import get_packages
-from .model import INFO_KEY, Package, get_layers, get_info, ExportInfo
+from .model import INFO_KEY, ExportInfo, MetaPackage, Package, get_info, get_layers
 from .ostree import (
     calculate_ostree_layers,
     dump_ostree_contentmeta,
