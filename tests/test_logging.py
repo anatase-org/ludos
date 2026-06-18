@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from rich.console import Console
 
-from ludos.logging import LudosHandler, piter, pstream
+from ludos.logging import LudosHandler, confirm, piter, pstream
 
 
 class LudosLoggingTests(unittest.TestCase):
@@ -115,6 +115,32 @@ class LudosLoggingTests(unittest.TestCase):
             pstream("OT: ingesting file")
 
         stream.assert_called_once_with("OT: ingesting file")
+
+    def test_confirm_pads_prompt_outside_agent(self) -> None:
+        with (
+            patch("ludos.logging.AGENT", False),
+            patch("builtins.input", return_value="y") as input_mock,
+        ):
+            self.assertTrue(confirm("Update card:pkg"))
+
+        input_mock.assert_called_once_with("        Update card:pkg [y/N] ")
+
+    def test_confirm_does_not_pad_prompt_in_agent(self) -> None:
+        with (
+            patch("ludos.logging.AGENT", True),
+            patch("builtins.input", return_value="yes") as input_mock,
+        ):
+            self.assertTrue(confirm("Update card:pkg"))
+
+        input_mock.assert_called_once_with("Update card:pkg [y/N] ")
+
+    def test_confirm_declines_blank_answer(self) -> None:
+        with patch("builtins.input", return_value=""):
+            self.assertFalse(confirm("Update card:pkg"))
+
+    def test_confirm_declines_eof(self) -> None:
+        with patch("builtins.input", side_effect=EOFError):
+            self.assertFalse(confirm("Update card:pkg"))
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from ..logging import log, stream
+from ..logging import confirm, log, stream
 from ..model import Card, ConfigError, SpecBuild, UpstreamRef, validate_manifest
 from .patch import (
     LUDOS_BRANCH,
@@ -54,6 +54,7 @@ class CardUpdateResult:
     initialized: int = 0
     skipped: int = 0
     updated: int = 0
+    declined: int = 0
 
 
 @dataclass(frozen=True)
@@ -70,11 +71,18 @@ class UpstreamHead:
     label: str
 
 
+def _confirm_update(label: str, *, assume_yes: bool) -> bool:
+    if assume_yes:
+        return True
+    return confirm(f"Update {label}")
+
+
 def update_targets(
     targets: tuple[Path, ...],
     cache_dir: Path | None = None,
     patchwork_dir: Path | None = None,
     dry_run: bool = False,
+    assume_yes: bool = False,
 ) -> int:
     cache_dir = _cache_dir(cache_dir)
     patchwork_dir = _patchwork_dir(patchwork_dir)
@@ -86,18 +94,23 @@ def update_targets(
             cache_dir,
             patchwork_dir,
             dry_run=dry_run,
+            assume_yes=assume_yes,
         )
         totals = CardUpdateResult(
             initialized=totals.initialized + result.initialized,
             skipped=totals.skipped + result.skipped,
             updated=totals.updated + result.updated,
+            declined=totals.declined + result.declined,
         )
 
-    log(
+    summary = (
         f"{'Dry run complete' if dry_run else 'Update complete'}: "
         f"{totals.updated} updated, {totals.initialized} initialized, "
         f"{totals.skipped} unchanged"
     )
+    if totals.declined:
+        summary += f", {totals.declined} declined"
+    log(summary)
     return 0
 
 
@@ -107,6 +120,7 @@ def update_card(
     patchwork_dir: Path,
     *,
     dry_run: bool = False,
+    assume_yes: bool = False,
 ) -> CardUpdateResult:
     card_source = _card_source(card)
     sources = _upstream_sources(card)
@@ -130,8 +144,23 @@ def update_card(
         upstream_head = _resolve_upstream_head(repo_dir, source.upstream)
 
         if not old_sha:
-            action = "Would initialize" if dry_run else "Initializing"
+            action = (
+                "Would initialize"
+                if dry_run
+                else "Upstream lock needs initialization"
+            )
             log(f"{action} upstream lock for {source.key}: {upstream_head.sha}")
+            if not dry_run and not _confirm_update(
+                f"{card_label}:{source.key}",
+                assume_yes=assume_yes,
+            ):
+                result = CardUpdateResult(
+                    initialized=result.initialized,
+                    skipped=result.skipped,
+                    updated=result.updated,
+                    declined=result.declined + 1,
+                )
+                continue
             if not dry_run:
                 _set_locked_sha(lock_data, source.key, UPSTREAM_SHA, upstream_head.sha)
                 _write_lock(lock_path, lock_data)
@@ -139,6 +168,7 @@ def update_card(
                 initialized=result.initialized + 1,
                 skipped=result.skipped,
                 updated=result.updated,
+                declined=result.declined,
             )
             continue
 
@@ -148,14 +178,28 @@ def update_card(
                 initialized=result.initialized,
                 skipped=result.skipped + 1,
                 updated=result.updated,
+                declined=result.declined,
             )
             continue
 
+        action = "Would merge" if dry_run else "Update available"
         log(
-            f"Merging '{source.key}' to '{upstream_head.label}' ({_short_sha(old_sha)}...{_short_sha(upstream_head.sha)}):\n"
+            f"{action} for '{source.key}' to '{upstream_head.label}' "
+            f"({_short_sha(old_sha)}...{_short_sha(upstream_head.sha)}):\n"
             f"Commits:\n"
             f"{_commit_summary(repo_dir, old_sha, upstream_head.sha)}"
         )
+        if not dry_run and not _confirm_update(
+            f"{card_label}:{source.key}",
+            assume_yes=assume_yes,
+        ):
+            result = CardUpdateResult(
+                initialized=result.initialized,
+                skipped=result.skipped,
+                updated=result.updated,
+                declined=result.declined + 1,
+            )
+            continue
         conflict_paths = _merge_dist_git_update(
             repo_dir=repo_dir,
             source=source,
@@ -183,6 +227,7 @@ def update_card(
             initialized=result.initialized,
             skipped=result.skipped,
             updated=result.updated + 1,
+            declined=result.declined,
         )
 
     for source in patch_sources:
@@ -194,11 +239,13 @@ def update_card(
             lock_path=lock_path,
             lock_data=lock_data,
             dry_run=dry_run,
+            assume_yes=assume_yes,
         )
         result = CardUpdateResult(
             initialized=result.initialized + patch_result.initialized,
             skipped=result.skipped + patch_result.skipped,
             updated=result.updated + patch_result.updated,
+            declined=result.declined + patch_result.declined,
         )
 
     return result
@@ -457,6 +504,7 @@ def _update_patch_source(
     lock_path: Path,
     lock_data: dict[str, Any],
     dry_run: bool,
+    assume_yes: bool,
 ) -> CardUpdateResult:
     repo_dir = ensure_patchwork_repo(patchwork_dir, card_label, source)
     ref = render_patch_ref(source, card_source)
@@ -465,8 +513,13 @@ def _update_patch_source(
     patch_file = patch_file_path(card_source, source)
 
     if not old_sha:
-        action = "Would initialize" if dry_run else "Initializing"
+        action = "Would initialize" if dry_run else "Patch lock needs initialization"
         log(f"{action} patch lock for {source.key}: {new_sha}")
+        if not dry_run and not _confirm_update(
+            f"{card_label}:{source.key}",
+            assume_yes=assume_yes,
+        ):
+            return CardUpdateResult(declined=1)
         if not dry_run:
             _set_locked_sha(lock_data, source.key, PATCH_SHA, new_sha)
             _write_lock(lock_path, lock_data)
@@ -475,6 +528,17 @@ def _update_patch_source(
     if old_sha == new_sha:
         log(f"No patch updates for '{ref}' ('{_short_sha(new_sha)}')")
         return CardUpdateResult(skipped=1)
+
+    if not dry_run:
+        log(
+            f"Patch update available for '{card_label}:{source.key}' "
+            f"onto '{ref}' ({_short_sha(old_sha)}...{_short_sha(new_sha)})"
+        )
+    if not dry_run and not _confirm_update(
+        f"{card_label}:{source.key}",
+        assume_yes=assume_yes,
+    ):
+        return CardUpdateResult(declined=1)
 
     if _finish_clean_patch_rebase(
         repo_dir=repo_dir,
@@ -495,7 +559,6 @@ def _update_patch_source(
         f"Rebasing patch series for '{card_label}:{source.key}' "
         f"onto '{ref}' ({_short_sha(old_sha)}...{_short_sha(new_sha)})"
     )
-
     reset_patchwork(repo_dir)
     _run_git(repo_dir, ["checkout", "-B", LUDOS_BRANCH, old_sha], capture=True)
     am_code = apply_patch_series(repo_dir, patch_file)

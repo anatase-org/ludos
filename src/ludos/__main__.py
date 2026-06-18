@@ -101,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fetch and merge in the cache without copying files back or updating locks.",
     )
+    update.add_argument(
+        "--assume-yes",
+        action="store_true",
+        help="Apply discovered updates without prompting.",
+    )
     update.set_defaults(func=update_command)
 
     patch = subcommands.add_parser(
@@ -332,6 +337,7 @@ def update_command(args: argparse.Namespace) -> int:
         cache_dir=args.cache_dir,
         patchwork_dir=args.patchwork_dir,
         dry_run=args.dry_run,
+        assume_yes=args.assume_yes,
     )
 
 

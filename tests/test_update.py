@@ -5,9 +5,29 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ludos.model import SpecBuild, UpstreamRef
-from ludos.contrib.update import LUDOS_BRANCH, UpstreamSource, _merge_dist_git_update
+from ludos.contrib.update import (
+    LUDOS_BRANCH,
+    UpstreamSource,
+    _confirm_update,
+    _merge_dist_git_update,
+)
+
+
+class UpdateConfirmationTests(unittest.TestCase):
+    def test_assume_yes_skips_prompt(self) -> None:
+        with patch("ludos.contrib.update.confirm") as confirm:
+            self.assertTrue(_confirm_update("card:pkg", assume_yes=True))
+
+        confirm.assert_not_called()
+
+    def test_confirm_update_delegates_to_logging_confirm(self) -> None:
+        with patch("ludos.contrib.update.confirm", return_value=True) as confirm:
+            self.assertTrue(_confirm_update("card:pkg", assume_yes=False))
+
+        confirm.assert_called_once_with("Update card:pkg")
 
 
 class DistGitUpdateTests(unittest.TestCase):

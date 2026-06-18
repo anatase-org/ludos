@@ -262,6 +262,15 @@ def error(message: object = "") -> None:
     logger.error("%s", message)
 
 
+def confirm(message: str) -> bool:
+    prefix = "" if AGENT else " " * INFO_MESSAGE_INDENT
+    try:
+        response = input(f"{prefix}{message} [y/N] ")
+    except EOFError:
+        return False
+    return response.strip().lower() in {"y", "yes"}
+
+
 def stream(message: str) -> None:
     logger.info("%s", message, extra={"ludos_stream": True})
 
