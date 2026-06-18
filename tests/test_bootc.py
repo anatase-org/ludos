@@ -10,6 +10,8 @@ from unittest.mock import call, patch
 
 from ludos.__main__ import build_parser
 from ludos.bootc import (
+    DEFAULT_OCI_WRITERS,
+    _bootc_encapsulate_supports_jobs,
     _export_rechunked_oci,
     _git_revision,
     _oci_export_line_rewriter,
@@ -18,6 +20,8 @@ from ludos.bootc import (
     _resolve_chunks_path,
     _safe_oci_name,
     _count_repo_objects,
+    _read_oci_export_stderr,
+    _read_oci_export_stdout,
     _read_ostree_stderr,
     _update_object_progress,
     _short_digest,
@@ -43,6 +47,8 @@ class BootcCommandTests(unittest.TestCase):
                 "20260618",
                 "--cache",
                 "--ci",
+                "--writers",
+                "8",
                 "--no-ccache",
                 "anatase.yml",
                 "other.yml",
@@ -57,8 +63,14 @@ class BootcCommandTests(unittest.TestCase):
         self.assertEqual(args.version, "20260618")
         self.assertTrue(args.cache)
         self.assertTrue(args.ci)
+        self.assertEqual(args.writers, 8)
         self.assertTrue(args.no_ccache)
         self.assertEqual(args.manifests, [Path("anatase.yml"), Path("other.yml")])
+
+    def test_parser_defaults_bootc_create_writers(self) -> None:
+        args = build_parser().parse_args(["bootc", "create", "anatase.yml"])
+
+        self.assertEqual(args.writers, DEFAULT_OCI_WRITERS)
 
     def test_parser_accepts_ostree_import(self) -> None:
         args = build_parser().parse_args(
@@ -122,6 +134,10 @@ class BootcCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ConfigError, "chunks file is missing"):
                 _resolve_chunks_path((Path(tmp) / "anatase.yml",), None)
+
+    def test_bootc_create_rejects_non_positive_writers(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "writers must be at least 1"):
+            bootc_create((Path("anatase.yml"),), writers=0)
 
     def test_safe_oci_name_sanitizes_image_ref(self) -> None:
         self.assertEqual(
@@ -193,6 +209,7 @@ class BootcCommandTests(unittest.TestCase):
                     cache_dir=root / "cache",
                     ci=True,
                     ccache=False,
+                    writers=8,
                 )
 
         self.assertEqual(result, 0)
@@ -264,6 +281,28 @@ class BootcCommandTests(unittest.TestCase):
                 ),
             ]
         )
+        export_mock.assert_has_calls(
+            [
+                call(
+                    podman="podman",
+                    image="localhost/anatase:f44",
+                    ostree_dir=(root / "cache" / "ostree").resolve(),
+                    oci_dir=(root / "cache" / "oci").resolve(),
+                    work_dir=(root / "cache" / "rechunk" / "anatase-f44").resolve(),
+                    safe_name="anatase-f44",
+                    writers=8,
+                ),
+                call(
+                    podman="podman",
+                    image="localhost/other:f44",
+                    ostree_dir=(root / "cache" / "ostree").resolve(),
+                    oci_dir=(root / "cache" / "oci").resolve(),
+                    work_dir=(root / "cache" / "rechunk" / "other-f44").resolve(),
+                    safe_name="other-f44",
+                    writers=8,
+                ),
+            ]
+        )
 
     def test_git_revision_returns_current_head(self) -> None:
         completed = subprocess.CompletedProcess(
@@ -303,9 +342,12 @@ class BootcCommandTests(unittest.TestCase):
             work_dir = root / "rechunk" / "anatase-f44"
 
             with patch(
-                "ludos.bootc._run_streamed_command",
+                "ludos.bootc._run_oci_export_command",
                 return_value=(0, ""),
-            ) as run:
+            ) as run, patch(
+                "ludos.bootc._bootc_encapsulate_supports_jobs",
+                return_value=True,
+            ):
                 _export_rechunked_oci(
                     podman="podman",
                     image="localhost/anatase:f44",
@@ -313,6 +355,7 @@ class BootcCommandTests(unittest.TestCase):
                     oci_dir=oci_dir,
                     work_dir=work_dir,
                     safe_name="anatase-f44",
+                    writers=8,
                 )
 
         run.assert_called_once_with(
@@ -336,11 +379,102 @@ class BootcCommandTests(unittest.TestCase):
                 "/ludos/ostree",
                 "--contentmeta",
                 "/ludos/rechunk/contentmeta.json",
+                "--jobs",
+                "8",
                 "master",
                 "oci:/ludos/oci/anatase-f44:latest",
-            ],
-            line_rewriter=_oci_export_line_rewriter,
+            ]
         )
+
+    def test_export_rechunked_oci_drops_jobs_when_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ostree_dir = root / "ostree"
+            oci_dir = root / "oci"
+            work_dir = root / "rechunk" / "anatase-f44"
+
+            with patch(
+                "ludos.bootc._run_oci_export_command",
+                return_value=(0, ""),
+            ) as run, patch(
+                "ludos.bootc._bootc_encapsulate_supports_jobs",
+                return_value=False,
+            ):
+                _export_rechunked_oci(
+                    podman="podman",
+                    image="localhost/anatase:f44",
+                    ostree_dir=ostree_dir,
+                    oci_dir=oci_dir,
+                    work_dir=work_dir,
+                    safe_name="anatase-f44",
+                    writers=8,
+                )
+
+        command = run.call_args.args[0]
+        self.assertNotIn("--jobs", command)
+        self.assertNotIn("8", command)
+        self.assertIn("master", command)
+
+    def test_bootc_encapsulate_supports_jobs_probes_help(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["podman"],
+            0,
+            stdout="Usage: ostree-ext container encapsulate [OPTIONS]\n  --jobs <JOBS>\n",
+        )
+        with patch("ludos.bootc.subprocess.run", return_value=completed) as run:
+            self.assertTrue(_bootc_encapsulate_supports_jobs("podman", "localhost/anatase:f44"))
+
+        run.assert_called_once_with(
+            [
+                "podman",
+                "run",
+                "--rm",
+                "localhost/anatase:f44",
+                "bootc",
+                "internals",
+                "ostree-ext",
+                "container",
+                "encapsulate",
+                "--help",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=30,
+        )
+
+    def test_bootc_encapsulate_supports_jobs_warns_on_failed_probe(self) -> None:
+        completed = subprocess.CompletedProcess(["podman"], 125, stdout="error\n")
+        with (
+            patch("ludos.bootc.subprocess.run", return_value=completed),
+            patch("ludos.bootc.warning") as warning,
+        ):
+            self.assertFalse(_bootc_encapsulate_supports_jobs("podman", "localhost/anatase:f44"))
+
+        warning.assert_called_once()
+
+    def test_bootc_encapsulate_supports_jobs_warns_when_flag_missing(self) -> None:
+        completed = subprocess.CompletedProcess(["podman"], 0, stdout="Usage\n")
+        with (
+            patch("ludos.bootc.subprocess.run", return_value=completed),
+            patch("ludos.bootc.warning") as warning,
+        ):
+            self.assertFalse(_bootc_encapsulate_supports_jobs("podman", "localhost/anatase:f44"))
+
+        warning.assert_called_once()
+
+    def test_bootc_encapsulate_supports_jobs_warns_on_timeout(self) -> None:
+        with (
+            patch(
+                "ludos.bootc.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["podman"], 30),
+            ),
+            patch("ludos.bootc.warning") as warning,
+        ):
+            self.assertFalse(_bootc_encapsulate_supports_jobs("podman", "localhost/anatase:f44"))
+
+        warning.assert_called_once()
 
     def test_oci_export_line_rewriter_names_digest_output(self) -> None:
         digest = "sha256:" + "a" * 64
@@ -349,6 +483,65 @@ class BootcCommandTests(unittest.TestCase):
             f"Exported OCI digest: {digest}\n",
         )
         self.assertEqual(_oci_export_line_rewriter("copying layer\n"), "copying layer\n")
+
+    def test_read_oci_export_stdout_rewrites_digest_and_captures_output(self) -> None:
+        digest = "sha256:" + "a" * 64
+
+        class Process:
+            stdout = io.StringIO(f"{digest}\ncopying config\n")
+
+        output: list[str] = []
+        with patch("ludos.bootc.pstream") as pstream:
+            _read_oci_export_stdout(Process(), output)  # type: ignore[arg-type]
+
+        self.assertEqual(output, [f"{digest}\n", "copying config\n"])
+        self.assertEqual(
+            pstream.call_args_list,
+            [
+                call(f"Exported OCI digest: {digest}"),
+                call("copying config"),
+            ],
+        )
+
+    def test_read_oci_export_stderr_updates_progress_for_layer_lines(self) -> None:
+        class Process:
+            stderr = io.StringIO(
+                "Exported OCI layer 7/42: kernel\n"
+                "warning: still useful\n"
+                "Exported OCI layer 1/42: final ostree\n"
+            )
+
+        class Progress:
+            total: int | None = None
+
+            def __init__(self) -> None:
+                self.n = 0
+                self.refresh_count = 0
+                self.updates: list[int] = []
+
+            def refresh(self) -> None:
+                self.refresh_count += 1
+
+            def update(self, amount: int) -> None:
+                self.updates.append(amount)
+                self.n += amount
+
+        progress = Progress()
+
+        with patch("ludos.bootc.pstream") as pstream:
+            _read_oci_export_stderr(Process(), progress)  # type: ignore[arg-type]
+
+        self.assertEqual(progress.total, 42)
+        self.assertEqual(progress.refresh_count, 2)
+        self.assertEqual(progress.updates, [1, 1])
+        self.assertEqual(
+            pstream.call_args_list,
+            [
+                call("Exported OCI layer 7/42: kernel"),
+                call("warning: still useful"),
+                call("Exported OCI layer 1/42: final ostree"),
+            ],
+        )
 
     def test_ostree_import_defaults_orchestrator_to_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

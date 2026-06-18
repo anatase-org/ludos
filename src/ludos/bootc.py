@@ -10,26 +10,27 @@ from pathlib import Path
 
 from .build import (
     _cleanup_dnf_workspaces,
-    _run_streamed_command,
     _terminate_process_group,
     build_build_images,
     build_final_manifest_images,
     build_package_card_images,
     resolve_build_manifests,
 )
-from .logging import log, piter, pstream
+from .logging import log, piter, pstream, warning
 from .model import ConfigError
 from .rechunk.alg import main as rechunk_main
 
 
 DEFAULT_CACHE_DIR = Path("cache")
 DEFAULT_OSTREE_REF = "master"
+DEFAULT_OCI_WRITERS = 4
 SOURCE_MOUNT = "/ludos/source"
 OSTREE_MOUNT = "/ludos/ostree"
 POSTPROCESS_MOUNT = "/ludos/postprocess.py"
 PROGRESS_TOTAL_PREFIX = "__LUDOS_OSTREE_APPROX_TOTAL__ "
 COMMIT_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_OCI_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+OCI_EXPORT_PROGRESS_RE = re.compile(r"^Exported OCI layer \d+/(?P<total>\d+): .+$")
 
 
 def bootc_create(
@@ -42,9 +43,12 @@ def bootc_create(
     cache_only: bool = False,
     ci: bool = False,
     ccache: bool = True,
+    writers: int = DEFAULT_OCI_WRITERS,
 ) -> int:
     if not manifests:
         raise ConfigError("at least one manifest is required")
+    if writers < 1:
+        raise ConfigError("writers must be at least 1")
 
     cache_root = _resolve_cache_root(manifests, cache_dir)
     chunks_path = _resolve_chunks_path(manifests, chunks)
@@ -115,6 +119,7 @@ def bootc_create(
             oci_dir=oci_dir,
             work_dir=work_dir,
             safe_name=safe_name,
+            writers=writers,
         )
 
     return 0
@@ -258,10 +263,26 @@ def _export_rechunked_oci(
     oci_dir: Path,
     work_dir: Path,
     safe_name: str,
+    writers: int = DEFAULT_OCI_WRITERS,
 ) -> None:
+    if writers < 1:
+        raise ConfigError("writers must be at least 1")
     target = f"oci:/ludos/oci/{safe_name}:latest"
     log(f"Exporting rechunked OCI image: {oci_dir / safe_name}")
-    returncode, _output = _run_streamed_command(
+    encapsulate_args = [
+        "bootc",
+        "internals",
+        "ostree-ext",
+        "container",
+        "encapsulate",
+        "--repo",
+        "/ludos/ostree",
+        "--contentmeta",
+        "/ludos/rechunk/contentmeta.json",
+    ]
+    if _bootc_encapsulate_supports_jobs(podman, image):
+        encapsulate_args.extend(["--jobs", str(writers)])
+    returncode, _output = _run_oci_export_command(
         [
             podman,
             "run",
@@ -273,22 +294,50 @@ def _export_rechunked_oci(
             "--volume",
             f"{oci_dir}:/ludos/oci",
             image,
-            "bootc",
-            "internals",
-            "ostree-ext",
-            "container",
-            "encapsulate",
-            "--repo",
-            "/ludos/ostree",
-            "--contentmeta",
-            "/ludos/rechunk/contentmeta.json",
+            *encapsulate_args,
             DEFAULT_OSTREE_REF,
             target,
-        ],
-        line_rewriter=_oci_export_line_rewriter,
+        ]
     )
     if returncode != 0:
         raise ConfigError(f"bootc OCI export failed with exit status {returncode}")
+
+
+def _bootc_encapsulate_supports_jobs(podman: str, image: str) -> bool:
+    command = [
+        podman,
+        "run",
+        "--rm",
+        image,
+        "bootc",
+        "internals",
+        "ostree-ext",
+        "container",
+        "encapsulate",
+        "--help",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        warning("Could not verify bootc encapsulate --jobs support; exporting without --jobs")
+        return False
+    if result.returncode != 0:
+        warning(
+            "Could not verify bootc encapsulate --jobs support "
+            f"(help exited {result.returncode}); exporting without --jobs"
+        )
+        return False
+    if "--jobs" not in result.stdout:
+        warning("bootc encapsulate does not support --jobs; exporting without --jobs")
+        return False
+    return True
 
 
 def _oci_export_line_rewriter(line: str) -> str:
@@ -296,6 +345,73 @@ def _oci_export_line_rewriter(line: str) -> str:
     if re.fullmatch(r"sha256:[0-9a-f]{64}", stripped):
         return f"Exported OCI digest: {stripped}\n"
     return line
+
+
+def _run_oci_export_command(command: list[str]) -> tuple[int, str]:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        text=True,
+    )
+    stdout_chunks: list[str] = []
+
+    with piter(
+        total=None,
+        desc="Exporting OCI layers",
+        unit="layers",
+        leave=False,
+    ) as progress:
+        stdout_thread = threading.Thread(
+            target=_read_oci_export_stdout,
+            args=(process, stdout_chunks),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_read_oci_export_stderr,
+            args=(process, progress),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        try:
+            returncode = process.wait()
+        finally:
+            if process.poll() is None:
+                _terminate_process_group(process)
+            stdout_thread.join()
+            stderr_thread.join()
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+    return returncode, "".join(stdout_chunks)
+
+
+def _read_oci_export_stdout(
+    process: subprocess.Popen[str],
+    output: list[str],
+) -> None:
+    assert process.stdout is not None
+    for raw_line in process.stdout:
+        output.append(raw_line)
+        line = _oci_export_line_rewriter(raw_line).rstrip("\n")
+        if line:
+            pstream(line)
+
+
+def _read_oci_export_stderr(process: subprocess.Popen[str], progress: object) -> None:
+    assert process.stderr is not None
+    for raw_line in process.stderr:
+        line = raw_line.rstrip("\n")
+        match = OCI_EXPORT_PROGRESS_RE.match(line)
+        if match is not None:
+            progress.total = int(match.group("total"))
+            progress.refresh()
+            progress.update(1)
+        pstream(line)
 
 
 def _unprocessed_ostree_import_script() -> str:

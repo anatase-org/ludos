@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .bootc import bootc_create, ostree_import
+from .bootc import DEFAULT_OCI_WRITERS, bootc_create, ostree_import
 from .build import build_manifest
 from .cleanup import cleanup_local_images
 from .logging import LOGO_STR, configure_tracebacks, error, log
@@ -239,6 +239,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build the final image with combined package and postprocess layers.",
     )
     create_parser.add_argument(
+        "--writers",
+        type=int,
+        default=DEFAULT_OCI_WRITERS,
+        help="Number of parallel OCI layer writers for bootc encapsulate. Defaults to 4.",
+    )
+    create_parser.add_argument(
         "--no-ccache",
         action="store_true",
         help="Do not mount or enable shared ccache/sccache directories for builder runs.",
@@ -430,6 +436,7 @@ def bootc_command(args: argparse.Namespace) -> int:
             cache_only=args.cache,
             ci=args.ci,
             ccache=not args.no_ccache,
+            writers=args.writers,
         )
     if args.bootc_action == "ostree-import":
         return ostree_import(
