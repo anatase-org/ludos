@@ -150,7 +150,8 @@ def checkout_patch(target: str, *, patchwork_dir: Path | None = None) -> int:
     log(
         f"Checked out '{resolved.card_label}:{resolved.source.key}' on "
         f"'{patch_helpers.LUDOS_BRANCH}' from "
-        f"'{patch_helpers.short_sha(resolved.patch_sha)}'"
+        f"'{patch_helpers.short_sha(resolved.patch_sha)}' "
+        f"on {patch_helpers.display_path(repo_dir)}"
     )
     return 0
 
