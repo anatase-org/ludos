@@ -25,6 +25,7 @@ KNOWN_STATE_FILES = {
     "var/log/wtmp",
     "var/log/btmp",
 }
+SKIPPED_VAR_TMPFILES_PREFIXES = ("var/lib/rpm", "var/lib/selinux")
 
 PRESERVED_ETC_GROUPS = ("wheel",)
 
@@ -438,10 +439,19 @@ def _tmpfiles_path(path: str) -> str:
     return path
 
 
+def _skip_var_tmpfiles(rel_text: str) -> bool:
+    return any(
+        rel_text == prefix or rel_text.startswith(prefix + "/")
+        for prefix in SKIPPED_VAR_TMPFILES_PREFIXES
+    )
+
+
 def _tmpfiles_line(source: Path, path: Path) -> str | None:
     rel = path.relative_to(source)
     rel_text = rel.as_posix()
     if rel_text in KNOWN_STATE_FILES:
+        return None
+    if _skip_var_tmpfiles(rel_text):
         return None
     if rel_text == "var/run" or rel_text.startswith("var/run/"):
         return None

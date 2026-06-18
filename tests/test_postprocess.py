@@ -118,6 +118,21 @@ class PostprocessTests(unittest.TestCase):
             self.assertIn("/usr/etc /etc\n", subs_contents)
             self.assertIn("/usr/etc/example /var/example\n", subs_contents)
 
+    def test_collect_var_tmpfiles_skips_selinux_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            (source / "var/lib/selinux/targeted/active/modules").mkdir(parents=True)
+            (source / "var/lib/rpm").mkdir(parents=True)
+            (source / "var/lib/rpm-state/kernel").mkdir(parents=True)
+            (source / "var/lib/NetworkManager").mkdir(parents=True)
+
+            contents = postprocess._collect_var_tmpfiles(source)
+
+            self.assertNotIn("/var/lib/selinux", contents)
+            self.assertNotIn("/var/lib/rpm ", contents)
+            self.assertIn("d /var/lib/NetworkManager 0755", contents)
+            self.assertIn("d /var/lib/rpm-state 0755", contents)
+
     def test_split_passwd_keeps_uid_zero_in_etc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             passwd = Path(tmp) / "passwd"
