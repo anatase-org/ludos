@@ -267,8 +267,13 @@ def _export_rechunked_oci(
 ) -> None:
     if writers < 1:
         raise ConfigError("writers must be at least 1")
+    target_dir = oci_dir / safe_name
+    if target_dir.is_symlink() or target_dir.is_file():
+        target_dir.unlink()
+    elif target_dir.exists():
+        shutil.rmtree(target_dir)
     target = f"oci:/ludos/oci/{safe_name}:latest"
-    log(f"Exporting rechunked OCI image: {oci_dir / safe_name}")
+    log(f"Exporting rechunked OCI image: {target_dir}")
     encapsulate_args = [
         "bootc",
         "internals",

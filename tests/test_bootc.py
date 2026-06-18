@@ -415,6 +415,34 @@ class BootcCommandTests(unittest.TestCase):
         self.assertNotIn("8", command)
         self.assertIn("master", command)
 
+    def test_export_rechunked_oci_removes_existing_target_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ostree_dir = root / "ostree"
+            oci_dir = root / "oci"
+            work_dir = root / "rechunk" / "anatase-f44"
+            stale_target = oci_dir / "anatase-f44"
+            stale_target.mkdir(parents=True)
+            (stale_target / "stale-layer").write_text("", encoding="utf-8")
+
+            with patch(
+                "ludos.bootc._run_oci_export_command",
+                return_value=(0, ""),
+            ), patch(
+                "ludos.bootc._bootc_encapsulate_supports_jobs",
+                return_value=False,
+            ):
+                _export_rechunked_oci(
+                    podman="podman",
+                    image="localhost/anatase:f44",
+                    ostree_dir=ostree_dir,
+                    oci_dir=oci_dir,
+                    work_dir=work_dir,
+                    safe_name="anatase-f44",
+                )
+
+        self.assertFalse(stale_target.exists())
+
     def test_bootc_encapsulate_supports_jobs_probes_help(self) -> None:
         completed = subprocess.CompletedProcess(
             ["podman"],
