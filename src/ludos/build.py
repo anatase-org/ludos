@@ -3413,7 +3413,6 @@ def _resolve_spec_build_requires(
         "--enable-repo=*",
         "--installroot=/ludos/resolve-root",
         f"--releasever={releasever}",
-        "--no-best",
         "builddep",
         "--allowerasing",
         "--define",
@@ -3430,10 +3429,27 @@ def _resolve_spec_build_requires(
         _resolve_spec_hash_inputs(workspace_dir, spec_paths),
     )
     output = transaction_preview.stdout + "\n" + transaction_preview.stderr
+    entries = _parse_resolved_package_entries(output, include_dependencies)
+    if (
+        transaction_preview.returncode != 0
+        and not entries
+        and "cannot install the best candidate for the job" in output
+    ):
+        log("Retrying spec BuildRequires resolution with --no-best")
+        no_best_cmd = list(cmd)
+        no_best_cmd.insert(no_best_cmd.index("builddep"), "--no-best")
+        transaction_preview = _run_cached_transaction_preview(
+            no_best_cmd,
+            resolve_cache_dir,
+            repo_images,
+            _resolve_spec_hash_inputs(workspace_dir, spec_paths),
+        )
+        output = transaction_preview.stdout + "\n" + transaction_preview.stderr
+        entries = _parse_resolved_package_entries(output, include_dependencies)
+
     if transaction_preview.returncode not in (0, 1):
         detail = "\n".join(output.splitlines()[-20:])
         raise ConfigError(f"dnf did not resolve spec BuildRequires:\n{detail}")
-    entries = _parse_resolved_package_entries(output, include_dependencies)
     if transaction_preview.returncode != 0 and not entries:
         detail = "\n".join(output.splitlines()[-20:])
         raise ConfigError(f"dnf did not resolve spec BuildRequires:\n{detail}")
