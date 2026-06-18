@@ -72,6 +72,7 @@ def import_processed_rootfs(
         work = Path(work_text)
         base = work / "base"
         final = work / "final"
+        _assert_authselect_altfiles(source)
         _prepare_source_overrides(source)
         _prepare_projection(source, base, final)
 
@@ -288,6 +289,22 @@ def _prepare_source_overrides(source: Path) -> None:
             _write(src, _update_subs_dist(contents))
 
 
+def _assert_authselect_altfiles(source: Path) -> None:
+    nsswitch = source / "etc/nsswitch.conf"
+    if not nsswitch.is_symlink():
+        return
+
+    generated = _read_text(source / "etc/authselect/nsswitch.conf")
+    if generated is None or not _nsswitch_uses_altfiles(generated):
+        raise RuntimeError(
+            "authselect-owned /etc/nsswitch.conf does not use altfiles for passwd/group"
+        )
+
+    vendor = source / "usr/share/authselect/vendor"
+    if not _tree_contains_text(vendor, "with-altfiles"):
+        raise RuntimeError("authselect vendor profiles do not contain with-altfiles")
+
+
 def _prepare_projection(source: Path, base: Path, final: Path) -> None:
     _ensure_dir(base)
     for name in ("dev", "proc", "run", "sys", "var", "sysroot", "boot"):
@@ -467,6 +484,30 @@ def _collect_var_tmpfiles(source: Path) -> str:
                 if line:
                     entries.add(line)
     return "".join(f"{entry}\n" for entry in sorted(entries))
+
+
+def _nsswitch_uses_altfiles(contents: str) -> bool:
+    found = set()
+    for line in contents.splitlines():
+        for name in ("passwd", "group"):
+            prefix = f"{name}:"
+            if line.startswith(prefix):
+                found.add(name)
+                if "altfiles" not in line[len(prefix) :].split():
+                    return False
+    return found == {"passwd", "group"}
+
+
+def _tree_contains_text(root: Path, needle: str) -> bool:
+    if not root.exists():
+        return False
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        contents = _read_text(path)
+        if contents is not None and needle in contents:
+            return True
+    return False
 
 
 def _add_altfiles(contents: str) -> str:

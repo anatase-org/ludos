@@ -53,6 +53,37 @@ class PostprocessTests(unittest.TestCase):
 
         self.assertEqual(postprocess._add_altfiles(contents), contents)
 
+    def test_authselect_altfiles_assert_ignores_regular_nsswitch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            (source / "etc").mkdir()
+            (source / "etc/nsswitch.conf").write_text(
+                "passwd: files systemd\ngroup: files systemd\n",
+                encoding="utf-8",
+            )
+
+            postprocess._assert_authselect_altfiles(source)
+
+    def test_authselect_altfiles_assert_requires_symlinked_image_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            (source / "etc/authselect").mkdir(parents=True)
+            (source / "etc/nsswitch.conf").symlink_to("authselect/nsswitch.conf")
+            (source / "etc/authselect/nsswitch.conf").write_text(
+                "passwd: files altfiles systemd\n"
+                "group: files altfiles systemd\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "with-altfiles"):
+                postprocess._assert_authselect_altfiles(source)
+
+            vendor = source / "usr/share/authselect/vendor/local"
+            vendor.mkdir(parents=True)
+            (vendor / "README").write_text("with-altfiles::\n", encoding="utf-8")
+
+            postprocess._assert_authselect_altfiles(source)
+
     def test_prepare_source_overrides_moves_selinux_store_to_etc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
