@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .bootc import ostree_import
+from .bootc import bootc_create, ostree_import
 from .build import build_manifest
 from .cleanup import cleanup_local_images
 from .logging import LOGO_STR, configure_tracebacks, error, log
@@ -195,6 +195,56 @@ def build_parser() -> argparse.ArgumentParser:
         help="Work with bootc image artifacts.",
     )
     bootc_subcommands = bootc.add_subparsers(dest="bootc_action", required=True)
+    create_parser = bootc_subcommands.add_parser(
+        "create",
+        help="Build manifests and export rechunked bootc OCI images.",
+    )
+    create_parser.add_argument(
+        "manifests",
+        nargs="+",
+        type=Path,
+        help="Paths to Ludos YAML manifests.",
+    )
+    create_parser.add_argument(
+        "--chunks",
+        type=Path,
+        default=None,
+        help="Path to chunks YAML. Defaults to chunks.yml next to the first manifest.",
+    )
+    create_parser.add_argument(
+        "--cards-dir",
+        type=Path,
+        default=None,
+        help="Directory containing card YAML files. Defaults to ./cards next to the manifest.",
+    )
+    create_parser.add_argument(
+        "--cache",
+        action="store_true",
+        help="Only use cached repository and card images. Fail if any are missing.",
+    )
+    create_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Directory for build, dnf, package, OSTree, and OCI caches. Defaults to ./cache next to the first manifest.",
+    )
+    create_parser.add_argument(
+        "--version",
+        default=None,
+        help="Repository/package cache version to load. Defaults to the current YYYYMMDD and creates missing cache images.",
+    )
+    create_parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="Build the final image with combined package and postprocess layers.",
+    )
+    create_parser.add_argument(
+        "--no-ccache",
+        action="store_true",
+        help="Do not mount or enable shared ccache/sccache directories for builder runs.",
+    )
+    create_parser.set_defaults(func=bootc_command)
+
     ostree_import_parser = bootc_subcommands.add_parser(
         "ostree-import",
         help="Import a local container image root into an OSTree repo.",
@@ -370,6 +420,17 @@ def package_command(args: argparse.Namespace) -> int:
 
 
 def bootc_command(args: argparse.Namespace) -> int:
+    if args.bootc_action == "create":
+        return bootc_create(
+            tuple(args.manifests),
+            chunks=args.chunks,
+            cards_dir=args.cards_dir,
+            cache_dir=args.cache_dir,
+            cache_version=args.version,
+            cache_only=args.cache,
+            ci=args.ci,
+            ccache=not args.no_ccache,
+        )
     if args.bootc_action == "ostree-import":
         return ostree_import(
             args.ref,

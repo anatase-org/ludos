@@ -103,11 +103,16 @@ def argparse_func():
     # Hyperparameters
     group = parser.add_argument_group("Hyperparameters")
     group.add_argument(
+        "--chunks",
+        help="Path to chunks.yml. Contains meta package groupings and layer tuning.",
+        required=False,
+        default="chunks.yml",
+    )
+    group.add_argument(
         "-m",
         "--meta",
-        help="Path to the meta.yml file. Contains meta package groupings that are used to create the layers. A default file is provided.",
-        required=False,
-        default=None,
+        dest="chunks",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--max-layers",
@@ -152,7 +157,7 @@ def argparse_func():
         repo=args.repo,
         ref=args.ref,
         contentmeta_fn=args.contentmeta,
-        meta_fn=args.meta,
+        chunks_fn=args.chunks,
         previous_manifest=args.previous_manifest,
         max_layers=args.max_layers,
         prefill_ratio=args.prefill_ratio,

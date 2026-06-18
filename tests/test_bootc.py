@@ -5,21 +5,59 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import call, patch
 
 from ludos.__main__ import build_parser
 from ludos.bootc import (
+    _export_rechunked_oci,
     _parse_commit,
     _parse_progress_total,
+    _resolve_chunks_path,
+    _safe_oci_name,
     _count_repo_objects,
     _read_ostree_stderr,
     _update_object_progress,
     _short_digest,
+    bootc_create,
     ostree_import,
 )
+from ludos.model import ConfigError
 
 
 class BootcCommandTests(unittest.TestCase):
+    def test_parser_accepts_bootc_create(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "bootc",
+                "create",
+                "--chunks",
+                "custom-chunks.yml",
+                "--cache-dir",
+                "custom-cache",
+                "--cards-dir",
+                "custom-cards",
+                "--version",
+                "20260618",
+                "--cache",
+                "--ci",
+                "--no-ccache",
+                "anatase.yml",
+                "other.yml",
+            ]
+        )
+
+        self.assertEqual(args.command, "bootc")
+        self.assertEqual(args.bootc_action, "create")
+        self.assertEqual(args.chunks, Path("custom-chunks.yml"))
+        self.assertEqual(args.cache_dir, Path("custom-cache"))
+        self.assertEqual(args.cards_dir, Path("custom-cards"))
+        self.assertEqual(args.version, "20260618")
+        self.assertTrue(args.cache)
+        self.assertTrue(args.ci)
+        self.assertTrue(args.no_ccache)
+        self.assertEqual(args.manifests, [Path("anatase.yml"), Path("other.yml")])
+
     def test_parser_accepts_ostree_import(self) -> None:
         args = build_parser().parse_args(
             [
@@ -66,6 +104,200 @@ class BootcCommandTests(unittest.TestCase):
 
         self.assertIsNone(args.orchestrator)
         self.assertEqual(args.ref, "localhost/anatase:latest")
+
+    def test_resolve_chunks_defaults_next_to_first_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chunks = root / "chunks.yml"
+            chunks.write_text("version: 1\nmeta: {}\n", encoding="utf-8")
+
+            self.assertEqual(
+                _resolve_chunks_path((root / "anatase.yml",), None),
+                chunks.resolve(),
+            )
+
+    def test_resolve_chunks_errors_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ConfigError, "chunks file is missing"):
+                _resolve_chunks_path((Path(tmp) / "anatase.yml",), None)
+
+    def test_safe_oci_name_sanitizes_image_ref(self) -> None:
+        self.assertEqual(
+            _safe_oci_name("localhost/anatase:f44-x86_64"),
+            "anatase-f44-x86_64",
+        )
+        self.assertEqual(
+            _safe_oci_name("registry.example.com/team/anatase:test"),
+            "registry.example.com-team-anatase-test",
+        )
+
+    def test_bootc_create_builds_imports_rechunks_and_exports_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_a = root / "anatase.yml"
+            manifest_b = root / "other.yml"
+            chunks = root / "chunks.yml"
+            chunks.write_text("version: 1\nmeta: {}\n", encoding="utf-8")
+            events: list[str] = []
+            metadata = (
+                SimpleNamespace(
+                    manifest_labels=(("org.opencontainers.image.title", "Anatase"),)
+                ),
+                SimpleNamespace(manifest_labels=()),
+            )
+            results = (
+                SimpleNamespace(output_image="localhost/anatase:f44", podman="podman"),
+                SimpleNamespace(output_image="localhost/other:f44", podman="podman"),
+            )
+
+            def mark(name):
+                def inner(*_args, **_kwargs):
+                    events.append(name)
+                    if name == "resolve":
+                        return metadata
+                    if name == "build-build":
+                        return SimpleNamespace()
+                    if name == "final":
+                        return results
+                    return 0
+
+                return inner
+
+            with (
+                patch("ludos.bootc.resolve_build_manifests", side_effect=mark("resolve")),
+                patch("ludos.bootc.build_package_card_images", side_effect=mark("packages")),
+                patch("ludos.bootc.build_build_images", side_effect=mark("build-build")),
+                patch("ludos.bootc.build_final_manifest_images", side_effect=mark("final")),
+                patch("ludos.bootc._cleanup_dnf_workspaces", side_effect=mark("cleanup")),
+                patch("ludos.bootc.ostree_import") as ostree_import_mock,
+                patch("ludos.bootc.rechunk_main") as rechunk_mock,
+                patch("ludos.bootc._export_rechunked_oci") as export_mock,
+            ):
+                ostree_import_mock.side_effect = lambda ref, **_kwargs: events.append(
+                    f"import:{ref}"
+                )
+                rechunk_mock.side_effect = lambda **kwargs: events.append(
+                    f"rechunk:{Path(kwargs['contentmeta_fn']).parent.name}"
+                )
+                export_mock.side_effect = lambda **kwargs: events.append(
+                    f"export:{kwargs['safe_name']}"
+                )
+
+                result = bootc_create(
+                    (manifest_a, manifest_b),
+                    chunks=chunks,
+                    cache_dir=root / "cache",
+                    ci=True,
+                    ccache=False,
+                )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            events,
+            [
+                "resolve",
+                "packages",
+                "build-build",
+                "final",
+                "cleanup",
+                "import:localhost/anatase:f44",
+                "rechunk:anatase-f44",
+                "export:anatase-f44",
+                "import:localhost/other:f44",
+                "rechunk:other-f44",
+                "export:other-f44",
+            ],
+        )
+        ostree_import_mock.assert_has_calls(
+            [
+                call(
+                    "localhost/anatase:f44",
+                    cache_dir=(root / "cache").resolve(),
+                    orchestrator="localhost/anatase:f44",
+                    ostree_ref="master",
+                ),
+                call(
+                    "localhost/other:f44",
+                    cache_dir=(root / "cache").resolve(),
+                    orchestrator="localhost/other:f44",
+                    ostree_ref="master",
+                ),
+            ]
+        )
+        rechunk_mock.assert_has_calls(
+            [
+                call(
+                    repo=str((root / "cache" / "ostree").resolve()),
+                    ref="master",
+                    contentmeta_fn=str(
+                        (root / "cache" / "rechunk" / "anatase-f44" / "contentmeta.json").resolve()
+                    ),
+                    chunks_fn=str(chunks.resolve()),
+                    result_fn=str(
+                        (root / "cache" / "rechunk" / "anatase-f44" / "results.txt").resolve()
+                    ),
+                    labels=["org.opencontainers.image.title=Anatase"],
+                ),
+                call(
+                    repo=str((root / "cache" / "ostree").resolve()),
+                    ref="master",
+                    contentmeta_fn=str(
+                        (root / "cache" / "rechunk" / "other-f44" / "contentmeta.json").resolve()
+                    ),
+                    chunks_fn=str(chunks.resolve()),
+                    result_fn=str(
+                        (root / "cache" / "rechunk" / "other-f44" / "results.txt").resolve()
+                    ),
+                    labels=[],
+                ),
+            ]
+        )
+
+    def test_export_rechunked_oci_uses_bootc_ostree_ext_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ostree_dir = root / "ostree"
+            oci_dir = root / "oci"
+            work_dir = root / "rechunk" / "anatase-f44"
+
+            with patch(
+                "ludos.bootc._run_streamed_command",
+                return_value=(0, ""),
+            ) as run:
+                _export_rechunked_oci(
+                    podman="podman",
+                    image="localhost/anatase:f44",
+                    ostree_dir=ostree_dir,
+                    oci_dir=oci_dir,
+                    work_dir=work_dir,
+                    safe_name="anatase-f44",
+                )
+
+        run.assert_called_once_with(
+            [
+                "podman",
+                "run",
+                "--rm",
+                "--volume",
+                f"{ostree_dir}:/ludos/ostree:ro",
+                "--volume",
+                f"{work_dir}:/ludos/rechunk:ro",
+                "--volume",
+                f"{oci_dir}:/ludos/oci",
+                "localhost/anatase:f44",
+                "bootc",
+                "internals",
+                "ostree-ext",
+                "container",
+                "encapsulate",
+                "--repo",
+                "/ludos/ostree",
+                "--contentmeta",
+                "/ludos/rechunk/contentmeta.json",
+                "master",
+                "oci:/ludos/oci/anatase-f44:latest",
+            ]
+        )
 
     def test_ostree_import_defaults_orchestrator_to_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -204,9 +436,13 @@ class BootcCommandTests(unittest.TestCase):
         command, repo = run_import.call_args.args
         self.assertEqual(repo, ostree_dir.resolve())
         self.assertEqual(command[:3], ["podman", "run", "--rm"])
-        self.assertIn(
-            "type=image,source=localhost/anatase:latest,target=/ludos/source",
-            command,
+        self.assertTrue(
+            any(
+                item.startswith(
+                    "type=image,source=localhost/anatase:latest,target=/ludos/source"
+                )
+                for item in command
+            )
         )
         self.assertIn(
             f"type=bind,source={ostree_dir.resolve()},target=/ludos/ostree",

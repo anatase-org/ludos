@@ -8,7 +8,17 @@ import subprocess
 import threading
 from pathlib import Path
 
-from .build import _terminate_process_group
+from rechunk.alg import main as rechunk_main
+
+from .build import (
+    _cleanup_dnf_workspaces,
+    _run_streamed_command,
+    _terminate_process_group,
+    build_build_images,
+    build_final_manifest_images,
+    build_package_card_images,
+    resolve_build_manifests,
+)
 from .logging import log, piter, pstream
 from .model import ConfigError
 
@@ -20,6 +30,89 @@ OSTREE_MOUNT = "/ludos/ostree"
 POSTPROCESS_MOUNT = "/ludos/postprocess.py"
 PROGRESS_TOTAL_PREFIX = "__LUDOS_OSTREE_APPROX_TOTAL__ "
 COMMIT_RE = re.compile(r"^[0-9a-f]{64}$")
+SAFE_OCI_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def bootc_create(
+    manifests: tuple[Path, ...],
+    *,
+    chunks: Path | None = None,
+    cards_dir: Path | None = None,
+    cache_dir: Path | None = None,
+    cache_version: str | None = None,
+    cache_only: bool = False,
+    ci: bool = False,
+    ccache: bool = True,
+) -> int:
+    if not manifests:
+        raise ConfigError("at least one manifest is required")
+
+    cache_root = _resolve_cache_root(manifests, cache_dir)
+    chunks_path = _resolve_chunks_path(manifests, chunks)
+
+    metadata = tuple()
+    try:
+        metadata = resolve_build_manifests(
+            manifests,
+            cards_dir=cards_dir,
+            cache_dir=cache_root,
+            cache_version=cache_version,
+            cache_only=cache_only,
+            ccache=ccache,
+        )
+        build_package_card_images(metadata, cache_only=cache_only)
+        build_outputs = build_build_images(metadata, cache_only=cache_only)
+        results = build_final_manifest_images(
+            metadata,
+            build_outputs=build_outputs,
+            mode="combined" if ci else "separated",
+            cache_only=cache_only,
+        )
+    finally:
+        _cleanup_dnf_workspaces(metadata)
+
+    ostree_dir = cache_root / "ostree"
+    oci_dir = cache_root / "oci"
+    work_root = cache_root / "rechunk"
+    oci_dir.mkdir(parents=True, exist_ok=True)
+    work_root.mkdir(parents=True, exist_ok=True)
+
+    for manifest, result in zip(metadata, results):
+        image = result.output_image
+        safe_name = _safe_oci_name(image)
+        work_dir = work_root / safe_name
+        work_dir.mkdir(parents=True, exist_ok=True)
+        contentmeta = work_dir / "contentmeta.json"
+        result_fn = work_dir / "results.txt"
+
+        log(f"Creating bootc OSTree import for {image}")
+        ostree_import(
+            image,
+            cache_dir=cache_root,
+            orchestrator=image,
+            ostree_ref=DEFAULT_OSTREE_REF,
+        )
+
+        log(f"Rechunking {image} using {chunks_path}")
+        rechunk_main(
+            repo=str(ostree_dir),
+            ref=DEFAULT_OSTREE_REF,
+            contentmeta_fn=str(contentmeta),
+            chunks_fn=str(chunks_path),
+            result_fn=str(result_fn),
+            labels=_manifest_labels(manifest.manifest_labels),
+        )
+
+        _export_rechunked_oci(
+            podman=result.podman,
+            image=image,
+            ostree_dir=ostree_dir,
+            oci_dir=oci_dir,
+            work_dir=work_dir,
+            safe_name=safe_name,
+        )
+
+    return 0
 
 
 def ostree_import(
@@ -107,6 +200,73 @@ def ostree_import(
 
     log(f"Imported {ref} as {ostree_ref} ({commit}) in {ostree_dir}")
     return 0
+
+
+def _resolve_cache_root(manifests: tuple[Path, ...], cache_dir: Path | None) -> Path:
+    if cache_dir is not None:
+        return cache_dir.expanduser().resolve()
+    return (manifests[0].resolve().parent / DEFAULT_CACHE_DIR).resolve()
+
+
+def _resolve_chunks_path(manifests: tuple[Path, ...], chunks: Path | None) -> Path:
+    chunks_path = chunks or (manifests[0].resolve().parent / "chunks.yml")
+    chunks_path = chunks_path.expanduser().resolve()
+    if not chunks_path.is_file():
+        raise ConfigError(f"chunks file is missing: {chunks_path}")
+    return chunks_path
+
+
+def _manifest_labels(labels: tuple[tuple[str, str], ...]) -> list[str]:
+    return [f"{key}={value}" for key, value in labels]
+
+
+def _safe_oci_name(image: str) -> str:
+    value = image
+    if value.startswith("localhost/"):
+        value = value.removeprefix("localhost/")
+    value = value.replace(":", "-")
+    value = SAFE_OCI_NAME_RE.sub("-", value).strip("-._")
+    return value or "image"
+
+
+def _export_rechunked_oci(
+    *,
+    podman: str,
+    image: str,
+    ostree_dir: Path,
+    oci_dir: Path,
+    work_dir: Path,
+    safe_name: str,
+) -> None:
+    target = f"oci:/ludos/oci/{safe_name}:latest"
+    log(f"Exporting rechunked OCI image: {oci_dir / safe_name}")
+    returncode, _output = _run_streamed_command(
+        [
+            podman,
+            "run",
+            "--rm",
+            "--volume",
+            f"{ostree_dir}:/ludos/ostree:ro",
+            "--volume",
+            f"{work_dir}:/ludos/rechunk:ro",
+            "--volume",
+            f"{oci_dir}:/ludos/oci",
+            image,
+            "bootc",
+            "internals",
+            "ostree-ext",
+            "container",
+            "encapsulate",
+            "--repo",
+            "/ludos/ostree",
+            "--contentmeta",
+            "/ludos/rechunk/contentmeta.json",
+            DEFAULT_OSTREE_REF,
+            target,
+        ]
+    )
+    if returncode != 0:
+        raise ConfigError(f"bootc OCI export failed with exit status {returncode}")
 
 
 def _unprocessed_ostree_import_script() -> str:

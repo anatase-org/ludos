@@ -17,7 +17,7 @@ from .ostree import (
     get_ostree_map,
     run_with_ostree_files,
 )
-from .utils import get_default_meta_yaml, get_labels, get_update_matrix, tqdm
+from .utils import get_labels, get_update_matrix, tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -533,6 +533,7 @@ def main(
     repo: str,
     ref: str,
     contentmeta_fn: str | None = None,
+    chunks_fn: str | None = None,
     meta_fn: str | None = None,
     previous_manifest: str | list[str] | None = None,
     max_layers: int | None = None,
@@ -552,9 +553,10 @@ def main(
     clear_plan: bool = False,
     formatters: dict[str, str] = {},
 ):
-    if not meta_fn:
-        meta_fn = get_default_meta_yaml()
-    with open(meta_fn, "r") as f:
+    chunks_fn = chunks_fn or meta_fn or "chunks.yml"
+    if not os.path.isfile(chunks_fn):
+        raise FileNotFoundError(f"chunks file is missing: {chunks_fn}")
+    with open(chunks_fn, "r") as f:
         meta = yaml.safe_load(f)
         if max_layers is None:
             max_layers = cast(int, meta.get("max_layers", 39))
