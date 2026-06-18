@@ -4,7 +4,6 @@ import argparse
 import glob
 import grp
 import os
-import posixpath
 import pwd
 import shlex
 import stat
@@ -25,6 +24,9 @@ KNOWN_STATE_FILES = {
     "var/log/wtmp",
     "var/log/btmp",
 }
+
+PRESERVED_ETC_GROUPS = ("wheel",)
+AUTHSELECT_ALTFILES_FEATURE = "with-altfiles"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -322,25 +324,52 @@ def _prepare_projection(source: Path, base: Path, final: Path) -> None:
     if var_tmpfiles:
         _write(final / "usr/lib/tmpfiles.d/rpm-ostree-1-autovar.conf", var_tmpfiles)
 
-    nsswitch = _read_text(_source_path(source, "etc/nsswitch.conf"))
-    if nsswitch is not None:
-        nsswitch_path = _projected_etc_overlay_path(source, "nsswitch.conf")
-        if nsswitch_path is not None:
-            _write(final / nsswitch_path, _add_altfiles(nsswitch))
+    nsswitch_path = source / "etc/nsswitch.conf"
+    if nsswitch_path.is_file() and not nsswitch_path.is_symlink():
+        nsswitch = _read_text(nsswitch_path)
+        if nsswitch is not None:
+            updated_nsswitch = _add_altfiles(nsswitch)
+            _write(final / "usr/etc/nsswitch.conf", updated_nsswitch)
+            if updated_nsswitch == nsswitch:
+                _info("Regular /etc/nsswitch.conf already has altfiles")
+            else:
+                _info("Updated regular /etc/nsswitch.conf with altfiles")
+    elif nsswitch_path.is_symlink():
+        _info("Leaving symlinked /etc/nsswitch.conf untouched")
+    else:
+        _info("No /etc/nsswitch.conf found to update")
+
+    authselect = _read_text(source / "etc/authselect/authselect.conf")
+    if authselect is not None:
+        updated_authselect = _add_authselect_feature(authselect, AUTHSELECT_ALTFILES_FEATURE)
+        _write(
+            final / "usr/etc/authselect/authselect.conf",
+            updated_authselect,
+        )
+        if updated_authselect == authselect:
+            _info(f"Authselect feature {AUTHSELECT_ALTFILES_FEATURE} already present")
+        else:
+            _info(f"Added authselect feature {AUTHSELECT_ALTFILES_FEATURE}")
 
     useradd = _read_text(source / "etc/default/useradd")
     if useradd is not None:
         _write(final / "usr/etc/default/useradd", _update_useradd(useradd))
 
-    passwd_split = _split_colon_file(source / "etc/passwd")
+    passwd_split = _split_passwd_file(source / "etc/passwd")
     if passwd_split is not None:
         _write(final / "usr/etc/passwd", passwd_split[0])
         _write(final / "usr/lib/passwd", passwd_split[1])
+        _info("Split passwd into /usr/etc/passwd and /usr/lib/passwd")
+        _print_provenance_file("/usr/etc/passwd", passwd_split[0])
+        _print_provenance_file("/usr/lib/passwd", passwd_split[1])
 
-    group_split = _split_colon_file(source / "etc/group", ("root", "wheel"))
+    group_split = _split_group_file(source / "etc/group", PRESERVED_ETC_GROUPS)
     if group_split is not None:
         _write(final / "usr/etc/group", group_split[0])
         _write(final / "usr/lib/group", group_split[1])
+        _info("Split group into /usr/etc/group and /usr/lib/group")
+        _print_provenance_file("/usr/etc/passwd", group_split[0])
+        _print_provenance_file("/usr/lib/passwd", group_split[1])
 
     for path in glob.glob(str(source / "etc/selinux/*/contexts/files/file_contexts.subs_dist")):
         src = Path(path)
@@ -361,6 +390,16 @@ def _write(path: Path, text: str, mode: int = 0o644) -> None:
     path.chmod(mode)
 
 
+def _info(message: str) -> None:
+    print(f"postprocess: {message}", file=sys.stderr)
+
+
+def _print_provenance_file(path: str, contents: str) -> None:
+    print(f'postprocess: File "{path}" contents:', file=sys.stderr)
+    for line in contents.splitlines():
+        print(f"postprocess: > {line}", file=sys.stderr)
+
+
 def _symlink(target: str, path: Path) -> None:
     _ensure_dir(path.parent)
     if path.exists() or path.is_symlink():
@@ -375,40 +414,6 @@ def _read_text(path: Path) -> str | None:
         return None
     except UnicodeDecodeError:
         return path.read_text(encoding="utf-8", errors="replace")
-
-
-def _source_path(source: Path, relpath: str) -> Path:
-    path = source / relpath
-    if not path.is_symlink():
-        return path
-
-    target = os.readlink(path)
-    if target.startswith("/"):
-        projected = posixpath.normpath(target).removeprefix("/")
-    else:
-        projected = posixpath.normpath(posixpath.join(posixpath.dirname(relpath), target))
-    if projected == "." or projected.startswith("../"):
-        return path
-    return source / projected
-
-
-def _projected_etc_overlay_path(source: Path, relpath: str) -> Path | None:
-    path = source / "etc" / relpath
-    if not path.is_symlink():
-        return Path("usr/etc") / relpath
-
-    target = os.readlink(path)
-    if target.startswith("/"):
-        abs_target = posixpath.normpath(target)
-    else:
-        abs_target = posixpath.normpath(posixpath.join("/etc", posixpath.dirname(relpath), target))
-
-    if abs_target == "/etc":
-        return Path("usr/etc")
-    if abs_target.startswith("/etc/"):
-        return Path("usr/etc") / abs_target.removeprefix("/etc/")
-
-    return None
 
 
 def _user_name(uid: int) -> str:
@@ -507,6 +512,14 @@ def _add_altfiles(contents: str) -> str:
     return "\n".join(output) + "\n"
 
 
+def _add_authselect_feature(contents: str, feature: str) -> str:
+    lines = contents.splitlines()
+    if feature in lines:
+        return "\n".join(lines) + "\n"
+    lines.append(feature)
+    return "\n".join(lines) + "\n"
+
+
 def _update_useradd(contents: str) -> str:
     output: list[str] = []
     changed = False
@@ -521,22 +534,54 @@ def _update_useradd(contents: str) -> str:
     return "\n".join(output) + "\n"
 
 
-def _split_colon_file(path: Path, root_names: tuple[str, ...] = ("root",)) -> tuple[str, str] | None:
+def _split_passwd_file(path: Path) -> tuple[str, str] | None:
     contents = _read_text(path)
     if contents is None:
         return None
+    etc_lines: list[str] = []
+    alt_lines: list[str] = []
+    for line in contents.splitlines():
+        fields = _colon_fields(line, 4)
+        if fields is None or int(fields[2]) == 0:
+            etc_lines.append(line)
+        else:
+            alt_lines.append(line)
+    return _render_lines(etc_lines), _render_lines(alt_lines)
+
+
+def _split_group_file(path: Path, preserved_groups: tuple[str, ...]) -> tuple[str, str] | None:
+    contents = _read_text(path)
+    if contents is None:
+        return None
+    preserved = set(preserved_groups)
     root_lines: list[str] = []
     alt_lines: list[str] = []
     for line in contents.splitlines():
-        if not line or line.startswith("#"):
+        fields = _colon_fields(line, 3)
+        if fields is None:
             root_lines.append(line)
             continue
-        name = line.split(":", 1)[0]
-        if name in root_names:
+        gid = int(fields[2])
+        if gid == 0 or fields[0] in preserved:
             root_lines.append(line)
-        else:
+        if gid != 0:
             alt_lines.append(line)
-    return "\n".join(root_lines) + "\n", "\n".join(alt_lines) + "\n"
+    return _render_lines(root_lines), _render_lines(alt_lines)
+
+
+def _render_lines(lines: list[str]) -> str:
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
+def _colon_fields(line: str, min_fields: int) -> list[str] | None:
+    if not line or line.startswith("#"):
+        return None
+    fields = line.split(":")
+    if len(fields) < min_fields:
+        raise ValueError(f"Malformed colon entry: {line!r}")
+    return fields
 
 
 def _update_subs_dist(contents: str) -> str:
