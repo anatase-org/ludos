@@ -1557,6 +1557,9 @@ RUN mkdir -p /target
 #
 
 RUN --mount=type=bind,from={common_stage},source=/rpms,target=/rpms/common,ro /bin/sh <<'LUDOS_BOOTSTRAP'
+# /run/ostree-booted changes the post scripts of a variety of packages
+mkdir -p /target/run
+install -m 0755 /dev/null /target/run/ostree-booted
 {_dnf_install_script(metadata.releasever, bootstrap_paths, installroot="/target")}
 LUDOS_BOOTSTRAP
 """
