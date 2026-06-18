@@ -262,10 +262,18 @@ def _export_rechunked_oci(
             "/ludos/rechunk/contentmeta.json",
             DEFAULT_OSTREE_REF,
             target,
-        ]
+        ],
+        line_rewriter=_oci_export_line_rewriter,
     )
     if returncode != 0:
         raise ConfigError(f"bootc OCI export failed with exit status {returncode}")
+
+
+def _oci_export_line_rewriter(line: str) -> str:
+    stripped = line.strip()
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", stripped):
+        return f"Exported OCI digest: {stripped}\n"
+    return line
 
 
 def _unprocessed_ostree_import_script() -> str:

@@ -1,12 +1,12 @@
 import fnmatch
 import json
-import logging
 import os
 from typing import Any, Sequence, cast
 
 import numpy as np
 import yaml
 
+from ..logging import error, log, piter, warning
 from .fedora import get_packages
 from .model import INFO_KEY, ExportInfo, MetaPackage, Package, get_info, get_layers
 from .ostree import (
@@ -15,9 +15,7 @@ from .ostree import (
     get_ostree_map,
     run_with_ostree_files,
 )
-from .utils import get_labels, get_update_matrix, tqdm
-
-logger = logging.getLogger(__name__)
+from .utils import get_labels, get_update_matrix
 
 
 def prefill_layers(
@@ -27,7 +25,7 @@ def prefill_layers(
     fill_size: int,
 ):
     layers = []
-    logger.info("Prefilling layers.")
+    log("Prefilling layers.")
 
     # Use a dict because it maintains order
     # Important for reproducibility
@@ -40,7 +38,7 @@ def prefill_layers(
     for p in packages:
         if p.dedicated:
             dedi_layers.append([p])
-            logger.info(
+            log(
                 f"Layer {dedi+1:2d}: {p.size / 1e9:.3f} GB, dedicated layer for meta '{p.name}'."
             )
             dedi += 1
@@ -53,7 +51,7 @@ def prefill_layers(
     ), "No layers left after dedicated packages and fine layers (set dedicated=False for some packages in meta.yml)."
 
     # Handle the rest of the layers
-    pbar = tqdm(total=max_layers, desc="Initial layer fill")
+    pbar = piter(total=max_layers, desc="Initial layer fill")
     layers = []
 
     # Add layers for small packages
@@ -67,7 +65,7 @@ def prefill_layers(
                 todo.pop(p)
         if fines:
             layers.append(fines)
-            logger.info(
+            log(
                 f"Layer {dedi+len(layers):2d}: {sum([p.size for p in fines]) / 1e9:.3f} GB, for small (< {size_limit // 1e6} MB) packages with {len(fines)} packages."
             )
             pbar.update(1)
@@ -90,7 +88,7 @@ def prefill_layers(
                 # Since this also gets hit with not todo
                 # curr might be empty, avoid creating a layer
                 layers.append(curr)
-                logger.info(
+                log(
                     f"Layer {dedi+len(layers):2d}: {l_size / 1e9:.3f} GB with {len(curr):3d} packages."
                 )
             if len(layers) >= max_layers or not todo:
@@ -153,7 +151,7 @@ def fill_layers(
         return layers
     todo = dict(todo)
     layers = [l.copy() for l in layers]
-    pbar = tqdm(total=len(todo), desc="Final layer fill")
+    pbar = piter(total=len(todo), desc="Final layer fill")
     n_segments = upd_matrix.shape[1]
 
     layer_size = [sum([p.size for p in l]) for l in layers]
@@ -233,21 +231,21 @@ def print_results(
         total_bw += np.sum([p.size for p in l]) * n_segments * DEDI_RATIO
 
     # Detailed package breakdown and frequency analysis
-    logger.info(f"Dedicated layers:")
+    log(f"Dedicated layers:")
     results = "Dedicated layers:\n"
     for i, l in enumerate(dedi_layers):
         data = f"{i+1:3d}: (pkg: {len(l):3d}, mb: {sum([p.size for p in l]) / 1e6 / COMPRESSION_RATIO:3.0f}): {l[0].name}"
         results += data + "\n"
         results += str([p for p in l[0].nevra]) + "\n"
-        logger.info(data)
+        log(data)
 
-    logger.info(f"Packages in layers (sorted by frequency):")
+    log(f"Packages in layers (sorted by frequency):")
     results += "Packages in layers (sorted by frequency):\n"
     for i, l in sorted(
         enumerate(layers), key=lambda x: -float(np.sum(layer_upd[x[0]]))
     ):
         data = f"{i+1:3d}: (freq: {np.sum(layer_upd[i]):3d}, mb: {sum([p.size for p in l]) / 1e6 / COMPRESSION_RATIO:3.0f}, pkg: {len(l):3d})"
-        logger.info(data)
+        log(data)
         results += data + "\n"
         results += (
             str(
@@ -263,7 +261,7 @@ def print_results(
         with open(result_fn, "w") as f:
             f.write(results)
 
-    logger.info(
+    log(
         f"Total per update (uncompressed): {total_bw / (n_segments * 1e9):.3f} GB.\n"
         + f"Total per update (compressed): {total_bw / (n_segments * 1e9) / COMPRESSION_RATIO:.3f} GB.\n"
         + f"Layers changed per update: {np.sum([np.sum(u) for u in layer_upd]) / n_segments + len(dedi_layers) * DEDI_RATIO:.1f}."
@@ -329,7 +327,7 @@ def process_meta(
                 # Some times, e.g., a KDE image will include a single gnome package
                 # Which will make rechunk make a dedicated layer for it.
                 # Force disable dedicated layers if the size is too small.
-                logger.warning(
+                warning(
                     f"Meta package '{name}' is too small ({total_size} < 10MB). Disabling dedicated layer."
                 )
                 dedicated = False
@@ -419,14 +417,14 @@ def process_meta(
         )
 
     hash_to_file = {v: k for k, v in ostree_map.items()}
-    log = f"Large remaining files:"
+    message = f"Large remaining files:"
     for hash, size in sorted(
         remaining_hashes.items(), key=lambda x: x[1], reverse=True
     )[:50]:
         if size < 5e5:
             break
-        log += f"\n - {size / 1e6:6.3f} MB {hash_to_file[hash]}"
-    logger.info(log)
+        message += f"\n - {size / 1e6:6.3f} MB {hash_to_file[hash]}"
+    log(message)
 
     return mapping, new_packages
 
@@ -434,7 +432,7 @@ def process_meta(
 def load_previous_manifest(
     fn: str | list[str], packages: list[MetaPackage], max_layers: int
 ):
-    logger.info(f"Loading previous manifest from '{fn}'.")
+    log(f"Loading previous manifest from '{fn}'.")
     info = None
 
     if isinstance(fn, str):
@@ -448,7 +446,7 @@ def load_previous_manifest(
 
         # Then as a fallback use the old OSTree format
         if layers:
-            logger.info(
+            log(
                 f"Processing previous manifest with {len(layers)} layers (loaded from '{INFO_KEY}')."
             )
         else:
@@ -462,13 +460,13 @@ def load_previous_manifest(
                 if "ostree.components" not in annotations:
                     continue
                 layers.append(annotations["ostree.components"].split(","))
-            logger.info(
+            log(
                 f"Processing previous manifest with {len(raw)} layers (loaded from 'ostree.components')."
             )
     else:
         raw = None
         layers = [l.split(",") for l in fn]
-        logger.info(
+        log(
             f"Processing previous manifest with {len(fn)} layers (through cache argument)."
         )
 
@@ -490,7 +488,7 @@ def load_previous_manifest(
             for p in todo:
                 if p.name == name:
                     if pkg is not None:
-                        logger.error(
+                        error(
                             f"Duplicate package '{name}' found in previous manifest."
                         )
                     pkg = p
@@ -503,14 +501,14 @@ def load_previous_manifest(
 
             if pkg.dedicated:
                 dedi_layers.append([pkg])
-                logger.info(
+                log(
                     f"Layer {len(dedi_layers)+len(prefill)}: Dedicated layer for meta '{pkg.name}'."
                 )
             else:
                 layer.append(pkg)
 
         if layer:
-            logger.info(
+            log(
                 f"Layer {len(dedi_layers)+len(prefill)}: {sum([p.size for p in layer]) // 1e6} MB loaded with {len(layer)} packages."
             )
             prefill.append(layer)
@@ -520,9 +518,9 @@ def load_previous_manifest(
         prefill.append([])
 
     if todo:
-        logger.info(f"New packages found:\n{[p.name for p in todo]}")
+        log(f"New packages found:\n{[p.name for p in todo]}")
     if removed:
-        logger.info(f"The following packages were removed:\n{removed}")
+        log(f"The following packages were removed:\n{removed}")
 
     return todo, dedi_layers, prefill, raw, info
 
@@ -565,18 +563,18 @@ def main(
 
     if _cache is not None and ref in _cache:
         # Use cache to speedup experiments
-        logger.warning(f"Using cached inmemory data from '{ref}'!")
+        warning(f"Using cached inmemory data from '{ref}'!")
         ostree_map, ostree_hash, packages = _cache[ref]
     else:
-        logger.info(f"Beginning analysis.")
-        logger.info(f"Scanning OSTree repo '{repo}' with ref '{ref}' for files.")
+        log(f"Beginning analysis.")
+        log(f"Scanning OSTree repo '{repo}' with ref '{ref}' for files.")
         ostree_map, ostree_hash = get_ostree_map(repo, ref)
 
         # Use the database by pulling it from ostree
         packages = run_with_ostree_files(
             repo, ostree_map, ["/usr/share/rpm/rpmdb.sqlite"], get_packages
         )
-        logger.info(f"Found {len(packages)} packages.")
+        log(f"Found {len(packages)} packages.")
         if _cache is not None:
             _cache[ref] = ostree_map, ostree_hash, packages
 
@@ -585,7 +583,7 @@ def main(
         meta["meta"], ostree_map, ostree_hash, packages
     )
 
-    logger.info(f"Created {len(new_packages)} meta packages.")
+    log(f"Created {len(new_packages)} meta packages.")
 
     # Size results
     total_size = sum(ostree_hash.values())
@@ -593,52 +591,52 @@ def main(
     new_package_size = sum([p.size for p in new_packages])
     unpackage_size = total_size - package_size
 
-    log = f"Size analysis:"
-    log += f"\n -   Packages: {package_size / 1e9:6.3f} GB."
-    log += f"\n - Unpackaged: {unpackage_size / 1e9:6.3f} GB."
-    log += f"\n -      Total: {total_size / 1e9:6.3f} GB."
-    logger.info(log)
+    message = f"Size analysis:"
+    message += f"\n -   Packages: {package_size / 1e9:6.3f} GB."
+    message += f"\n - Unpackaged: {unpackage_size / 1e9:6.3f} GB."
+    message += f"\n -      Total: {total_size / 1e9:6.3f} GB."
+    log(message)
 
     # Calculate plan
     layer_size = total_size / max_layers
     prefill_size = int(layer_size * prefill_ratio)
     max_layer_size = int(layer_size * max_layer_ratio)
-    logger.info(
+    log(
         f"Rechunking into {max_layers} layers. Using:\n"
         + f" - Avg Layer size: {layer_size / 1e9:.3f} GB\n"
         + f" -   Prefill size: {prefill_size / 1e9:.3f} GB\n"
         + f" - Max layer size: {max_layer_size / 1e9:.3f} GB."
     )
-    logger.info("Creating update matrix.")
+    log("Creating update matrix.")
     upd_matrix = get_update_matrix(new_packages, biweekly)
-    logger.info(f"Update matrix shape: {upd_matrix.shape}.")
+    log(f"Update matrix shape: {upd_matrix.shape}.")
 
     found_previous_plan = False
     manifest_json = None
     info = None
     if previous_manifest:
         try:
-            logger.info("Loading existing layer data.")
+            log("Loading existing layer data.")
             todo, dedi_layers, prefill, manifest_json, info = load_previous_manifest(
                 previous_manifest, new_packages, max_layers
             )
             found_previous_plan = True
         except Exception as e:
-            logger.error(f"Error loading previous manifest:\n{e}")
+            error(f"Error loading previous manifest:\n{e}")
 
     if not found_previous_plan or clear_plan:
         if clear_plan:
-            logger.warning("Creating a fresh plan due to --clear-plan.")
+            warning("Creating a fresh plan due to --clear-plan.")
         else:
-            logger.warning("No existing layer data. Expect layer shifts")
+            warning("No existing layer data. Expect layer shifts")
         todo, dedi_layers, prefill = prefill_layers(
             new_packages, upd_matrix, max_layers, prefill_size
         )
 
-    logger.info(
+    log(
         f"Leftover packages: {len(todo)}/{len(new_packages)} with a size of {sum([p.size for p in todo]) / 1e9:.3f} GB."
     )
-    logger.info("Filling layers.")
+    log("Filling layers.")
     # Legacy algorithm simulation
     # prefill[-1] += list(todo.keys())
     # todo = {}

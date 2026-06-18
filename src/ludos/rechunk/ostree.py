@@ -1,14 +1,11 @@
 import json
-import logging
 import shutil
 import subprocess
 import tempfile
 from typing import Any, Callable, Sequence
 import os
+from ..logging import error, log, piter, warning
 from .model import MetaPackage
-from .utils import tqdm
-
-logger = logging.getLogger(__name__)
 
 
 def get_ostree_map(repo: str, ref: str):
@@ -18,7 +15,7 @@ def get_ostree_map(repo: str, ref: str):
     hash_len = 64
 
     proc = None
-    pbar = tqdm(desc=f"Reading OSTree ref '{ref}'", unit="files", total=300_000)
+    pbar = piter(desc=f"Reading OSTree ref '{ref}'", unit="files", total=300_000)
 
     cmd = [
         "ostree",
@@ -128,7 +125,7 @@ def calculate_ostree_layers(
             pkg_to_layer[pkg.name] = layer_name
 
     if "unpackaged" not in smeta:
-        logger.info("No unpackaged layer found. Creating it manually.")
+        log("No unpackaged layer found. Creating it manually.")
         smeta["unpackaged"] = ["dedi:meta:unpackaged"]
 
     # Create mappings for hash -> layer
@@ -136,7 +133,7 @@ def calculate_ostree_layers(
     used_layers = set()
     for ohash, pkg in mapping.items():
         if pkg not in pkg_to_layer:
-            logger.error(f"Package '{pkg}' not found in layers. Using 'unpackaged'.")
+            error(f"Package '{pkg}' not found in layers. Using 'unpackaged'.")
             pkg = "unpackaged"
 
         layer = pkg_to_layer[pkg]
@@ -191,7 +188,7 @@ def run_with_ostree_files(
                     check=True,
                 )
             else:
-                logger.warning(f"File not found in OSTree: {fn}")
+                warning(f"File not found in OSTree: {fn}")
                 raise FileNotFoundError(fn)
 
         return callback(dir)

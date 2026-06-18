@@ -1,5 +1,4 @@
 import datetime
-import logging
 import os
 import subprocess
 import sys
@@ -7,14 +6,10 @@ from datetime import datetime
 from typing import Sequence
 
 import numpy as np
-from tqdm.auto import tqdm as tqdm_orig
 
+from ..logging import error, log, piter, warning
 from .model import INFO_KEY, ExportInfo, MetaPackage, Package, export_v2
 
-logger = logging.getLogger(__name__)
-
-PBAR_OFFSET = 8
-PBAR_FORMAT = (" " * PBAR_OFFSET) + ">>>>>>>  {l_bar}{bar}{r_bar}"
 VERSION_TAG = "org.opencontainers.image.version"
 REVISION_TAG = "org.opencontainers.image.revision"
 
@@ -26,13 +21,6 @@ DEFAULT_FORMATTERS = {
     "pkgupd.add": " - **<package>**: x → <new>\n",
     "pkgupd.remove": " - **<package>**: <old> → x\n",
 }
-
-
-class tqdm(tqdm_orig):
-    def __init__(self, *args, **kwargs):
-        kwargs["bar_format"] = PBAR_FORMAT
-        super().__init__(*args, **kwargs)
-
 
 def get_default_meta_yaml():
     """Returns the yaml data of a file in the relative dir provided."""
@@ -65,7 +53,7 @@ def get_files(dir: str):
     if os.getuid() == 0:
         # Read the dir directly to enable progress bar
         # and skip IPC and to string conversion
-        pbar = tqdm(total=300_000, desc="Reading files")
+        pbar = piter(total=300_000, desc="Reading files")
         inodes = set()
         all_files = {}
         for root, _, files in os.walk(dir):
@@ -140,7 +128,7 @@ def get_update_matrix(packages: list[MetaPackage], biweekly: bool = True):
             if not p.dedicated:
                 pkg_nochangelog.append(p.name)
 
-    logger.info(
+    log(
         f"Found {len(pkg_nochangelog)} packages with no changelog:\n{str(sorted(pkg_nochangelog))}"
     )
 
@@ -153,7 +141,7 @@ def get_commits(
     prev_rev: str | None,
     formatters: dict[str, str],
 ):
-    logger.info(f"Getting commits from '{prev_rev}' to '{revision}' in '{git_dir}'")
+    log(f"Getting commits from '{prev_rev}' to '{revision}' in '{git_dir}'")
     if not git_dir or not revision or not prev_rev:
         return ""
 
@@ -180,7 +168,7 @@ def get_commits(
                 .replace("<hash>", hash)
             )
     except Exception as e:
-        logger.error(f"Failed to get commits: {e}")
+        error(f"Failed to get commits: {e}")
     return out
 
 
@@ -293,10 +281,10 @@ def get_labels(
                 if new_version not in prev_versions:
                     break
 
-        logger.info(f"New version: '{new_version}'")
+        log(f"New version: '{new_version}'")
         new_labels[VERSION_TAG] = new_version
         if prev_version:
-            logger.info(f"Previous version: '{prev_version}'")
+            log(f"Previous version: '{prev_version}'")
 
         # Write version to file
         if version_fn and new_version:
@@ -366,7 +354,7 @@ def get_labels(
     if changelog_fn:
         chng = process_label("", "<changelog>")
         if chng:
-            logger.info(f"Changelog:\n{chng}")
+            log(f"Changelog:\n{chng}")
         with open(changelog_fn, "w") as f:
             f.write(chng)
 
@@ -381,13 +369,13 @@ def get_labels(
             new_labels[key] = process_label(key, value)
 
     if new_labels:
-        log = "Writing labels:\n"
+        message = "Writing labels:\n"
         for key, value in new_labels.items():
             if key in blacklist:
                 value = blacklist[key]
-            log += f" - {key} =\n'{value}'\n"
-        logger.info(log)
+            message += f" - {key} =\n'{value}'\n"
+        log(message)
     else:
-        logger.warning("No labels found to write.")
+        warning("No labels found to write.")
 
     return new_labels, timestamp

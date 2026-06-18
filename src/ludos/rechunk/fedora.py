@@ -1,11 +1,9 @@
-import logging
 import subprocess
 from datetime import datetime
 from typing import Literal
 
+from ..logging import warning
 from .model import File, Package
-
-logger = logging.getLogger(__name__)
 
 # Generated with a password manager to avoid
 # issues with them being in changelogs.
@@ -76,6 +74,6 @@ def get_packages(dir: str):
                 name = line[line.index(" ") + 1 :]
                 files.append(File(name, size))
     if fail_count:
-        logger.warning(f"Failed to parse {fail_count} changelog entries")
+        warning(f"Failed to parse {fail_count} changelog entries")
 
     return packages

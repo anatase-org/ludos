@@ -11,6 +11,7 @@ from unittest.mock import call, patch
 from ludos.__main__ import build_parser
 from ludos.bootc import (
     _export_rechunked_oci,
+    _oci_export_line_rewriter,
     _parse_commit,
     _parse_progress_total,
     _resolve_chunks_path,
@@ -296,8 +297,17 @@ class BootcCommandTests(unittest.TestCase):
                 "/ludos/rechunk/contentmeta.json",
                 "master",
                 "oci:/ludos/oci/anatase-f44:latest",
-            ]
+            ],
+            line_rewriter=_oci_export_line_rewriter,
         )
+
+    def test_oci_export_line_rewriter_names_digest_output(self) -> None:
+        digest = "sha256:" + "a" * 64
+        self.assertEqual(
+            _oci_export_line_rewriter(f"{digest}\n"),
+            f"Exported OCI digest: {digest}\n",
+        )
+        self.assertEqual(_oci_export_line_rewriter("copying layer\n"), "copying layer\n")
 
     def test_ostree_import_defaults_orchestrator_to_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
