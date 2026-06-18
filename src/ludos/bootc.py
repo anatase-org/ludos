@@ -80,6 +80,8 @@ def bootc_create(
         image = result.output_image
         safe_name = _safe_oci_name(image)
         work_dir = work_root / safe_name
+        git_dir = Path(manifest.root_dir)
+        revision = _git_revision(git_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
         contentmeta = work_dir / "contentmeta.json"
         result_fn = work_dir / "results.txt"
@@ -100,6 +102,8 @@ def bootc_create(
             chunks_fn=str(chunks_path),
             result_fn=str(result_fn),
             labels=_manifest_labels(manifest.manifest_labels),
+            revision=revision,
+            git_dir=str(git_dir),
         )
 
         _export_rechunked_oci(
@@ -217,6 +221,22 @@ def _resolve_chunks_path(manifests: tuple[Path, ...], chunks: Path | None) -> Pa
 
 def _manifest_labels(labels: tuple[tuple[str, str], ...]) -> list[str]:
     return [f"{key}={value}" for key, value in labels]
+
+
+def _git_revision(git_dir: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(git_dir), "rev-parse", "HEAD"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    revision = result.stdout.strip()
+    if re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        return revision
+    return None
 
 
 def _safe_oci_name(image: str) -> str:

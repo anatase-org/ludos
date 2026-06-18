@@ -11,6 +11,7 @@ from unittest.mock import call, patch
 from ludos.__main__ import build_parser
 from ludos.bootc import (
     _export_rechunked_oci,
+    _git_revision,
     _oci_export_line_rewriter,
     _parse_commit,
     _parse_progress_total,
@@ -142,9 +143,10 @@ class BootcCommandTests(unittest.TestCase):
             events: list[str] = []
             metadata = (
                 SimpleNamespace(
-                    manifest_labels=(("org.opencontainers.image.title", "Anatase"),)
+                    root_dir=str(root),
+                    manifest_labels=(("org.opencontainers.image.title", "Anatase"),),
                 ),
-                SimpleNamespace(manifest_labels=()),
+                SimpleNamespace(root_dir=str(root), manifest_labels=()),
             )
             results = (
                 SimpleNamespace(output_image="localhost/anatase:f44", podman="podman"),
@@ -171,6 +173,7 @@ class BootcCommandTests(unittest.TestCase):
                 patch("ludos.bootc.build_final_manifest_images", side_effect=mark("final")),
                 patch("ludos.bootc._cleanup_dnf_workspaces", side_effect=mark("cleanup")),
                 patch("ludos.bootc.ostree_import") as ostree_import_mock,
+                patch("ludos.bootc._git_revision", return_value="a" * 40),
                 patch("ludos.bootc.rechunk_main") as rechunk_mock,
                 patch("ludos.bootc._export_rechunked_oci") as export_mock,
             ):
@@ -238,6 +241,8 @@ class BootcCommandTests(unittest.TestCase):
                         (root / "cache" / "rechunk" / "anatase-f44" / "results.txt").resolve()
                     ),
                     labels=["org.opencontainers.image.title=Anatase"],
+                    revision="a" * 40,
+                    git_dir=str(root),
                 ),
                 call(
                     repo=str((root / "cache" / "ostree").resolve()),
@@ -250,9 +255,41 @@ class BootcCommandTests(unittest.TestCase):
                         (root / "cache" / "rechunk" / "other-f44" / "results.txt").resolve()
                     ),
                     labels=[],
+                    revision="a" * 40,
+                    git_dir=str(root),
                 ),
             ]
         )
+
+    def test_git_revision_returns_current_head(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["git", "rev-parse", "HEAD"],
+            0,
+            stdout="a" * 40 + "\n",
+        )
+        with patch("ludos.bootc.subprocess.run", return_value=completed) as run:
+            self.assertEqual(_git_revision(Path("/repo")), "a" * 40)
+
+        run.assert_called_once_with(
+            ["git", "-C", "/repo", "rev-parse", "HEAD"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+
+    def test_git_revision_ignores_missing_or_invalid_repo(self) -> None:
+        with patch(
+            "ludos.bootc.subprocess.run",
+            return_value=subprocess.CompletedProcess(["git"], 1, stdout=""),
+        ):
+            self.assertIsNone(_git_revision(Path("/missing")))
+
+        with patch(
+            "ludos.bootc.subprocess.run",
+            return_value=subprocess.CompletedProcess(["git"], 0, stdout="not-a-hash\n"),
+        ):
+            self.assertIsNone(_git_revision(Path("/repo")))
 
     def test_export_rechunked_oci_uses_bootc_ostree_ext_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

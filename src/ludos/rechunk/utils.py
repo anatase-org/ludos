@@ -141,9 +141,9 @@ def get_commits(
     prev_rev: str | None,
     formatters: dict[str, str],
 ):
-    log(f"Getting commits from '{prev_rev}' to '{revision}' in '{git_dir}'")
     if not git_dir or not revision or not prev_rev:
         return ""
+    log(f"Getting commits from '{prev_rev}' to '{revision}' in '{git_dir}'")
 
     out = ""
     try:
