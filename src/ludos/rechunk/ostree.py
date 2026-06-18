@@ -1,33 +1,36 @@
 import json
-import shutil
+import os
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Any, Callable, Sequence
-import os
+
 from ..logging import error, log, piter, warning
 from .model import MetaPackage
 
+CONTAINER_OSTREE_REPO = "/ludos/ostree"
 
-def get_ostree_map(repo: str, ref: str):
+
+def get_ostree_map(
+    repo: str,
+    ref: str,
+    *,
+    ostree_image: str | None = None,
+    podman: str = "podman",
+):
     # Prefix has a fixed length
     # unless filesize is larger than what fits
     prefix = len("d00555 ")
     hash_len = 64
 
     proc = None
-    pbar = piter(desc=f"Reading OSTree ref '{ref}'", unit="files", total=300_000)
+    pbar = piter(
+        desc=f"Reading OSTree ref '{ref}'",
+        unit="files",
+        total=_count_repo_file_objects(Path(repo)),
+    )
 
-    cmd = [
-        "ostree",
-        "ls",
-        "-C",
-        "-R",
-        "--repo",
-        repo,
-        ref,
-    ]
-    if os.getuid() != 0:
-        cmd = ["sudo", *cmd]
+    cmd = _ostree_ls_command(repo, ref, ostree_image=ostree_image, podman=podman)
 
     try:
         proc = subprocess.Popen(
@@ -85,6 +88,46 @@ def get_ostree_map(repo: str, ref: str):
         assert proc.poll() == 0, f"OSTree exited with error: {proc.returncode}"
 
     return mapping, hashes
+
+
+def _count_repo_file_objects(repo: Path) -> int:
+    objects = repo / "objects"
+    if not objects.is_dir():
+        return 0
+    count = 0
+    for _root, _dirs, files in os.walk(objects):
+        count += sum(1 for file in files if file.endswith(".file"))
+    return count
+
+
+def _ostree_ls_command(
+    repo: str,
+    ref: str,
+    *,
+    ostree_image: str | None = None,
+    podman: str = "podman",
+) -> list[str]:
+    repo_arg = CONTAINER_OSTREE_REPO if ostree_image is not None else repo
+    command = [
+        "ostree",
+        "ls",
+        "-C",
+        "-R",
+        "--repo",
+        repo_arg,
+        ref,
+    ]
+    if ostree_image is None:
+        return command
+    return [
+        podman,
+        "run",
+        "--rm",
+        "--volume",
+        f"{Path(repo).resolve()}:{CONTAINER_OSTREE_REPO}:ro",
+        ostree_image,
+        *command,
+    ]
 
 
 def calculate_ostree_layers(
@@ -181,8 +224,6 @@ def run_with_ostree_files(
                     f"{repo}/objects/{hash[:2]}/{hash[2:]}.file",
                     os.path.join(dir, os.path.basename(fn)),
                 ]
-                if os.getuid() != 0:
-                    cmd = ["sudo", *cmd]
                 subprocess.run(
                     cmd,
                     check=True,

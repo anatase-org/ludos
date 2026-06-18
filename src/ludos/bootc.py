@@ -104,6 +104,8 @@ def bootc_create(
             labels=_manifest_labels(manifest.manifest_labels),
             revision=revision,
             git_dir=str(git_dir),
+            ostree_image=image,
+            podman=result.podman,
         )
 
         _export_rechunked_oci(

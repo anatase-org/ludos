@@ -39,8 +39,6 @@ def run(cmd: str, chroot_dir: str | None = None):
     args = ["bash", "-c", cmd]
     if chroot_dir:
         args = ["chroot", chroot_dir, *args]
-    if os.geteuid() != 0:
-        args = ["sudo", *args]
 
     return subprocess.run(args, stdout=subprocess.PIPE).stdout.decode("utf-8")
 

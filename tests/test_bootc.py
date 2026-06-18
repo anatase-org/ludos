@@ -243,6 +243,8 @@ class BootcCommandTests(unittest.TestCase):
                     labels=["org.opencontainers.image.title=Anatase"],
                     revision="a" * 40,
                     git_dir=str(root),
+                    ostree_image="localhost/anatase:f44",
+                    podman="podman",
                 ),
                 call(
                     repo=str((root / "cache" / "ostree").resolve()),
@@ -257,6 +259,8 @@ class BootcCommandTests(unittest.TestCase):
                     labels=[],
                     revision="a" * 40,
                     git_dir=str(root),
+                    ostree_image="localhost/other:f44",
+                    podman="podman",
                 ),
             ]
         )

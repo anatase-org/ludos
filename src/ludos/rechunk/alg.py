@@ -548,6 +548,8 @@ def main(
     changelog_fn: str | None = None,
     clear_plan: bool = False,
     formatters: dict[str, str] = {},
+    ostree_image: str | None = None,
+    podman: str = "podman",
 ):
     chunks_fn = chunks_fn or meta_fn or "chunks.yml"
     if not os.path.isfile(chunks_fn):
@@ -568,7 +570,12 @@ def main(
     else:
         log(f"Beginning analysis.")
         log(f"Scanning OSTree repo '{repo}' with ref '{ref}' for files.")
-        ostree_map, ostree_hash = get_ostree_map(repo, ref)
+        ostree_map, ostree_hash = get_ostree_map(
+            repo,
+            ref,
+            ostree_image=ostree_image,
+            podman=podman,
+        )
 
         # Use the database by pulling it from ostree
         packages = run_with_ostree_files(
