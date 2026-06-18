@@ -2388,7 +2388,8 @@ def _run_cached_transaction_preview(
     extra_hash_inputs: tuple[tuple[str, str], ...] = tuple(),
 ) -> subprocess.CompletedProcess[str]:
     repo_tags = tuple(_image_tag(image) for image in repo_images)
-    cache_key = _resolve_cache_key(cmd, repo_tags, extra_hash_inputs)
+    cache_hash_inputs = (*extra_hash_inputs, *_dnf_repo_hash_inputs(cmd))
+    cache_key = _resolve_cache_key(cmd, repo_tags, cache_hash_inputs)
     cache_file = resolve_cache_dir / f"{cache_key}.json"
     if cache_file.exists():
         data = json.loads(cache_file.read_text(encoding="utf-8"))
@@ -2409,7 +2410,7 @@ def _run_cached_transaction_preview(
     payload = {
         "args": cmd,
         "repo_tags": repo_tags,
-        "extra_hash_inputs": extra_hash_inputs,
+        "extra_hash_inputs": cache_hash_inputs,
         "returncode": transaction_preview.returncode,
         "stdout": transaction_preview.stdout,
         "stderr": transaction_preview.stderr,
@@ -2455,6 +2456,25 @@ def _normalized_dnf_workspace_mounts(cmd: list[str]) -> list[str]:
             )
         )
     return normalized
+
+
+def _dnf_repo_hash_inputs(cmd: list[str]) -> tuple[tuple[str, str], ...]:
+    repo_dir = _dnf_repo_dir(cmd)
+    if repo_dir is None or not repo_dir.is_dir():
+        return tuple()
+    return tuple(
+        (f"repo:{path.relative_to(repo_dir).as_posix()}", _hash_file(path))
+        for path in sorted(repo_dir.rglob("*"))
+        if path.is_file()
+    )
+
+
+def _dnf_repo_dir(cmd: list[str]) -> Path | None:
+    for arg in cmd:
+        match = re.fullmatch(r"(.+):/ludos/dnf/repos(?::ro)?", arg)
+        if match:
+            return Path(match.group(1))
+    return None
 
 
 def _parse_resolved_package_entries(
