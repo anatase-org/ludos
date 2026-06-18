@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 
 from ..model import Card, ConfigError, PatchRef, SpecBuild
+from ..model import _resolve_card_path as _resolve_model_card_path
 from . import patch as patch_helpers
 from ..logging import log
 
@@ -368,16 +369,19 @@ def _resolve_target(target: str) -> PatchTarget:
 
 def _resolve_card_path(card_text: str) -> Path:
     raw = Path(card_text).expanduser()
-    candidates = [
-        raw,
-        raw.with_suffix(".yml") if raw.suffix == "" else raw,
-        Path("cards") / raw,
-        (Path("cards") / raw).with_suffix(".yml") if raw.suffix == "" else Path("cards") / raw,
-        Path("cards") / raw / "card.yml",
-        Path("cards") / raw / "card.yaml",
-    ]
+    base_paths = [raw]
+    if not raw.is_absolute() and (not raw.parts or raw.parts[0] != "cards"):
+        base_paths.append(Path("cards") / raw)
+
     existing = tuple(
-        dict.fromkeys(path.resolve() for path in candidates if path.is_file())
+        dict.fromkeys(
+            path.resolve()
+            for path in (
+                _resolve_model_card_path(path.as_posix(), Path.cwd())
+                for path in base_paths
+            )
+            if path.is_file()
+        )
     )
     if not existing:
         raise ConfigError(f"card not found for patch target: {card_text}")
