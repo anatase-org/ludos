@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Manifest or card YAML files to update.",
     )
     update.add_argument(
+        "--card",
+        default=None,
+        help="Update only the selected card from a manifest.",
+    )
+    update.add_argument(
         "--cache-dir",
         type=Path,
         default=None,
@@ -338,6 +343,7 @@ def update_command(args: argparse.Namespace) -> int:
         patchwork_dir=args.patchwork_dir,
         dry_run=args.dry_run,
         assume_yes=args.assume_yes,
+        card=args.card,
     )
 
 

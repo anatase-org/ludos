@@ -13,6 +13,7 @@ from ludos.contrib.update import (
     UpstreamSource,
     _confirm_update,
     _merge_dist_git_update,
+    _target_cards,
     _upstream_sources,
 )
 
@@ -32,6 +33,35 @@ class UpdateConfirmationTests(unittest.TestCase):
 
 
 class UpstreamSourceTests(unittest.TestCase):
+    def test_upstream_ref_expands_manifest_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "kde"
+            root.mkdir()
+            (root / "plasma-setup.spec").write_text(
+                "Name: plasma-setup\n",
+                encoding="utf-8",
+            )
+            card_path = root / "card.yml"
+            card_path.write_text(
+                """
+version: 1
+specs:
+  - spec: plasma-setup.spec
+    upstream:
+      type: dist-git
+      url: https://example.test/plasma-setup
+      branch: f$releasever
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            sources = _upstream_sources(
+                Card.from_file(card_path),
+                env={"releasever": "44"},
+            )
+
+        self.assertEqual(sources[0].upstream.branch, "f44")
+
     def test_single_root_spec_uses_card_directory_name_for_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "scx"
@@ -85,6 +115,56 @@ specs:
             [source.key for source in sources],
             ["scx-tools", "scx-scheds"],
         )
+
+
+class ManifestUpdateTargetTests(unittest.TestCase):
+    def test_targeted_manifest_card_carries_releasever_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = root / "anatase.yml"
+            bootstrap = root / "cards" / "bootstrap.yml"
+            kde = root / "cards" / "de" / "kde"
+            setup = kde / "setup"
+            bootstrap.parent.mkdir(parents=True)
+            setup.mkdir(parents=True)
+            bootstrap.write_text("version: 1\n", encoding="utf-8")
+            (setup / "plasma-setup.spec").write_text(
+                "Name: plasma-setup\n",
+                encoding="utf-8",
+            )
+            (kde / "card.yml").write_text(
+                """
+version: 1
+specs:
+  - spec: setup/plasma-setup.spec
+    upstream:
+      type: dist-git
+      url: https://example.test/plasma-setup
+      branch: f$releasever
+""".lstrip(),
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """
+version: 1
+env:
+  releasever: 44
+releasever: $releasever
+distro: f$releasever-$arch
+orchestrator: quay.io/fedora/fedora:$releasever
+bootstrap: cards/bootstrap.yml
+cards:
+  - cards/de/kde
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            targets = _target_cards((manifest_path,), card="cards/de/kde")
+            sources = _upstream_sources(targets[0].card, env=targets[0].env)
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].env["releasever"], "44")
+        self.assertEqual(sources[0].upstream.branch, "f44")
 
 
 class DistGitUpdateTests(unittest.TestCase):

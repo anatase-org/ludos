@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from ..logging import confirm, log, stream
-from ..model import Card, ConfigError, SpecBuild, UpstreamRef, validate_manifest
+from ..model import (
+    Card,
+    ConfigError,
+    SpecBuild,
+    UpstreamRef,
+    _resolve_card_path,
+    validate_manifest,
+)
 from .patch import (
     LUDOS_BRANCH,
     PATCH_SHA,
@@ -71,6 +79,12 @@ class UpstreamHead:
     label: str
 
 
+@dataclass(frozen=True)
+class CardUpdateTarget:
+    card: Card
+    env: dict[str, str]
+
+
 def _confirm_update(label: str, *, assume_yes: bool) -> bool:
     if assume_yes:
         return True
@@ -83,18 +97,20 @@ def update_targets(
     patchwork_dir: Path | None = None,
     dry_run: bool = False,
     assume_yes: bool = False,
+    card: str | None = None,
 ) -> int:
     cache_dir = _cache_dir(cache_dir)
     patchwork_dir = _patchwork_dir(patchwork_dir)
-    cards = _target_cards(targets)
+    cards = _target_cards(targets, card=card)
     totals = CardUpdateResult()
-    for card in cards:
+    for target in cards:
         result = update_card(
-            card,
+            target.card,
             cache_dir,
             patchwork_dir,
             dry_run=dry_run,
             assume_yes=assume_yes,
+            env=target.env,
         )
         totals = CardUpdateResult(
             initialized=totals.initialized + result.initialized,
@@ -121,9 +137,10 @@ def update_card(
     *,
     dry_run: bool = False,
     assume_yes: bool = False,
+    env: dict[str, str] | None = None,
 ) -> CardUpdateResult:
     card_source = _card_source(card)
-    sources = _upstream_sources(card)
+    sources = _upstream_sources(card, env=env)
     patch_sources = _patch_sources(card)
     if not sources and not patch_sources:
         return CardUpdateResult()
@@ -251,41 +268,168 @@ def update_card(
     return result
 
 
-def _target_cards(targets: tuple[Path, ...]) -> tuple[Card, ...]:
-    cards: list[Card] = []
+def _target_cards(
+    targets: tuple[Path, ...],
+    *,
+    card: str | None = None,
+) -> tuple[CardUpdateTarget, ...]:
+    if card is not None and len(targets) != 1:
+        raise ConfigError("targeted card updates require exactly one manifest")
+
+    cards: list[CardUpdateTarget] = []
     seen: set[Path] = set()
     for target in targets:
-        for card in _cards_for_target(target):
-            source = _card_source(card).resolve()
+        for update_target in _cards_for_target(target, card=card):
+            source = _card_source(update_target.card).resolve()
             if source in seen:
                 continue
             seen.add(source)
-            cards.append(card)
+            cards.append(update_target)
     return tuple(cards)
 
 
-def _cards_for_target(target: Path) -> tuple[Card, ...]:
+def _cards_for_target(
+    target: Path,
+    *,
+    card: str | None = None,
+) -> tuple[CardUpdateTarget, ...]:
     target = target.expanduser().resolve()
     if _is_manifest(target):
-        validation = validate_manifest(target)
-        if validation.missing_bootstrap:
-            raise ConfigError(
-                f"{target}: missing bootstrap card: {validation.missing_bootstrap}"
+        return _manifest_update_targets(target, card=card)
+
+    if card is not None:
+        raise ConfigError("--card requires a manifest target")
+
+    return (CardUpdateTarget(card=Card.from_file(target), env={}),)
+
+
+def _manifest_update_targets(
+    manifest_path: Path,
+    *,
+    card: str | None,
+) -> tuple[CardUpdateTarget, ...]:
+    validation = validate_manifest(manifest_path)
+    if validation.missing_bootstrap:
+        raise ConfigError(
+            f"{manifest_path}: missing bootstrap card: {validation.missing_bootstrap}"
+        )
+    if validation.missing_repos:
+        missing = ", ".join(validation.missing_repos)
+        raise ConfigError(f"{manifest_path}: missing repository definitions: {missing}")
+    if validation.missing_cards:
+        missing = ", ".join(validation.missing_cards)
+        raise ConfigError(f"{manifest_path}: missing card definitions: {missing}")
+
+    root_dir = manifest_path.parent
+    manifest_env = _manifest_env(
+        manifest_path,
+        validation.manifest.env,
+        validation.manifest.releasever,
+    )
+    selected_source = (
+        _resolve_card_path(card, root_dir, None).resolve()
+        if card is not None
+        else None
+    )
+
+    updates: list[CardUpdateTarget] = []
+    if validation.bootstrap is not None and selected_source is None:
+        updates.append(
+            CardUpdateTarget(
+                card=validation.bootstrap,
+                env=_card_env(manifest_env, validation.bootstrap.env),
             )
-        if validation.missing_repos:
-            missing = ", ".join(validation.missing_repos)
-            raise ConfigError(f"{target}: missing repository definitions: {missing}")
-        if validation.missing_cards:
-            missing = ", ".join(validation.missing_cards)
-            raise ConfigError(f"{target}: missing card definitions: {missing}")
+        )
 
-        cards: list[Card] = []
-        if validation.bootstrap is not None:
-            cards.append(validation.bootstrap)
-        cards.extend(validation.cards)
-        return tuple(cards)
+    inherited_env = dict(manifest_env)
+    card_entries = sorted(
+        enumerate(validation.cards),
+        key=lambda entry: (entry[1].priority, entry[0]),
+    )
+    for _insertion_order, update_card in card_entries:
+        card_env = _card_env(inherited_env, update_card.env)
+        inherited_env.update(card_env)
+        if selected_source is not None:
+            if (
+                update_card.source is None
+                or update_card.source.resolve() != selected_source
+            ):
+                continue
+        updates.append(CardUpdateTarget(card=update_card, env=card_env))
 
-    return (Card.from_file(target),)
+    if selected_source is not None and not updates:
+        raise ConfigError(f"{manifest_path}: card not listed in manifest: {card}")
+
+    return tuple(updates)
+
+
+def _manifest_env(
+    manifest_path: Path,
+    manifest_values: dict[str, str | int],
+    releasever_value: str,
+) -> dict[str, str]:
+    root_dir = manifest_path.parent
+    env = {key: str(value) for key, value in manifest_values.items()}
+    env.update(_load_dotenv(root_dir / ".env"))
+    releasever = _cache_name(
+        _substitute_variables(releasever_value, env),
+        "releasever",
+    )
+    env["releasever"] = releasever
+    env["arch"] = _cache_name(
+        _substitute_variables(str(env.get("arch", "")), env),
+        "arch",
+    )
+    return env
+
+
+def _card_env(
+    manifest_env: dict[str, str],
+    card_values: dict[str, str | int],
+) -> dict[str, str]:
+    values = dict(manifest_env)
+    for key, value in card_values.items():
+        values[key] = _substitute_variables(str(value), values)
+    keys = ("arch", "releasever", *card_values)
+    return {key: values[key] for key in keys if key in values}
+
+
+def _load_dotenv(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+
+    values = {}
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            raise ConfigError(f"{path}:{line_number}: expected KEY=VALUE")
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ConfigError(f"{path}:{line_number}: invalid environment key '{key}'")
+        if (
+            len(value) >= 2
+            and value[0] == value[-1]
+            and value[0] in ("'", '"')
+        ):
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _cache_name(value: str, description: str) -> str:
+    if "/" in value or value in ("", ".", ".."):
+        raise ConfigError(f"invalid {description} cache name '{value}'")
+    return value
+
+
+def _substitute_variables(value: str, variables: dict[str, str]) -> str:
+    for key, replacement in variables.items():
+        value = value.replace(f"${key}", replacement)
+    return value
 
 
 def _is_manifest(path: Path) -> bool:
@@ -294,7 +438,12 @@ def _is_manifest(path: Path) -> bool:
     return manifest_keys.issubset(data)
 
 
-def _upstream_sources(card: Card) -> tuple[UpstreamSource, ...]:
+def _upstream_sources(
+    card: Card,
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[UpstreamSource, ...]:
+    env = env or {}
     card_source = _card_source(card)
     card_base = _card_base_dir(card_source)
     candidates: list[tuple[SpecBuild, Path, Path, str]] = []
@@ -303,16 +452,18 @@ def _upstream_sources(card: Card) -> tuple[UpstreamSource, ...]:
     for spec in card.specs:
         if spec.upstream is None:
             continue
-        if spec.upstream.type != "dist-git":
+        upstream = _expand_upstream_ref(spec.upstream, env)
+        if upstream.type != "dist-git":
             raise ConfigError(
                 f"{card_source}: unsupported upstream type "
-                f"'{spec.upstream.type}' for spec '{spec.spec}'"
+                f"'{upstream.type}' for spec '{spec.spec}'"
             )
         spec_path = _spec_source_path(card_source, card_base, spec)
         source_dir = spec_path.parent
         base_key = _upstream_source_base_key(card_base, source_dir)
         base_key_counts[base_key] = base_key_counts.get(base_key, 0) + 1
-        candidates.append((spec, spec_path, source_dir, base_key))
+        expanded_spec = replace(spec, upstream=upstream)
+        candidates.append((expanded_spec, spec_path, source_dir, base_key))
 
     sources: list[UpstreamSource] = []
     for spec, spec_path, source_dir, base_key in candidates:
@@ -333,6 +484,16 @@ def _upstream_sources(card: Card) -> tuple[UpstreamSource, ...]:
             )
         )
     return tuple(sources)
+
+
+def _expand_upstream_ref(upstream: UpstreamRef, env: dict[str, str]) -> UpstreamRef:
+    return replace(
+        upstream,
+        url=_substitute_variables(upstream.url, env),
+        branch=_substitute_variables(upstream.branch, env),
+        ref=_substitute_variables(upstream.ref, env),
+        subdir=_substitute_variables(upstream.subdir, env),
+    )
 
 
 def _upstream_source_base_key(card_base: Path, source_dir: Path) -> str:
