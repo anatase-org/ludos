@@ -7,12 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ludos.model import SpecBuild, UpstreamRef
+from ludos.model import Card, SpecBuild, UpstreamRef
 from ludos.contrib.update import (
     LUDOS_BRANCH,
     UpstreamSource,
     _confirm_update,
     _merge_dist_git_update,
+    _upstream_sources,
 )
 
 
@@ -28,6 +29,62 @@ class UpdateConfirmationTests(unittest.TestCase):
             self.assertTrue(_confirm_update("card:pkg", assume_yes=False))
 
         confirm.assert_called_once_with("Update card:pkg")
+
+
+class UpstreamSourceTests(unittest.TestCase):
+    def test_single_root_spec_uses_card_directory_name_for_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "scx"
+            root.mkdir()
+            (root / "scx-tools.spec").write_text("Name: scx-tools\n", encoding="utf-8")
+            card_path = root / "card.yml"
+            card_path.write_text(
+                """
+version: 1
+specs:
+  - spec: scx-tools.spec
+    upstream:
+      type: dist-git
+      url: https://example.test/scx
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            sources = _upstream_sources(Card.from_file(card_path))
+
+        self.assertEqual([source.key for source in sources], ["scx"])
+
+    def test_duplicate_root_spec_sources_use_spec_names_for_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "scx"
+            root.mkdir()
+            (root / "scx-tools.spec").write_text("Name: scx-tools\n", encoding="utf-8")
+            (root / "scx-scheds.spec").write_text("Name: scx-scheds\n", encoding="utf-8")
+            card_path = root / "card.yml"
+            card_path.write_text(
+                """
+version: 1
+specs:
+  - spec: scx-tools.spec
+    upstream:
+      type: dist-git
+      url: https://example.test/scx
+      subdir: sources/scx-tools
+  - spec: scx-scheds.spec
+    upstream:
+      type: dist-git
+      url: https://example.test/scx
+      subdir: sources/scx-scheds
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            sources = _upstream_sources(Card.from_file(card_path))
+
+        self.assertEqual(
+            [source.key for source in sources],
+            ["scx-tools", "scx-scheds"],
+        )
 
 
 class DistGitUpdateTests(unittest.TestCase):

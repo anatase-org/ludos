@@ -297,7 +297,8 @@ def _is_manifest(path: Path) -> bool:
 def _upstream_sources(card: Card) -> tuple[UpstreamSource, ...]:
     card_source = _card_source(card)
     card_base = _card_base_dir(card_source)
-    sources: list[UpstreamSource] = []
+    candidates: list[tuple[SpecBuild, Path, Path, str]] = []
+    base_key_counts: dict[str, int] = {}
     seen: set[str] = set()
     for spec in card.specs:
         if spec.upstream is None:
@@ -309,9 +310,17 @@ def _upstream_sources(card: Card) -> tuple[UpstreamSource, ...]:
             )
         spec_path = _spec_source_path(card_source, card_base, spec)
         source_dir = spec_path.parent
-        key = source_dir.relative_to(card_base).as_posix()
-        if key == ".":
-            key = card_base.name
+        base_key = _upstream_source_base_key(card_base, source_dir)
+        base_key_counts[base_key] = base_key_counts.get(base_key, 0) + 1
+        candidates.append((spec, spec_path, source_dir, base_key))
+
+    sources: list[UpstreamSource] = []
+    for spec, spec_path, source_dir, base_key in candidates:
+        key = (
+            _upstream_source_spec_key(card_base, spec_path)
+            if base_key_counts[base_key] > 1
+            else base_key
+        )
         if key in seen:
             raise ConfigError(f"{card_source}: duplicate upstream source '{key}'")
         seen.add(key)
@@ -324,6 +333,17 @@ def _upstream_sources(card: Card) -> tuple[UpstreamSource, ...]:
             )
         )
     return tuple(sources)
+
+
+def _upstream_source_base_key(card_base: Path, source_dir: Path) -> str:
+    key = source_dir.relative_to(card_base).as_posix()
+    if key == ".":
+        return card_base.name
+    return key
+
+
+def _upstream_source_spec_key(card_base: Path, spec_path: Path) -> str:
+    return spec_path.relative_to(card_base).with_suffix("").as_posix()
 
 
 def _patch_sources(card: Card) -> tuple[PatchSource, ...]:
