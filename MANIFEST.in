@@ -1,2 +1,0 @@
-recursive-include src/rechunk *.yml
-recursive-include src/rechunk *.yaml
