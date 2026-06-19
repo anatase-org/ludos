@@ -43,7 +43,22 @@ class CleanupImageKeepTests(unittest.TestCase):
                 "localhost/installer",
                 "cache-oci-anatase-f44_x86_64",
                 {"localhost/orchestrator", "localhost/repos"},
-                {"localhost/orchestrator"},
+                {"localhost/orchestrator", "localhost/installer"},
+                {"localhost/cards", "localhost/builds", "localhost/builders", "localhost/installer"},
+                set(),
+                set(),
+                "-20260616",
+            )
+        )
+
+    def test_keeps_installer_latest_tag(self) -> None:
+        self.assertTrue(
+            _keep_named_image(
+                "localhost/installer:latest",
+                "localhost/installer",
+                "latest",
+                {"localhost/orchestrator", "localhost/repos"},
+                {"localhost/orchestrator", "localhost/installer"},
                 {"localhost/cards", "localhost/builds", "localhost/builders", "localhost/installer"},
                 set(),
                 set(),

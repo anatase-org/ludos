@@ -15,7 +15,7 @@ from .model import ConfigError
 VERSIONED_CLEANUP_REPOSITORIES = ("orchestrator", "repos")
 RESOLVED_CLEANUP_REPOSITORIES = ("cards", "builds", "builders", "installer")
 CLEANUP_REPOSITORIES = (*VERSIONED_CLEANUP_REPOSITORIES, *RESOLVED_CLEANUP_REPOSITORIES)
-LATEST_CLEANUP_REPOSITORIES = ("orchestrator",)
+LATEST_CLEANUP_REPOSITORIES = ("orchestrator", "installer")
 INTERMEDIATE_CLEANUP_HINT = (
     "Run these to cleanup intermediates:\n"
     "  buildah rm --all\n"
@@ -307,10 +307,10 @@ def _keep_named_image(
 ) -> bool:
     if name in manifest_keep_refs:
         return True
-    if repository in resolved_cache_repositories:
-        return False
     if repository in latest_cache_repositories and tag == "latest":
         return True
+    if repository in resolved_cache_repositories:
+        return False
     if repository in versioned_cache_repositories:
         return tag.endswith(current_suffix)
     if repository in manifest_repositories:
