@@ -16,6 +16,11 @@ VERSIONED_CLEANUP_REPOSITORIES = ("orchestrator", "repos")
 RESOLVED_CLEANUP_REPOSITORIES = ("cards", "builds", "builders", "installer")
 CLEANUP_REPOSITORIES = (*VERSIONED_CLEANUP_REPOSITORIES, *RESOLVED_CLEANUP_REPOSITORIES)
 LATEST_CLEANUP_REPOSITORIES = ("orchestrator",)
+INTERMEDIATE_CLEANUP_HINT = (
+    "Run these to cleanup intermediates:\n"
+    "  buildah rm --all\n"
+    "  podman image prune --external"
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,7 @@ def cleanup_local_images(
     )
     if not stale_images:
         log(f"No stale local cache images found for version: {clean_version}")
+        _log_intermediate_cleanup_hint()
         return 0
 
     action = "Would remove" if dry_run else "Removing"
@@ -82,7 +88,12 @@ def cleanup_local_images(
             log(f"Removing image: {display}")
             _run_logged_command([podman, "rmi", image.ref], "image removal")
 
+    _log_intermediate_cleanup_hint()
     return 0
+
+
+def _log_intermediate_cleanup_hint() -> None:
+    log(INTERMEDIATE_CLEANUP_HINT)
 
 
 def _cleanup_version(value: str | None) -> str:
