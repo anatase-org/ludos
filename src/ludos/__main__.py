@@ -9,6 +9,7 @@ from pathlib import Path
 from .bootc import DEFAULT_OCI_WRITERS, bootc_create, ostree_import
 from .build import build_manifest
 from .cleanup import cleanup_local_images
+from .installer import bootc_installer
 from .logging import LOGO_STR, configure_tracebacks, error, log
 from .model import ConfigError, validate_manifest
 from .contrib.package import package_target
@@ -282,6 +283,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ostree_import_parser.set_defaults(func=bootc_command)
 
+    installer_parser = bootc_subcommands.add_parser(
+        "installer",
+        help="Create a bootc installer ISO from an ostree-container image ref.",
+    )
+    installer_parser.add_argument(
+        "manifest",
+        type=Path,
+        help="Path to a Ludos YAML manifest.",
+    )
+    installer_parser.add_argument(
+        "ref",
+        help="OSTree container image ref to import into the installer ISO.",
+    )
+    installer_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Artifact directory to create. Defaults to ./cache/iso/<safe-ref-name>.",
+    )
+    installer_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory used only for the default output location.",
+    )
+    installer_parser.add_argument(
+        "--orchestrator",
+        default=None,
+        help="Container image used to run installer tooling. Defaults to the image ref.",
+    )
+    installer_parser.set_defaults(func=bootc_command)
+
     cleanup = subcommands.add_parser(
         "cleanup",
         help="Remove stale local Ludos cache images.",
@@ -445,6 +478,14 @@ def bootc_command(args: argparse.Namespace) -> int:
             orchestrator=args.orchestrator,
             ostree_ref=args.ostree_ref,
             process=not args.no_process,
+        )
+    if args.bootc_action == "installer":
+        return bootc_installer(
+            args.manifest,
+            args.ref,
+            output=args.output,
+            cache_dir=args.cache_dir,
+            orchestrator=args.orchestrator,
         )
     raise ConfigError(f"unknown bootc action: {args.bootc_action}")
 

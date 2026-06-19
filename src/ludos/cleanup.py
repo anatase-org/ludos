@@ -13,7 +13,7 @@ from .model import ConfigError
 
 
 VERSIONED_CLEANUP_REPOSITORIES = ("orchestrator", "repos")
-RESOLVED_CLEANUP_REPOSITORIES = ("cards", "builds", "builders")
+RESOLVED_CLEANUP_REPOSITORIES = ("cards", "builds", "builders", "installer")
 CLEANUP_REPOSITORIES = (*VERSIONED_CLEANUP_REPOSITORIES, *RESOLVED_CLEANUP_REPOSITORIES)
 LATEST_CLEANUP_REPOSITORIES = ("orchestrator",)
 

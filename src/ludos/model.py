@@ -86,6 +86,12 @@ class RepoRef:
 
 
 @dataclass(frozen=True)
+class InstallerConfig:
+    files: tuple[str, ...] = tuple()
+    build: str = ""
+
+
+@dataclass(frozen=True)
 class ResolvedRepo:
     ref: RepoRef
     source: Path
@@ -101,9 +107,11 @@ class Manifest:
     bootstrap: str
     repos: tuple[RepoRef, ...]
     cards: tuple[str, ...]
+    name: str = ""
     orchestrator_deps: tuple[str, ...] = tuple()
     local_prefix: str = ""
     labels: dict[str, str] = field(default_factory=dict)
+    installer: InstallerConfig = InstallerConfig()
     source: Path | None = None
 
     @classmethod
@@ -119,8 +127,10 @@ class Manifest:
             bootstrap=_required_string(data, "bootstrap", path),
             repos=_repo_refs_tuple(data, "repos", path),
             cards=_required_string_tuple(data, "cards", path),
+            name=_optional_string(data, "name", path),
             local_prefix=_optional_string(data, "local_prefix", path),
             labels=_string_dict(data, "labels", path),
+            installer=_installer_config(data, path),
             source=path,
         )
 
@@ -329,6 +339,23 @@ def _required_string_tuple(
     if not value:
         raise ConfigError(f"{path}: '{key}' must contain at least one item")
     return value
+
+
+def _installer_config(data: dict[str, Any], path: Path) -> InstallerConfig:
+    value = data.get("installer")
+    if value is None:
+        return InstallerConfig()
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path}: 'installer' must be a mapping")
+
+    allowed = {"files", "build"}
+    for key in value:
+        if key not in allowed:
+            raise ConfigError(f"{path}: 'installer.{key}' is not supported")
+    return InstallerConfig(
+        files=_string_tuple(value, "files", path),
+        build=_optional_string(value, "build", path),
+    )
 
 
 def _repo_refs_tuple(data: dict[str, Any], key: str, path: Path) -> tuple[RepoRef, ...]:

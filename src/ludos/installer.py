@@ -1,0 +1,892 @@
+from __future__ import annotations
+
+import os
+import re
+import signal
+import shlex
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+from .bootc import DEFAULT_CACHE_DIR, _safe_oci_name
+from .build import FileRef, _parse_file_ref, _validate_relative_file_path
+from .logging import log, stream
+from .model import ConfigError, InstallerConfig, Manifest
+
+
+DEFAULT_LABEL_BASE = "LUDOS"
+CONTAINER_WORKDIR = "/ludos/installer"
+EROFS_COMPRESSION = "zstd,3"
+EROFS_PCLUSTER_SIZE = "1048576"
+EROFS_FEATURES = "ztailpacking,fragments"
+BIOS_GRUB_DIR = Path("boot/grub/i386-pc")
+BIOS_ELTORITO_IMAGE = BIOS_GRUB_DIR / "eltorito.img"
+EFI_BOOT_IMAGE = Path("images/efiboot.img")
+LIVE_ROOT_IMAGE = Path("LiveOS/squashfs.img")
+BIOS_GRUB_MODULES = (
+    "biosdisk",
+    "iso9660",
+    "part_msdos",
+    "part_gpt",
+    "normal",
+    "configfile",
+    "linux",
+    "test",
+    "search",
+    "search_label",
+)
+
+
+@dataclass(frozen=True)
+class InstallerContext:
+    manifest: Manifest
+    manifest_path: Path
+    ref: str
+    output_dir: Path
+    orchestrator: str
+    podman: str = "podman"
+
+    @property
+    def boot_assets(self) -> Path:
+        return self.output_dir / "boot-assets"
+
+    @property
+    def build_context(self) -> Path:
+        return self.output_dir / "container"
+
+    @property
+    def efi_img(self) -> Path:
+        return self.output_dir / "efi.img"
+
+    @property
+    def root_erofs(self) -> Path:
+        return self.output_dir / "root.erofs"
+
+    @property
+    def installer_iso(self) -> Path:
+        return self.output_dir / "installer.iso"
+
+    @property
+    def iso_label(self) -> str:
+        return _label_for_manifest(self.manifest, "ISO")
+
+    @property
+    def rootfs_label(self) -> str:
+        return _label_for_manifest(self.manifest, "ROOT")
+
+    @property
+    def menuentry(self) -> str:
+        name = self.manifest.name.strip()
+        return f"{name} Installer" if name else "Installer"
+
+
+def bootc_installer(
+    manifest_path: Path,
+    ref: str,
+    *,
+    output: Path | None = None,
+    cache_dir: Path | None = None,
+    orchestrator: str | None = None,
+) -> int:
+    manifest_path = manifest_path.expanduser().resolve()
+    manifest = Manifest.from_file(manifest_path)
+    output_dir = _resolve_output_dir(manifest_path, ref, output, cache_dir)
+    podman = shutil.which("podman")
+    if podman is None:
+        raise ConfigError("podman must be installed to create an installer ISO")
+
+    prepare_ctx = InstallerContext(
+        manifest=manifest,
+        manifest_path=manifest_path,
+        ref=ref,
+        output_dir=output_dir,
+        orchestrator=orchestrator or ref,
+        podman=podman,
+    )
+
+    log(f"Preparing installer output directory: {prepare_ctx.output_dir}")
+    _prepare_output_dir(prepare_ctx.output_dir)
+    source_ref = _source_image_ref(ref)
+    log("Preparing installer image build context")
+    _prepare_installer_build_context(prepare_ctx)
+    log(f"Building installer image from {source_ref}")
+    installer_image = _build_installer_image(prepare_ctx, source_ref)
+    ctx = InstallerContext(
+        manifest=manifest,
+        manifest_path=manifest_path,
+        ref=ref,
+        output_dir=output_dir,
+        orchestrator=orchestrator or installer_image,
+        podman=podman,
+    )
+    log(f"Using installer tooling image: {ctx.orchestrator}")
+    log("Creating EROFS root image")
+    _create_root_erofs(ctx, source_ref, installer_image)
+    log("Creating UEFI boot image")
+    _create_efi_image(ctx)
+    log("Creating hybrid installer ISO")
+    _create_iso(ctx)
+    log(f"Created installer ISO: {ctx.installer_iso}")
+    return 0
+
+
+def _resolve_output_dir(
+    manifest_path: Path,
+    ref: str,
+    output: Path | None,
+    cache_dir: Path | None,
+) -> Path:
+    if output is not None:
+        return output.expanduser().resolve()
+    cache_root = (
+        cache_dir.expanduser().resolve()
+        if cache_dir is not None
+        else (manifest_path.resolve().parent / DEFAULT_CACHE_DIR).resolve()
+    )
+    return cache_root / "iso" / _safe_ref_name(ref)
+
+
+def _safe_ref_name(ref: str) -> str:
+    value = ref
+    if value.startswith("oci:"):
+        value = value.removeprefix("oci:")
+        value = value.removesuffix(":latest")
+    return _safe_oci_name(value)
+
+
+def _prepare_output_dir(output_dir: Path) -> None:
+    if output_dir.is_symlink() or output_dir.is_file():
+        output_dir.unlink()
+    elif output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+
+
+def _create_root_erofs(ctx: InstallerContext, source_ref: str, run_ref: str) -> None:
+    container = _container_name(ctx)
+
+    log(f"Preparing installer rootfs container from {source_ref}")
+    _run_host([ctx.podman, "rm", "-f", container], check=False)
+    result = _run_host(
+        [ctx.podman, "create", "--name", container, run_ref, "/bin/true"],
+        capture=True,
+    )
+    container_id = result.stdout.strip() or container
+    try:
+        _copy_boot_assets(ctx, container_id, run_ref)
+        _stream_root_erofs(ctx, container_id)
+    finally:
+        _run_host([ctx.podman, "rm", "-f", container_id], check=False)
+
+
+def _source_image_ref(ref: str) -> str:
+    path = Path(ref).expanduser()
+    if path.exists():
+        if not path.is_dir():
+            raise ConfigError(f"installer source image path is not a directory: {path}")
+        return f"oci:{path.resolve()}:latest"
+    return ref
+
+
+def _prepare_installer_build_context(ctx: InstallerContext) -> None:
+    if ctx.build_context.exists():
+        shutil.rmtree(ctx.build_context)
+    ctx.build_context.mkdir(parents=True)
+    _copy_installer_files(ctx.manifest.installer, ctx.manifest_path.parent, ctx.build_context)
+
+
+def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
+    image = _installer_image_ref(ctx)
+    containerfile = ctx.build_context / "Containerfile"
+    has_files = (ctx.build_context / "files").is_dir()
+    containerfile.write_text(
+        _installer_containerfile(base_ref, has_files, ctx.manifest.installer.build),
+        encoding="utf-8",
+    )
+    log(f"Committing installer image: {image}")
+    _run_host(
+        [
+            ctx.podman,
+            "build",
+            "--tag",
+            image,
+            "--file",
+            str(containerfile),
+            str(ctx.build_context),
+        ]
+    )
+    return image
+
+
+def _installer_image_ref(ctx: InstallerContext) -> str:
+    return f"localhost/installer:{_safe_ref_name(ctx.ref)}"
+
+
+def _installer_containerfile(base_ref: str, has_files: bool, build_script: str) -> str:
+    if "\n" in base_ref:
+        raise ConfigError("installer base image ref must not contain newlines")
+    lines = [f"FROM {base_ref}"]
+    if has_files:
+        lines.append("COPY files/ /files/")
+    lines.extend(
+        [
+            "RUN /bin/sh -ex <<'LUDOS_INSTALLER_BUILD'",
+            _installer_build_script(build_script).rstrip(),
+            "LUDOS_INSTALLER_BUILD",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _last_output_line(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def _container_name(ctx: InstallerContext) -> str:
+    return f"installer-{_safe_ref_name(ctx.ref)}"
+
+
+def _require_image(podman: str, image: str, description: str) -> None:
+    result = subprocess.run([podman, "image", "exists", image], check=False)
+    if result.returncode != 0:
+        raise ConfigError(f"{description} is not available locally: {image}")
+
+
+def _copy_boot_assets(ctx: InstallerContext, container_id: str, run_ref: str) -> None:
+    if ctx.boot_assets.exists():
+        shutil.rmtree(ctx.boot_assets)
+    ctx.boot_assets.mkdir(parents=True)
+    log("Copying installer boot assets from derived image")
+    kernel, initramfs = _container_kernel_assets(ctx, run_ref)
+    _run_host([ctx.podman, "cp", f"{container_id}:{kernel}", str(ctx.boot_assets / "vmlinuz")])
+    _run_host(
+        [
+            ctx.podman,
+            "cp",
+            f"{container_id}:{initramfs}",
+            str(ctx.boot_assets / "initramfs.img"),
+        ]
+    )
+    shim, grub = _container_efi_assets(ctx, run_ref)
+    _run_host([ctx.podman, "cp", f"{container_id}:{shim}", str(ctx.boot_assets / "shimx64.efi")])
+    _run_host([ctx.podman, "cp", f"{container_id}:{grub}", str(ctx.boot_assets / "grubx64.efi")])
+
+
+def _container_kernel_assets(ctx: InstallerContext, run_ref: str) -> tuple[str, str]:
+    result = _run_host(
+        [
+            ctx.podman,
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/sh",
+            run_ref,
+            "-ceu",
+            _kernel_asset_script(),
+        ],
+        capture=True,
+    )
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) != 2:
+        raise ConfigError("installer image did not report kernel and initramfs paths")
+    return lines[0], lines[1]
+
+
+def _kernel_asset_script() -> str:
+    return "\n".join(
+        [
+            'kernel=$(find /usr/lib/modules -mindepth 2 -maxdepth 2 -type f -name vmlinuz | sort | tail -n 1)',
+            'if [ -z "$kernel" ]; then',
+            '  echo "installer image has no kernel under /usr/lib/modules" >&2',
+            "  exit 1",
+            "fi",
+            'initramfs="${kernel%/vmlinuz}/initramfs.img"',
+            'if [ ! -f "$initramfs" ]; then',
+            '  echo "installer image is missing initramfs: $initramfs" >&2',
+            "  exit 1",
+            "fi",
+            'printf "%s\\n%s\\n" "$kernel" "$initramfs"',
+        ]
+    )
+
+
+def _container_efi_assets(ctx: InstallerContext, run_ref: str) -> tuple[str, str]:
+    result = _run_host(
+        [
+            ctx.podman,
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/sh",
+            run_ref,
+            "-ceu",
+            _efi_asset_script(),
+        ],
+        capture=True,
+    )
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) != 2:
+        raise ConfigError("installer image did not report shim and GRUB EFI paths")
+    return lines[0], lines[1]
+
+
+def _efi_asset_script() -> str:
+    return "\n".join(
+        [
+            "search_roots=",
+            'for root in /usr/lib/efi /usr/lib/ostree-boot /boot /usr/share /usr/lib; do',
+            '  if [ -d "$root" ]; then search_roots="$search_roots $root"; fi',
+            "done",
+            'shim=$(find $search_roots -type f \\( -iname "shimx64*.efi" -o -iname "shim.efi" \\) 2>/dev/null | sort | tail -n 1)',
+            'if [ -z "$shim" ]; then',
+            '  echo "installer image is missing shim EFI file; install shim-x64" >&2',
+            "  exit 1",
+            "fi",
+            'grub=$(find $search_roots -type f -iname "grubx64.efi" 2>/dev/null | sort | tail -n 1)',
+            'if [ -z "$grub" ]; then',
+            '  echo "installer image is missing grubx64.efi" >&2',
+            "  exit 1",
+            "fi",
+            'printf "%s\\n%s\\n" "$shim" "$grub"',
+        ]
+    )
+
+
+def _stream_root_erofs(ctx: InstallerContext, container_id: str) -> None:
+    log(f"Streaming installer rootfs into EROFS image: {ctx.root_erofs}")
+    workers = _erofs_worker_count()
+    log(
+        "Using EROFS compression profile: "
+        f"{EROFS_COMPRESSION}, pcluster={EROFS_PCLUSTER_SIZE}, "
+        f"features={EROFS_FEATURES}, workers={workers}"
+    )
+    export_command = [ctx.podman, "export", container_id]
+    erofs_command = _tool_command(
+        ctx,
+        _mkfs_erofs_tar_command(
+            ctx.rootfs_label,
+            _tool_path(ctx, ctx.root_erofs),
+            workers=workers,
+        ),
+        stdin=True,
+    )
+    export_process = subprocess.Popen(
+        export_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert export_process.stdout is not None
+    erofs_process = subprocess.Popen(
+        erofs_command,
+        stdin=export_process.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    export_process.stdout.close()
+    erofs_stdout, erofs_stderr = erofs_process.communicate()
+    export_stderr = export_process.stderr.read() if export_process.stderr else b""
+    export_status = export_process.wait()
+
+    if erofs_process.returncode != 0:
+        _raise_command_error(
+            erofs_command,
+            erofs_process.returncode,
+            erofs_stderr,
+            erofs_stdout,
+        )
+    if export_status == -signal.SIGPIPE:
+        return
+    if export_status != 0:
+        _raise_command_error(export_command, export_status, export_stderr, b"")
+
+
+def _copy_installer_files(
+    installer: InstallerConfig,
+    manifest_root: Path,
+    rootfs: Path,
+) -> None:
+    files_dir = rootfs / "files"
+    if files_dir.exists():
+        shutil.rmtree(files_dir)
+    if not installer.files:
+        log("No installer files configured")
+        return
+    log(f"Copying {len(installer.files)} installer file(s)")
+    files_dir.mkdir(parents=True)
+    for value in installer.files:
+        file_ref = _parse_file_ref(value)
+        _copy_installer_file(file_ref, manifest_root, files_dir)
+
+
+def _copy_installer_file(file_ref: FileRef, manifest_root: Path, files_dir: Path) -> None:
+    if _is_remote_file_ref(file_ref.source):
+        raise ConfigError(
+            f"installer files entry '{file_ref.original}' uses an unsupported remote source"
+        )
+    target_relpath = _validate_relative_file_path(
+        file_ref.target,
+        manifest_root,
+        "installer files destination",
+    )
+    source_relpath = _validate_relative_file_path(
+        file_ref.source,
+        manifest_root,
+        "installer files source",
+    )
+    source_path = (manifest_root / source_relpath).resolve()
+    try:
+        source_path.relative_to(manifest_root.resolve())
+    except ValueError as exc:
+        raise ConfigError(
+            f"{manifest_root}: installer files entry '{file_ref.original}' escapes the manifest directory"
+        ) from exc
+    if not source_path.is_file():
+        raise ConfigError(
+            f"{manifest_root}: installer files entry '{file_ref.original}' is missing"
+        )
+    target_path = files_dir / target_relpath
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, target_path)
+
+
+def _is_remote_file_ref(source: str) -> bool:
+    return source.startswith(
+        ("https://", "http://", "git+https://", "git+http://", "git+ssh://", "git+file://")
+    )
+
+
+def _installer_build_script(build_script: str) -> str:
+    body = build_script.rstrip()
+    if body:
+        return f"{body}\nrm -rf /files\n"
+    return "rm -rf /files\n"
+
+
+def _create_efi_image(ctx: InstallerContext) -> None:
+    efi_tree = ctx.output_dir / "efi-tree"
+    if efi_tree.exists():
+        shutil.rmtree(efi_tree)
+    (efi_tree / "EFI/BOOT").mkdir(parents=True)
+
+    kernel, initramfs = _kernel_and_initramfs(ctx.boot_assets)
+    log(f"Adding UEFI kernel payload: {kernel.parent.name}")
+    shutil.copy2(kernel, efi_tree / "vmlinuz")
+    shutil.copy2(initramfs, efi_tree / "initramfs.img")
+    shutil.copy2(ctx.boot_assets / "shimx64.efi", efi_tree / "EFI/BOOT/BOOTX64.EFI")
+    shutil.copy2(ctx.boot_assets / "grubx64.efi", efi_tree / "EFI/BOOT/grubx64.efi")
+    (efi_tree / "EFI/BOOT/grub.cfg").write_text(
+        _grub_config(ctx.iso_label, ctx.menuentry, platform="efi"),
+        encoding="utf-8",
+    )
+
+    size_kib = _efi_image_size_kib(efi_tree)
+    log(f"Formatting EFI system partition image: {ctx.efi_img}")
+    _run(ctx, ["mkfs.vfat", "-C", str(_tool_path(ctx, ctx.efi_img)), str(size_kib)])
+    _run(ctx, ["mmd", "-i", str(_tool_path(ctx, ctx.efi_img)), "::/EFI", "::/EFI/BOOT"])
+    _run(
+        ctx,
+        [
+            "/bin/sh",
+            "-ceu",
+            _mcopy_tree_script(_tool_path(ctx, ctx.efi_img), _tool_path(ctx, efi_tree)),
+        ],
+    )
+
+
+def _kernel_and_initramfs(boot_assets: Path) -> tuple[Path, Path]:
+    kernel = boot_assets / "vmlinuz"
+    if not kernel.is_file():
+        raise ConfigError("installer boot assets are missing vmlinuz")
+    initramfs = boot_assets / "initramfs.img"
+    if not initramfs.is_file():
+        raise ConfigError("installer boot assets are missing initramfs.img")
+    return kernel, initramfs
+
+
+def _efi_image_size_kib(efi_tree: Path) -> int:
+    total = 0
+    for path in efi_tree.rglob("*"):
+        if path.is_file():
+            total += path.stat().st_size
+    overhead = max(total // 10, 32 * 1024 * 1024)
+    return max(65536, (total + overhead + 1023) // 1024)
+
+
+def _mcopy_tree_script(image: Path, source_tree: Path) -> str:
+    return (
+        "mcopy -s -i "
+        f"{shlex.quote(str(image))} "
+        f"{shlex.quote(str(source_tree))}/* "
+        "::/"
+    )
+
+
+def _grub_config(
+    iso_label: str,
+    menuentry: str = "Installer",
+    *,
+    platform: str = "auto",
+) -> str:
+    kernel_args = (
+        f"root=live:CDLABEL={iso_label} "
+        "rd.live.image rd.live.overlay.overlayfs=1 selinux=0 quiet rhgb"
+    )
+    if platform == "efi":
+        boot_lines = [
+            f"    linuxefi /vmlinuz {kernel_args}",
+            "    initrdefi /initramfs.img",
+        ]
+    elif platform == "bios":
+        boot_lines = [
+            f"    linux /vmlinuz {kernel_args}",
+            "    initrd /initramfs.img",
+        ]
+    elif platform == "auto":
+        boot_lines = [
+            '    if [ "$grub_platform" = "efi" ]; then',
+            f"        linuxefi /vmlinuz {kernel_args}",
+            "        initrdefi /initramfs.img",
+            "    else",
+            f"        linux /vmlinuz {kernel_args}",
+            "        initrd /initramfs.img",
+            "    fi",
+        ]
+    else:
+        raise ConfigError(f"unsupported GRUB platform: {platform}")
+    return "\n".join(
+        [
+            "set timeout=0",
+            "set timeout_style=hidden",
+            "set pager=0",
+            "",
+            f'menuentry "{_grub_quote(menuentry)}" {{',
+            *boot_lines,
+            "}",
+            "",
+        ]
+    )
+
+
+def _grub_quote(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _label_for_manifest(manifest: Manifest, suffix: str) -> str:
+    return f"{_label_base(manifest.name)}_{suffix}"
+
+
+def _label_base(name: str) -> str:
+    value = name.strip() or DEFAULT_LABEL_BASE
+    value = value.upper()
+    value = re.sub(r"\s+", "_", value)
+    value = re.sub(r"[^A-Z0-9_]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value or DEFAULT_LABEL_BASE
+
+
+def _mkfs_erofs_tar_command(label: str, output: Path, *, workers: int | None = None) -> list[str]:
+    worker_count = workers if workers is not None else _erofs_worker_count()
+    return [
+        "mkfs.erofs",
+        "-L",
+        label,
+        "-z",
+        EROFS_COMPRESSION,
+        "-C",
+        EROFS_PCLUSTER_SIZE,
+        "-E",
+        EROFS_FEATURES,
+        f"--workers={worker_count}",
+        "--tar=f",
+        str(output),
+        "/proc/self/fd/0",
+    ]
+
+
+def _erofs_worker_count() -> int:
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpus = os.cpu_count() or 1
+    return max(1, cpus)
+
+
+def _create_iso(ctx: InstallerContext) -> None:
+    iso_tree = ctx.output_dir / "iso-tree"
+    if iso_tree.exists():
+        shutil.rmtree(iso_tree)
+    iso_tree.mkdir()
+    log("Adding live root image to ISO tree")
+    _copy_live_iso_payload(ctx, iso_tree)
+    log("Creating BIOS El Torito boot image")
+    bios_mbr = _create_bios_boot_image(ctx, iso_tree)
+    log(f"Running xorriso for hybrid ISO: {ctx.installer_iso}")
+    _run(
+        ctx,
+        _xorriso_command(
+            _tool_path(ctx, ctx.installer_iso),
+            _tool_path(ctx, iso_tree),
+            iso_label=ctx.iso_label,
+            bios_mbr=_tool_path(ctx, bios_mbr),
+        ),
+    )
+
+
+def _copy_live_iso_payload(ctx: InstallerContext, iso_tree: Path) -> None:
+    live_root = iso_tree / LIVE_ROOT_IMAGE
+    live_root.parent.mkdir(parents=True)
+    shutil.copy2(ctx.root_erofs, live_root)
+
+    efi_boot = iso_tree / EFI_BOOT_IMAGE
+    efi_boot.parent.mkdir(parents=True)
+    shutil.copy2(ctx.efi_img, efi_boot)
+
+    visible_efi = iso_tree / "EFI/BOOT"
+    visible_efi.mkdir(parents=True)
+    shutil.copy2(ctx.boot_assets / "shimx64.efi", visible_efi / "BOOTX64.EFI")
+    shutil.copy2(ctx.boot_assets / "grubx64.efi", visible_efi / "grubx64.efi")
+    (visible_efi / "grub.cfg").write_text(
+        _grub_config(ctx.iso_label, ctx.menuentry, platform="efi"),
+        encoding="utf-8",
+    )
+
+
+def _create_bios_boot_image(ctx: InstallerContext, iso_tree: Path) -> Path:
+    grub_dir = iso_tree / BIOS_GRUB_DIR
+    grub_dir.mkdir(parents=True)
+    kernel, initramfs = _kernel_and_initramfs(ctx.boot_assets)
+    shutil.copy2(kernel, iso_tree / "vmlinuz")
+    shutil.copy2(initramfs, iso_tree / "initramfs.img")
+    (iso_tree / "boot/grub/grub.cfg").write_text(
+        _grub_config(ctx.iso_label, ctx.menuentry, platform="bios"),
+        encoding="utf-8",
+    )
+
+    cdboot = grub_dir / "cdboot.img"
+    core = grub_dir / "core.img"
+    eltorito = grub_dir / BIOS_ELTORITO_IMAGE.name
+    mbr = ctx.output_dir / "boot_hybrid.img"
+
+    _run(ctx, ["cp", "/usr/lib/grub/i386-pc/cdboot.img", str(_tool_path(ctx, cdboot))])
+    _run(ctx, ["cp", "/usr/lib/grub/i386-pc/boot_hybrid.img", str(_tool_path(ctx, mbr))])
+    _run(ctx, _grub_mkimage_command(_tool_path(ctx, core)))
+    _run(
+        ctx,
+        [
+            "/bin/sh",
+            "-ceu",
+            (
+                "cat "
+                f"{shlex.quote(str(_tool_path(ctx, cdboot)))} "
+                f"{shlex.quote(str(_tool_path(ctx, core)))} "
+                f"> {shlex.quote(str(_tool_path(ctx, eltorito)))}"
+            ),
+        ],
+    )
+    return mbr
+
+
+def _grub_mkimage_command(output: Path) -> list[str]:
+    return [
+        "grub2-mkimage",
+        "-O",
+        "i386-pc",
+        "-o",
+        str(output),
+        "-p",
+        "/boot/grub",
+        *BIOS_GRUB_MODULES,
+    ]
+
+
+def _xorriso_command(
+    iso: Path,
+    iso_tree: Path = Path("."),
+    *,
+    iso_label: str = "ANATASE_ISO",
+    bios_mbr: Path | None = None,
+    bios_boot_image: Path = BIOS_ELTORITO_IMAGE,
+    efi_boot_image: Path = EFI_BOOT_IMAGE,
+) -> list[str]:
+    command = [
+        "xorriso",
+        "-as",
+        "mkisofs",
+        "-V",
+        iso_label,
+        "-r",
+        "-J",
+        "-joliet-long",
+        "-o",
+        str(iso),
+    ]
+    if bios_mbr is not None:
+        command.extend(
+            [
+                "--grub2-mbr",
+                str(bios_mbr),
+            ]
+        )
+    command.extend(
+        [
+            "-b",
+            str(bios_boot_image),
+            "-no-emul-boot",
+            "-boot-load-size",
+            "4",
+            "-boot-info-table",
+            "--grub2-boot-info",
+            "-eltorito-alt-boot",
+            "-e",
+            str(efi_boot_image),
+            "-no-emul-boot",
+            "-isohybrid-gpt-basdat",
+            str(iso_tree),
+        ]
+    )
+    return command
+
+
+def _run(
+    ctx: InstallerContext,
+    command: list[str],
+    *,
+    input_text: str | None = None,
+    capture: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    return _run_host(
+        _tool_command(ctx, command),
+        input_text=input_text,
+        capture=capture,
+    )
+
+
+def _run_host(
+    command: list[str],
+    *,
+    input_text: str | None = None,
+    capture: bool = False,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    if not capture:
+        return _run_host_streamed(
+            command,
+            input_text=input_text,
+            check=check,
+        )
+    result = subprocess.run(
+        command,
+        input=input_text,
+        text=True,
+        check=False,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+    )
+    if check and result.returncode != 0:
+        _raise_command_error(command, result.returncode, result.stderr, result.stdout)
+    return result
+
+
+def _run_host_streamed(
+    command: list[str],
+    *,
+    input_text: str | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output_chunks: list[str] = []
+    try:
+        if input_text is not None:
+            assert process.stdin is not None
+            process.stdin.write(input_text)
+            process.stdin.close()
+
+        assert process.stdout is not None
+        for line in process.stdout:
+            output_chunks.append(line)
+            stream(line)
+        returncode = process.wait()
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.poll() is None:
+            process.terminate()
+
+    output = "".join(output_chunks)
+    if check and returncode != 0:
+        _raise_command_error(command, returncode, output, None)
+    return subprocess.CompletedProcess(command, returncode, stdout=output)
+
+
+def _raise_command_error(
+    command: list[str],
+    returncode: int | None,
+    stderr: str | bytes | None,
+    stdout: str | bytes | None,
+) -> None:
+    command_line = " ".join(shlex.quote(part) for part in command)
+    details = "\n".join(
+        part.strip()
+        for part in (_decode_output(stderr), _decode_output(stdout))
+        if part and part.strip()
+    )
+    status = returncode if returncode is not None else "unknown"
+    if details:
+        raise ConfigError(
+            f"installer command failed with exit status {status}: "
+            f"{command_line}\n{details}"
+        )
+    raise ConfigError(f"installer command failed with exit status {status}: {command_line}")
+
+
+def _decode_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
+def _tool_command(
+    ctx: InstallerContext,
+    command: list[str],
+    *,
+    stdin: bool = False,
+) -> list[str]:
+    tool = [
+        ctx.podman,
+        "run",
+        "--rm",
+    ]
+    if stdin:
+        tool.append("--interactive")
+    tool.extend(
+        [
+            "--privileged",
+            "--volume",
+            f"{ctx.output_dir}:{CONTAINER_WORKDIR}",
+            "--workdir",
+            CONTAINER_WORKDIR,
+            ctx.orchestrator,
+            *command,
+        ]
+    )
+    return tool
+
+
+def _tool_path(ctx: InstallerContext, path: Path) -> Path:
+    path = path.resolve()
+    try:
+        relative = path.relative_to(ctx.output_dir.resolve())
+    except ValueError as exc:
+        raise ConfigError(f"installer path is outside the mounted output directory: {path}") from exc
+    return Path(CONTAINER_WORKDIR) / relative
