@@ -24,6 +24,7 @@ from ludos.installer import (
     _grub_mkimage_command,
     _installer_containerfile,
     _installer_image_ref,
+    _installer_latest_image_ref,
     _installer_build_script,
     _label_base,
     _container_name,
@@ -277,6 +278,7 @@ class InstallerHelperTests(unittest.TestCase):
                 _installer_image_ref(ctx),
                 f"localhost/installer:{_safe_ref_name(ctx.ref)}",
             )
+            self.assertEqual(_installer_latest_image_ref(), "localhost/installer:latest")
 
     def test_installer_containerfile_runs_build_steps_in_image(self) -> None:
         containerfile = _installer_containerfile(
@@ -309,6 +311,8 @@ class InstallerHelperTests(unittest.TestCase):
                 "build",
                 "--tag",
                 image,
+                "--tag",
+                "localhost/installer:latest",
                 "--file",
                 str(containerfile),
                 str(ctx.build_context),

@@ -211,6 +211,8 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
             "build",
             "--tag",
             image,
+            "--tag",
+            _installer_latest_image_ref(),
             "--file",
             str(containerfile),
             str(ctx.build_context),
@@ -221,6 +223,10 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
 
 def _installer_image_ref(ctx: InstallerContext) -> str:
     return f"localhost/installer:{_safe_ref_name(ctx.ref)}"
+
+
+def _installer_latest_image_ref() -> str:
+    return "localhost/installer:latest"
 
 
 def _installer_containerfile(base_ref: str, has_files: bool, build_script: str) -> str:
