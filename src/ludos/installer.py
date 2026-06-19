@@ -39,12 +39,30 @@ BIOS_GRUB_MODULES = (
 
 
 @dataclass(frozen=True)
+class ErofsProfile:
+    name: str
+    compression: str
+    pcluster_size: str | None = None
+    features: str | None = None
+
+
+EROFS_DEFAULT_PROFILE = ErofsProfile(
+    name="default",
+    compression=EROFS_COMPRESSION,
+    pcluster_size=EROFS_PCLUSTER_SIZE,
+    features=EROFS_FEATURES,
+)
+EROFS_SCRATCH_PROFILE = ErofsProfile(name="scratch", compression="lz4")
+
+
+@dataclass(frozen=True)
 class InstallerContext:
     manifest: Manifest
     manifest_path: Path
     ref: str
     output_dir: Path
     orchestrator: str
+    scratch: bool = False
     podman: str = "podman"
 
     @property
@@ -88,6 +106,7 @@ def bootc_installer(
     output: Path | None = None,
     cache_dir: Path | None = None,
     orchestrator: str | None = None,
+    scratch: bool = False,
 ) -> int:
     manifest_path = manifest_path.expanduser().resolve()
     manifest = Manifest.from_file(manifest_path)
@@ -102,6 +121,7 @@ def bootc_installer(
         ref=ref,
         output_dir=output_dir,
         orchestrator=orchestrator or ref,
+        scratch=scratch,
         podman=podman,
     )
 
@@ -118,6 +138,7 @@ def bootc_installer(
         ref=ref,
         output_dir=output_dir,
         orchestrator=orchestrator or installer_image,
+        scratch=scratch,
         podman=podman,
     )
     log(f"Using installer tooling image: {ctx.orchestrator}")
@@ -364,10 +385,12 @@ def _efi_asset_script() -> str:
 def _stream_root_erofs(ctx: InstallerContext, container_id: str) -> None:
     log(f"Streaming installer rootfs into EROFS image: {ctx.root_erofs}")
     workers = _erofs_worker_count()
+    profile = _erofs_profile(ctx.scratch)
     log(
         "Using EROFS compression profile: "
-        f"{EROFS_COMPRESSION}, pcluster={EROFS_PCLUSTER_SIZE}, "
-        f"features={EROFS_FEATURES}, workers={workers}"
+        f"{profile.name}, compression={profile.compression}, "
+        f"pcluster={profile.pcluster_size or 'default'}, "
+        f"features={profile.features or 'none'}, workers={workers}"
     )
     export_command = [ctx.podman, "export", container_id]
     erofs_command = _tool_command(
@@ -375,6 +398,7 @@ def _stream_root_erofs(ctx: InstallerContext, container_id: str) -> None:
         _mkfs_erofs_tar_command(
             ctx.rootfs_label,
             _tool_path(ctx, ctx.root_erofs),
+            profile=profile,
             workers=workers,
         ),
         stdin=True,
@@ -593,23 +617,31 @@ def _label_base(name: str) -> str:
     return value or DEFAULT_LABEL_BASE
 
 
-def _mkfs_erofs_tar_command(label: str, output: Path, *, workers: int | None = None) -> list[str]:
+def _mkfs_erofs_tar_command(
+    label: str,
+    output: Path,
+    *,
+    profile: ErofsProfile = EROFS_DEFAULT_PROFILE,
+    workers: int | None = None,
+) -> list[str]:
     worker_count = workers if workers is not None else _erofs_worker_count()
-    return [
+    command = [
         "mkfs.erofs",
         "-L",
         label,
         "-z",
-        EROFS_COMPRESSION,
-        "-C",
-        EROFS_PCLUSTER_SIZE,
-        "-E",
-        EROFS_FEATURES,
-        f"--workers={worker_count}",
-        "--tar=f",
-        str(output),
-        "/proc/self/fd/0",
+        profile.compression,
     ]
+    if profile.pcluster_size:
+        command.extend(["-C", profile.pcluster_size])
+    if profile.features:
+        command.extend(["-E", profile.features])
+    command.extend([f"--workers={worker_count}", "--tar=f", str(output), "/proc/self/fd/0"])
+    return command
+
+
+def _erofs_profile(scratch: bool) -> ErofsProfile:
+    return EROFS_SCRATCH_PROFILE if scratch else EROFS_DEFAULT_PROFILE
 
 
 def _erofs_worker_count() -> int:
@@ -726,6 +758,8 @@ def _xorriso_command(
         "-r",
         "-J",
         "-joliet-long",
+        "-iso-level",
+        "3",
         "-o",
         str(iso),
     ]

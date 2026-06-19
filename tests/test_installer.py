@@ -28,6 +28,7 @@ from ludos.installer import (
     _installer_build_script,
     _label_base,
     _container_name,
+    _erofs_profile,
     _erofs_worker_count,
     _kernel_and_initramfs,
     _kernel_asset_script,
@@ -60,13 +61,19 @@ def _manifest(installer: InstallerConfig = InstallerConfig()) -> Manifest:
     )
 
 
-def _context(tmp: Path, *, orchestrator: str = "orchestrator") -> InstallerContext:
+def _context(
+    tmp: Path,
+    *,
+    orchestrator: str = "orchestrator",
+    scratch: bool = False,
+) -> InstallerContext:
     return InstallerContext(
         manifest=_manifest(),
         manifest_path=tmp / "anatase.yml",
         ref=str(tmp / "cache/oci/anatase-f44-x86_64"),
         output_dir=tmp / "cache/iso/anatase-installer",
         orchestrator=orchestrator,
+        scratch=scratch,
         podman="podman",
     )
 
@@ -85,6 +92,7 @@ class InstallerParserTests(unittest.TestCase):
                 "cache",
                 "--orchestrator",
                 "localhost/tools:latest",
+                "--scratch",
             ]
         )
 
@@ -95,6 +103,7 @@ class InstallerParserTests(unittest.TestCase):
         self.assertEqual(args.output, Path("cache/iso/anatase-installer"))
         self.assertEqual(args.cache_dir, Path("cache"))
         self.assertEqual(args.orchestrator, "localhost/tools:latest")
+        self.assertTrue(args.scratch)
 
     def test_parser_requires_installer_ref(self) -> None:
         with self.assertRaises(SystemExit):
@@ -111,6 +120,7 @@ class InstallerParserTests(unittest.TestCase):
         )
 
         self.assertIsNone(args.orchestrator)
+        self.assertFalse(args.scratch)
 
 
 class InstallerManifestTests(unittest.TestCase):
@@ -253,10 +263,10 @@ class InstallerHelperTests(unittest.TestCase):
             )
             oci_dir = root / "cache/oci/anatase-f44-x86_64"
             oci_dir.mkdir(parents=True)
-            seen: list[str] = []
+            seen: list[tuple[str, bool]] = []
 
             def record(ctx: InstallerContext, *_args) -> None:
-                seen.append(ctx.orchestrator)
+                seen.append((ctx.orchestrator, ctx.scratch))
 
             with (
                 patch("ludos.installer.shutil.which", return_value="podman"),
@@ -266,9 +276,9 @@ class InstallerHelperTests(unittest.TestCase):
                 patch("ludos.installer._create_efi_image"),
                 patch("ludos.installer._create_iso"),
             ):
-                bootc_installer(manifest, str(oci_dir), output=root / "out")
+                bootc_installer(manifest, str(oci_dir), output=root / "out", scratch=True)
 
-        self.assertEqual(seen, ["localhost/installer:test"])
+        self.assertEqual(seen, [("localhost/installer:test", True)])
 
     def test_installer_image_ref_uses_installer_repository(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -444,6 +454,27 @@ class InstallerHelperTests(unittest.TestCase):
             ],
         )
 
+    def test_mkfs_erofs_tar_command_supports_scratch_profile(self) -> None:
+        self.assertEqual(
+            _mkfs_erofs_tar_command(
+                "ANATASE_ROOT",
+                Path("root.erofs"),
+                profile=_erofs_profile(scratch=True),
+                workers=8,
+            ),
+            [
+                "mkfs.erofs",
+                "-L",
+                "ANATASE_ROOT",
+                "-z",
+                "lz4",
+                "--workers=8",
+                "--tar=f",
+                "root.erofs",
+                "/proc/self/fd/0",
+            ],
+        )
+
     def test_erofs_worker_count_falls_back_to_cpu_count(self) -> None:
         with (
             patch("ludos.installer.os.sched_getaffinity", side_effect=AttributeError),
@@ -529,6 +560,7 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn("-r", command)
         self.assertIn("-J", command)
         self.assertIn("-joliet-long", command)
+        self.assertEqual(command[command.index("-iso-level") + 1], "3")
         self.assertIn("--grub2-mbr", command)
         self.assertIn("boot_hybrid.img", command)
         self.assertIn("-b", command)

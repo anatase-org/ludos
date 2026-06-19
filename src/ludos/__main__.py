@@ -313,6 +313,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Container image used to run installer tooling. Defaults to the image ref.",
     )
+    installer_parser.add_argument(
+        "--scratch",
+        action="store_true",
+        help="Use a faster scratch EROFS profile for installer root creation.",
+    )
     installer_parser.set_defaults(func=bootc_command)
 
     cleanup = subcommands.add_parser(
@@ -486,6 +491,7 @@ def bootc_command(args: argparse.Namespace) -> int:
             output=args.output,
             cache_dir=args.cache_dir,
             orchestrator=args.orchestrator,
+            scratch=args.scratch,
         )
     raise ConfigError(f"unknown bootc action: {args.bootc_action}")
 
