@@ -18,7 +18,6 @@ from .model import ConfigError, InstallerConfig, Manifest
 DEFAULT_LABEL_BASE = "LUDOS"
 CONTAINER_WORKDIR = "/ludos/installer"
 EROFS_COMPRESSION = "zstd,3"
-EROFS_PCLUSTER_SIZE = "1048576"
 EROFS_FEATURES = "ztailpacking,fragments"
 BIOS_GRUB_DIR = Path("boot/grub/i386-pc")
 BIOS_ELTORITO_IMAGE = BIOS_GRUB_DIR / "eltorito.img"
@@ -49,7 +48,6 @@ class ErofsProfile:
 EROFS_DEFAULT_PROFILE = ErofsProfile(
     name="default",
     compression=EROFS_COMPRESSION,
-    pcluster_size=EROFS_PCLUSTER_SIZE,
     features=EROFS_FEATURES,
 )
 EROFS_SCRATCH_PROFILE = ErofsProfile(name="scratch", compression="lz4")
