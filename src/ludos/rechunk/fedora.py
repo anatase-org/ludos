@@ -1,5 +1,6 @@
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 from ..logging import warning
@@ -9,9 +10,10 @@ from .model import File, Package
 # issues with them being in changelogs.
 STARTSEP = "M2Dqm7H6"
 ENDSEP = "7mhjAuF8"
+CONTAINER_RPMDB_DIR = "/ludos/rpmdb"
 
 
-def get_packages(dir: str):
+def get_packages(dir: str, *, rpm_image: str | None = None, podman: str = "podman"):
     packages = []
 
     fail_count = 0
@@ -20,19 +22,33 @@ def get_packages(dir: str):
     updates = []
     mode: Literal["changelog", "file"] = "changelog"
 
+    rpmdb_dir = CONTAINER_RPMDB_DIR if rpm_image is not None else dir
+    command = [
+        "rpm",
+        "-qa",
+        "--queryformat",
+        STARTSEP
+        + "\n[%{FILESIZES} %{FILENAMES}\n]"
+        + ENDSEP
+        + "%{NAME} %{NEVRA} %{VERSION} %{RELEASE} %{SIZE}\n",
+        "--changes",
+        "--dbpath",
+        rpmdb_dir,
+    ]
+    if rpm_image is not None:
+        command = [
+            podman,
+            "run",
+            "--rm",
+            "--volume",
+            f"{Path(dir).resolve()}:{CONTAINER_RPMDB_DIR}:rw",
+            rpm_image,
+            *command,
+        ]
+
     for eline in subprocess.run(
-        [
-            "rpm",
-            "-qa",
-            "--queryformat",
-            STARTSEP
-            + "\n[%{FILESIZES} %{FILENAMES}\n]"
-            + ENDSEP
-            + "%{NAME} %{NEVRA} %{VERSION} %{RELEASE} %{SIZE}\n",
-            "--changes",
-            "--dbpath",
-            dir,
-        ],
+        command,
+        check=True,
         stdout=subprocess.PIPE,
     ).stdout.splitlines():
         line = eline.decode("utf-8")

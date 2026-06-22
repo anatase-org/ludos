@@ -578,8 +578,13 @@ def main(
         )
 
         # Use the database by pulling it from ostree
+        package_reader = get_packages
+        if ostree_image is not None:
+            package_reader = lambda dir: get_packages(
+                dir, rpm_image=ostree_image, podman=podman
+            )
         packages = run_with_ostree_files(
-            repo, ostree_map, ["/usr/share/rpm/rpmdb.sqlite"], get_packages
+            repo, ostree_map, ["/usr/share/rpm/rpmdb.sqlite"], package_reader
         )
         log(f"Found {len(packages)} packages.")
         if _cache is not None:
