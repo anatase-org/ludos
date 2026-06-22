@@ -355,6 +355,13 @@ def _resolve_manifest_metadata(
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
     local_prefix = _local_prefix(local_prefix)
     manifest_env.update(local_values)
+    if cache_version is None:
+        cache_version = _datetime.date.today().strftime("%Y%m%d")
+        load_only_version = False
+    else:
+        cache_version = _cache_name(cache_version, "version")
+        load_only_version = True
+    manifest_env["version"] = cache_version
     releasever = _cache_name(
         _substitute_variables(validation.manifest.releasever, manifest_env),
         "releasever",
@@ -365,6 +372,10 @@ def _resolve_manifest_metadata(
         "arch",
     )
     manifest_env["arch"] = arch
+    manifest_env = {
+        key: _substitute_variables(value, manifest_env)
+        for key, value in manifest_env.items()
+    }
     distro = _cache_name(
         _substitute_variables(validation.manifest.distro, manifest_env),
         "distro",
@@ -373,12 +384,6 @@ def _resolve_manifest_metadata(
         validation.manifest.orchestrator, manifest_env
     )
     output_image = f"localhost/{local_prefix}{image}:{distro}"
-    if cache_version is None:
-        cache_version = _datetime.date.today().strftime("%Y%m%d")
-        load_only_version = False
-    else:
-        cache_version = _cache_name(cache_version, "version")
-        load_only_version = True
     if cache_only:
         log("Using cache-only mode")
 
@@ -1570,6 +1575,10 @@ LUDOS_BOOTSTRAP
     card_packages = dict(metadata.card_packages)
     card_resolutions = dict(metadata.card_resolutions)
     postprocess_blocks = dict(metadata.postprocess_blocks)
+    card_envs = {
+        card_name: dict(values)
+        for card_name, values in metadata.card_envs
+    }
     package_id_by_nevra = {
         package: (name, arch)
         for package, name, arch in metadata.package_ids
@@ -1749,6 +1758,7 @@ LUDOS_BOOTSTRAP
                         card_name in card_file_cards,
                         card_name in build_file_blocks,
                         build_stage_names.get(card_name, ""),
+                        card_envs.get(card_name, {}),
                     )
                 )
 
@@ -1830,6 +1840,7 @@ def _postprocess_step(
     has_card_files: bool,
     has_build_files: bool,
     build_stage_name: str,
+    card_env: dict[str, str],
 ) -> str:
     mounts = []
     identifier = _identifier(block_name)
@@ -1854,6 +1865,7 @@ def _postprocess_step(
         )
     set_command = "" if _starts_with_set_command(postprocess) else "set -e\n"
     setup = _postprocess_file_setup(has_card_files, has_build_files)
+    postprocess = _substitute_variables(postprocess, card_env)
     return f"""#
 # Postprocess: {block_name}
 #
@@ -1875,6 +1887,10 @@ def _combined_postprocess_step(
 ) -> str:
     if not postprocess_blocks:
         return ""
+    card_envs = {
+        card_name: dict(values)
+        for card_name, values in metadata.card_envs
+    }
     mounts = []
     for card_name in metadata.card_order:
         identifier = _identifier(card_name)
@@ -1903,6 +1919,10 @@ def _combined_postprocess_step(
         postprocess = postprocess_blocks.get(card_name)
         if not postprocess:
             continue
+        postprocess = _substitute_variables(
+            postprocess,
+            card_envs.get(card_name, {}),
+        )
         identifier = _identifier(card_name)
         set_command = "" if _starts_with_set_command(postprocess) else "set -e\n"
         scripts.append(
