@@ -1570,6 +1570,12 @@ RUN --mount=type=bind,from={common_stage},source=/rpms,target=/rpms/common,ro /b
 # /run/ostree-booted changes the post scripts of a variety of packages
 mkdir -p /target/run
 install -m 0755 /dev/null /target/run/ostree-booted
+install -m 0755 /dev/null /target/usr/lib/kernel
+cat > /usr/lib/kernel/install.conf <<'EOF'
+# kernel-install will not try to run dracut and allows the image builder to
+# take over initramfs generation. This also tells tooling to keep one kernel.
+layout=ostree
+EOF
 {_dnf_install_script(metadata.releasever, bootstrap_paths, installroot="/target")}
 LUDOS_BOOTSTRAP
 """
