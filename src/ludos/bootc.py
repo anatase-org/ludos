@@ -24,6 +24,7 @@ from .rechunk.alg import main as rechunk_main
 DEFAULT_CACHE_DIR = Path("cache")
 DEFAULT_OSTREE_REF = "master"
 DEFAULT_OCI_WRITERS = 4
+OCI_VERSION_LABEL = "org.opencontainers.image.version"
 SOURCE_MOUNT = "/ludos/source"
 OSTREE_MOUNT = "/ludos/ostree"
 POSTPROCESS_MOUNT = "/ludos/postprocess.py"
@@ -91,12 +92,15 @@ def bootc_create(
         result_fn = work_dir / "results.txt"
 
         log(f"Creating bootc OSTree import for {image}")
-        ostree_import(
-            image,
-            cache_dir=cache_root,
-            orchestrator=image,
-            ostree_ref=DEFAULT_OSTREE_REF,
-        )
+        import_kwargs = {
+            "cache_dir": cache_root,
+            "orchestrator": image,
+            "ostree_ref": DEFAULT_OSTREE_REF,
+        }
+        ostree_version = dict(manifest.manifest_labels).get(OCI_VERSION_LABEL)
+        if ostree_version:
+            import_kwargs["ostree_version"] = ostree_version
+        ostree_import(image, **import_kwargs)
 
         log(f"Rechunking {image} using {chunks_path}")
         rechunk_main(
@@ -132,6 +136,7 @@ def ostree_import(
     orchestrator: str | None = None,
     ostree_ref: str = DEFAULT_OSTREE_REF,
     process: bool = True,
+    ostree_version: str | None = None,
 ) -> int:
     if not ref.strip():
         raise ConfigError("container ref must not be empty")
@@ -183,6 +188,11 @@ def ostree_import(
         [
             "--env",
             f"LUDOS_OSTREE_REF={ostree_ref}",
+            *(
+                ["--env", f"LUDOS_OSTREE_VERSION={ostree_version}"]
+                if ostree_version
+                else []
+            ),
             "--workdir",
             "/ludos",
             orchestrator,
@@ -195,6 +205,11 @@ def ostree_import(
                 POSTPROCESS_MOUNT,
                 "--progress-total-prefix",
                 PROGRESS_TOTAL_PREFIX,
+                *(
+                    ["--ostree-version", ostree_version]
+                    if ostree_version
+                    else []
+                ),
                 SOURCE_MOUNT,
                 OSTREE_MOUNT,
                 ostree_ref,
@@ -428,12 +443,17 @@ def _unprocessed_ostree_import_script() -> str:
             '  ostree --repo="$repo" init --mode=bare-user',
             '  ostree --repo="$repo" config set core.fsync false',
             "fi",
+            'set --',
+            'if [ -n "${LUDOS_OSTREE_VERSION:-}" ]; then',
+            '  set -- "--add-metadata-string=version=$LUDOS_OSTREE_VERSION"',
+            "fi",
             'approx_entries=$(find "$source" -mindepth 1 -printf ".\\n" | wc -l)',
             'approx_total=$((approx_entries * 2 + 1))',
             f'printf "{PROGRESS_TOTAL_PREFIX}%s\\n" "$approx_total" >&2',
             'commit=$(env -u G_MESSAGES_DEBUG ostree --repo="$repo" commit -v \\',
             '  -b "$LUDOS_OSTREE_REF" \\',
             '  --tree=dir="$source" \\',
+            '  "$@" \\',
             "  --bootable \\",
             '  --selinux-policy="$source" \\',
             "  --selinux-labeling-epoch=1)",

@@ -169,6 +169,62 @@ class TargetCardBuildTests(unittest.TestCase):
         self.assertEqual(Path(specs_hash.call_args.args[0]), self.scx_source)
         self.assertNotEqual(Path(specs_hash.call_args.args[0]), hhd_source)
 
+    def test_manifest_labels_expand_manifest_env(self) -> None:
+        self._write_build_manifest()
+        contents = self.manifest.read_text(encoding="utf-8")
+        self.manifest.write_text(
+            contents.replace(
+                "version: 1\n",
+                "version: 1\n"
+                "env:\n"
+                "  tag: $releasever.$version\n"
+                "labels:\n"
+                "  org.opencontainers.image.version: $tag\n"
+                "  org.opencontainers.image.title: Anatase\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        def resolve_packages(
+            _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
+        ):
+            resolved = tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+            for package, resolved_package in zip(packages, resolved):
+                package_id_by_nevra[resolved_package] = (package, "x86_64")
+            return resolved
+
+        with (
+            patch("ludos.build.shutil.which", side_effect=lambda command: command),
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._extract_image_paths"),
+            patch("ludos.build._apply_repo_priority"),
+            patch(
+                "ludos.build._card_specs_hash",
+                return_value=("scxhash", tuple()),
+            ),
+            patch("ludos.build._stage_card_specs", return_value=tuple()),
+            patch(
+                "ludos.build._resolve_staged_spec_builder_packages",
+                return_value=("spec-builddep",),
+            ),
+            patch("ludos.build._resolve_packages", side_effect=resolve_packages),
+        ):
+            metadata = _resolve_manifest_metadata(
+                self.manifest,
+                target_card="cards/base/scx",
+                cache_version="20260622",
+            )
+
+        self.assertIn(
+            ("org.opencontainers.image.version", "44.20260622"),
+            metadata.manifest_labels,
+        )
+        self.assertIn(
+            ("org.opencontainers.image.title", "Anatase"),
+            metadata.manifest_labels,
+        )
+
     def test_spec_hash_is_not_part_of_builder_image_hash(self) -> None:
         self._write_build_manifest()
 

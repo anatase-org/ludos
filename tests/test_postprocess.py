@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ludos import postprocess
 
@@ -161,6 +162,24 @@ class PostprocessTests(unittest.TestCase):
 
             self.assertEqual(etc_group, "root:x:0:\nwheel:x:10:\n")
             self.assertEqual(usr_group, "wheel:x:10:\nbin:x:1:\n")
+
+    def test_run_ostree_commit_adds_version_metadata(self) -> None:
+        with patch("ludos.postprocess.subprocess.run") as run:
+            run.return_value.returncode = 0
+            postprocess._run_ostree_commit(
+                Path("/repo"),
+                "master",
+                Path("/source"),
+                ["--tree=tar=/work/tree.tar"],
+                "44.20260622",
+            )
+
+        command = run.call_args.args[0]
+        self.assertIn("--add-metadata-string=version=44.20260622", command)
+        self.assertLess(
+            command.index("--add-metadata-string=version=44.20260622"),
+            command.index("--bootable"),
+        )
 
 
 if __name__ == "__main__":

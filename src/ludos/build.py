@@ -1014,6 +1014,11 @@ def _resolve_manifest_metadata(
         for package in block_packages
     )
 
+    manifest_labels = tuple(
+        (key, _substitute_variables(value, manifest_env))
+        for key, value in validation.manifest.labels.items()
+    )
+
     return ResolvedBuildMetadata(
         image=image,
         distro=distro,
@@ -1023,7 +1028,7 @@ def _resolve_manifest_metadata(
         local_prefix=local_prefix,
         orchestrator=orchestrator,
         output_image=output_image,
-        manifest_labels=tuple(validation.manifest.labels.items()),
+        manifest_labels=manifest_labels,
         manifest_env=tuple(sorted(manifest_env.items())),
         requested_packages=requested_packages,
         resolved_packages=resolved_packages,

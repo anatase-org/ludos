@@ -41,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         "--progress-total-prefix",
         default="__LUDOS_OSTREE_APPROX_TOTAL__ ",
     )
+    parser.add_argument("--ostree-version", default=None)
     args = parser.parse_args(argv)
 
     return import_processed_rootfs(
@@ -48,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         args.repo,
         args.ostree_ref,
         progress_total_prefix=args.progress_total_prefix,
+        ostree_version=args.ostree_version,
     )
 
 
@@ -57,6 +59,7 @@ def import_processed_rootfs(
     ostree_ref: str,
     *,
     progress_total_prefix: str,
+    ostree_version: str | None = None,
 ) -> int:
     source = source.resolve()
     repo = repo.resolve()
@@ -161,7 +164,7 @@ def import_processed_rootfs(
             file=sys.stderr,
             flush=True,
         )
-        result = _run_ostree_commit(repo, ostree_ref, source, tar_trees)
+        result = _run_ostree_commit(repo, ostree_ref, source, tar_trees, ostree_version)
         if result.returncode != 0:
             _kill_producers(producers)
         producer_status = _wait_for_producers(producers)
@@ -205,9 +208,13 @@ def _run_ostree_commit(
     ostree_ref: str,
     source: Path,
     tar_trees: list[str],
+    ostree_version: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("G_MESSAGES_DEBUG", None)
+    metadata_args = []
+    if ostree_version:
+        metadata_args.append(f"--add-metadata-string=version={ostree_version}")
     return subprocess.run(
         [
             "ostree",
@@ -218,6 +225,7 @@ def _run_ostree_commit(
             ostree_ref,
             "--tar-autocreate-parents",
             *tar_trees,
+            *metadata_args,
             "--bootable",
             f"--selinux-policy={source}",
             "--selinux-labeling-epoch=1",

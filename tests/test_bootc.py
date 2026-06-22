@@ -160,7 +160,10 @@ class BootcCommandTests(unittest.TestCase):
             metadata = (
                 SimpleNamespace(
                     root_dir=str(root),
-                    manifest_labels=(("org.opencontainers.image.title", "Anatase"),),
+                    manifest_labels=(
+                        ("org.opencontainers.image.title", "Anatase"),
+                        ("org.opencontainers.image.version", "44.20260622"),
+                    ),
                 ),
                 SimpleNamespace(root_dir=str(root), manifest_labels=()),
             )
@@ -236,6 +239,7 @@ class BootcCommandTests(unittest.TestCase):
                     cache_dir=(root / "cache").resolve(),
                     orchestrator="localhost/anatase:f44",
                     ostree_ref="master",
+                    ostree_version="44.20260622",
                 ),
                 call(
                     "localhost/other:f44",
@@ -257,7 +261,10 @@ class BootcCommandTests(unittest.TestCase):
                     result_fn=str(
                         (root / "cache" / "rechunk" / "anatase-f44" / "results.txt").resolve()
                     ),
-                    labels=["org.opencontainers.image.title=Anatase"],
+                    labels=[
+                        "org.opencontainers.image.title=Anatase",
+                        "org.opencontainers.image.version=44.20260622",
+                    ],
                     revision="a" * 40,
                     git_dir=str(root),
                     ostree_image="localhost/anatase:f44",
@@ -742,6 +749,55 @@ class BootcCommandTests(unittest.TestCase):
             ],
         )
 
+    def test_ostree_import_passes_ostree_version_to_postprocess(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache-root"
+            image_exists = subprocess.CompletedProcess(
+                ["podman", "image", "exists"], 0
+            )
+            inspect = subprocess.CompletedProcess(
+                ["podman", "image", "inspect"],
+                0,
+                stdout='{"RepoTags":["localhost/orchestrator:latest"]}\n',
+            )
+
+            with (
+                patch("ludos.bootc.shutil.which", return_value="podman"),
+                patch("ludos.bootc.subprocess.run") as run,
+                patch("ludos.bootc.log"),
+                patch(
+                    "ludos.bootc._run_ostree_import_command",
+                    return_value=(0, f"{'a' * 64}\n"),
+                ) as run_import,
+            ):
+                run.side_effect = [image_exists, image_exists, inspect]
+
+                result = ostree_import(
+                    "localhost/anatase:latest",
+                    cache_dir=cache_dir,
+                    orchestrator="orchestrator",
+                    ostree_ref="anatase",
+                    ostree_version="44.20260622",
+                )
+
+        self.assertEqual(result, 0)
+        command, _repo = run_import.call_args.args
+        self.assertIn("LUDOS_OSTREE_VERSION=44.20260622", command)
+        self.assertEqual(
+            command[-9:],
+            [
+                "python3",
+                "/ludos/postprocess.py",
+                "--progress-total-prefix",
+                "__LUDOS_OSTREE_APPROX_TOTAL__ ",
+                "--ostree-version",
+                "44.20260622",
+                "/ludos/source",
+                "/ludos/ostree",
+                "anatase",
+            ],
+        )
+
     def test_ostree_import_no_process_uses_raw_source_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "cache-root"
@@ -786,6 +842,45 @@ class BootcCommandTests(unittest.TestCase):
         script = command[-1]
         self.assertIn('--tree=dir="$source"', script)
         self.assertNotIn("--tar-autocreate-parents", script)
+
+    def test_ostree_import_no_process_passes_ostree_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache-root"
+            image_exists = subprocess.CompletedProcess(
+                ["podman", "image", "exists"], 0
+            )
+            inspect = subprocess.CompletedProcess(
+                ["podman", "image", "inspect"],
+                0,
+                stdout='{"RepoTags":["localhost/orchestrator:latest"]}\n',
+            )
+
+            with (
+                patch("ludos.bootc.shutil.which", return_value="podman"),
+                patch("ludos.bootc.subprocess.run") as run,
+                patch("ludos.bootc.log"),
+                patch(
+                    "ludos.bootc._run_ostree_import_command",
+                    return_value=(0, f"{'a' * 64}\n"),
+                ) as run_import,
+            ):
+                run.side_effect = [image_exists, image_exists, inspect]
+
+                result = ostree_import(
+                    "localhost/anatase:latest",
+                    cache_dir=cache_dir,
+                    orchestrator="orchestrator",
+                    ostree_ref="anatase",
+                    process=False,
+                    ostree_version="44.20260622",
+                )
+
+        self.assertEqual(result, 0)
+        command, _repo = run_import.call_args.args
+        self.assertIn("LUDOS_OSTREE_VERSION=44.20260622", command)
+        script = command[-1]
+        self.assertIn('set -- "--add-metadata-string=version=$LUDOS_OSTREE_VERSION"', script)
+        self.assertIn('"$@"', script)
 
     def test_short_digest_handles_repo_digest_and_image_id(self) -> None:
         self.assertEqual(
