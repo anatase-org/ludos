@@ -652,7 +652,12 @@ class BootcCommandTests(unittest.TestCase):
             image_exists = subprocess.CompletedProcess(
                 ["podman", "image", "exists"], 0
             )
-            inspect = subprocess.CompletedProcess(
+            source_inspect = subprocess.CompletedProcess(
+                ["podman", "image", "inspect"],
+                0,
+                stdout='{"RepoTags":["localhost/anatase:latest"],"Labels":{}}\n',
+            )
+            orchestrator_inspect = subprocess.CompletedProcess(
                 ["podman", "image", "inspect"],
                 0,
                 stdout=(
@@ -675,7 +680,12 @@ class BootcCommandTests(unittest.TestCase):
                     ),
                 ) as run_import,
             ):
-                run.side_effect = [image_exists, image_exists, inspect]
+                run.side_effect = [
+                    image_exists,
+                    image_exists,
+                    source_inspect,
+                    orchestrator_inspect,
+                ]
 
                 result = ostree_import(
                     "localhost/anatase:latest",
@@ -693,6 +703,19 @@ class BootcCommandTests(unittest.TestCase):
                     check=False,
                 ),
                 call(["podman", "image", "exists", "orchestrator"], check=False),
+                call(
+                    [
+                        "podman",
+                        "image",
+                        "inspect",
+                        "localhost/anatase:latest",
+                        "--format",
+                        "{{json .}}",
+                    ],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    text=True,
+                ),
                 call(
                     [
                         "podman",
@@ -749,6 +772,44 @@ class BootcCommandTests(unittest.TestCase):
             ],
         )
 
+    def test_ostree_import_reads_version_label_from_source_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache-root"
+            image_exists = subprocess.CompletedProcess(
+                ["podman", "image", "exists"], 0
+            )
+            inspect = subprocess.CompletedProcess(
+                ["podman", "image", "inspect"],
+                0,
+                stdout=(
+                    '{"RepoTags":["localhost/anatase:latest"],'
+                    '"Labels":{"org.opencontainers.image.version":"44.20260622"}}\n'
+                ),
+            )
+
+            with (
+                patch("ludos.bootc.shutil.which", return_value="podman"),
+                patch("ludos.bootc.subprocess.run") as run,
+                patch("ludos.bootc.log"),
+                patch(
+                    "ludos.bootc._run_ostree_import_command",
+                    return_value=(0, f"{'a' * 64}\n"),
+                ) as run_import,
+            ):
+                run.side_effect = [image_exists, inspect]
+
+                result = ostree_import(
+                    "localhost/anatase:latest",
+                    cache_dir=cache_dir,
+                    ostree_ref="anatase",
+                )
+
+        self.assertEqual(result, 0)
+        command, _repo = run_import.call_args.args
+        self.assertIn("LUDOS_OSTREE_VERSION=44.20260622", command)
+        self.assertIn("--ostree-version", command)
+        self.assertIn("44.20260622", command)
+
     def test_ostree_import_passes_ostree_version_to_postprocess(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "cache-root"
@@ -804,7 +865,12 @@ class BootcCommandTests(unittest.TestCase):
             image_exists = subprocess.CompletedProcess(
                 ["podman", "image", "exists"], 0
             )
-            inspect = subprocess.CompletedProcess(
+            source_inspect = subprocess.CompletedProcess(
+                ["podman", "image", "inspect"],
+                0,
+                stdout='{"RepoTags":["localhost/anatase:latest"],"Labels":{}}\n',
+            )
+            orchestrator_inspect = subprocess.CompletedProcess(
                 ["podman", "image", "inspect"],
                 0,
                 stdout=(
@@ -827,7 +893,12 @@ class BootcCommandTests(unittest.TestCase):
                     ),
                 ) as run_import,
             ):
-                run.side_effect = [image_exists, image_exists, inspect]
+                run.side_effect = [
+                    image_exists,
+                    image_exists,
+                    source_inspect,
+                    orchestrator_inspect,
+                ]
 
                 result = ostree_import(
                     "localhost/anatase:latest",

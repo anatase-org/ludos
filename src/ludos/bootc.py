@@ -155,7 +155,18 @@ def ostree_import(
     _require_image(podman, ref, "source image")
     if orchestrator != ref:
         _require_image(podman, orchestrator, "orchestrator image")
-    orchestrator_display_ref = _image_display_ref(podman, orchestrator)
+    source_info = None
+    if not ostree_version or orchestrator == ref:
+        source_info = _image_inspect(podman, ref)
+    if not ostree_version:
+        assert source_info is not None
+        ostree_version = _image_label(source_info, OCI_VERSION_LABEL)
+    if orchestrator == ref:
+        orchestrator_info = source_info
+        assert orchestrator_info is not None
+    else:
+        orchestrator_info = _image_inspect(podman, orchestrator)
+    orchestrator_display_ref = _image_display_ref(orchestrator_info)
 
     log(f"Importing {ref} into OSTree repo: {ostree_dir}")
     log(f"Using orchestrator image: {orchestrator} ({orchestrator_display_ref})")
@@ -591,14 +602,25 @@ def _require_image(podman: str, image: str, description: str) -> None:
         raise ConfigError(f"{description} is not available locally: {image}")
 
 
-def _image_display_ref(podman: str, image: str) -> str:
+def _image_inspect(podman: str, image: str) -> dict:
     result = subprocess.run(
         [podman, "image", "inspect", image, "--format", "{{json .}}"],
         check=True,
         stdout=subprocess.PIPE,
         text=True,
     )
-    data = json.loads(result.stdout)
+    return json.loads(result.stdout)
+
+
+def _image_label(data: dict, key: str) -> str | None:
+    labels = data.get("Labels") or {}
+    value = labels.get(key)
+    if value:
+        return str(value)
+    return None
+
+
+def _image_display_ref(data: dict) -> str:
     repo_tags = data.get("RepoTags") or ()
     if repo_tags:
         return str(repo_tags[0])
