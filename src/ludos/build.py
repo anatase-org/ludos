@@ -601,7 +601,7 @@ def _resolve_manifest_metadata(
         if card.build.strip() and card.specs:
             raise ConfigError(f"{card.source}: card cannot define both build and specs")
         card_env = _card_env(inherited_env, card.env)
-        inherited_env.update(card_env)
+        inherited_env.update({k: v for k, v in card_env.items() if k not in inherited_env})
         card_names.append(card_name)
         card_envs[card_name] = card_env
         # log(f"{card_name}: {card_env} {inherited_env}")
