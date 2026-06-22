@@ -203,6 +203,46 @@ class GitSpecSourceTests(unittest.TestCase):
 
         self.assertNotEqual(first_hash, second_hash)
 
+    def test_card_hash_expression_overrides_spec_hash(self) -> None:
+        self._write("hhd.spec", "Name: hhd\nVersion: 1\n")
+        self._commit("initial")
+        (self.card_dir / "extra.txt").write_text("first\n", encoding="utf-8")
+        spec = self._spec("hhd.spec", files=("hhd.spec",))
+
+        first_hash, _revisions = _card_specs_hash(
+            self.card_source,
+            (spec,),
+            {},
+            "",
+            self.cache_dir,
+            hash_expression="@hash(extra.txt)",
+            cache_only=False,
+        )
+        self._write("hhd.spec", "Name: hhd\nVersion: 2\n")
+        self._commit("selected update")
+        selected_hash, _revisions = _card_specs_hash(
+            self.card_source,
+            (spec,),
+            {},
+            "",
+            self.cache_dir,
+            hash_expression="@hash(extra.txt)",
+            cache_only=False,
+        )
+        (self.card_dir / "extra.txt").write_text("second\n", encoding="utf-8")
+        second_hash, _revisions = _card_specs_hash(
+            self.card_source,
+            (spec,),
+            {},
+            "",
+            self.cache_dir,
+            hash_expression="@hash(extra.txt)",
+            cache_only=False,
+        )
+
+        self.assertEqual(first_hash, selected_hash)
+        self.assertNotEqual(selected_hash, second_hash)
+
     def test_stage_clones_missing_cache_at_promised_revision(self) -> None:
         self._write("hhd.spec", "Name: hhd\nVersion: 1\n")
         self._commit("initial")

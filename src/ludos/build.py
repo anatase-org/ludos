@@ -648,6 +648,7 @@ def _resolve_manifest_metadata(
                 card_env,
                 card.prepare.rstrip(),
                 spec_source_cache_dir,
+                hash_expression=card.hash.strip(),
                 cache_only=cache_only,
             )
             card_spec_hashes[card_name] = card_spec_hash
@@ -661,6 +662,7 @@ def _resolve_manifest_metadata(
                     card_env,
                     card.prepare.rstrip(),
                     spec_source_cache_dir,
+                    hash_expression=card.hash.strip(),
                     cache_only=cache_only,
                 )
                 card_build_spec_hashes[card_name] = build_spec_hash
@@ -3807,8 +3809,22 @@ def _card_specs_hash(
     prepare_script: str,
     spec_source_cache_dir: Path,
     *,
+    hash_expression: str = "",
     cache_only: bool,
 ) -> tuple[str, tuple[tuple[str, str], ...]]:
+    if hash_expression:
+        return (
+            _cache_name(
+                _expand_expression(
+                    hash_expression,
+                    card_env,
+                    _card_base_dir(card_source),
+                ),
+                "spec card hash",
+            ),
+            tuple(),
+        )
+
     digest = hashlib.sha256()
     source_revisions = []
     digest.update(card_source.name.encode("utf-8"))
