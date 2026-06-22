@@ -1659,8 +1659,13 @@ LUDOS_BOOTSTRAP
         )
     else:
         installed_common = set(metadata.bootstrap_packages)
+        installed_built_package_ids = set()
         common_set = set(metadata.common_packages)
         for card_name in metadata.card_order:
+            card_built_package_ids = built_package_ids_by_block.get(card_name, set())
+            skipped_built_package_ids = (
+                installed_built_package_ids | card_built_package_ids
+            )
             mounts = [
                 (
                     "type=bind",
@@ -1676,14 +1681,14 @@ LUDOS_BOOTSTRAP
                 for package in card_resolutions.get(card_name, tuple())
                 if package in common_set and package not in installed_common
                 and _resolved_package_id(package_id_by_nevra, package)
-                not in all_built_package_ids
+                not in skipped_built_package_ids
             )
             installed_common.update(
                 package
                 for package in card_resolutions.get(card_name, tuple())
                 if package in common_set
                 and _resolved_package_id(package_id_by_nevra, package)
-                in all_built_package_ids
+                in skipped_built_package_ids
             )
             installed_common.update(common_needed)
             install_paths = _rpm_paths_for_packages("/rpms/common", common_needed)
@@ -1735,6 +1740,7 @@ LUDOS_BOOTSTRAP
 )}
 """
                 )
+            installed_built_package_ids.update(card_built_package_ids)
             if card_name in postprocess_blocks:
                 postprocess_steps.append(
                     _postprocess_step(
