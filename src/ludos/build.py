@@ -981,8 +981,16 @@ def _resolve_manifest_metadata(
     for block_name, block_packages in build_image_blocks:
         if block_name not in build_card_names:
             continue
-        if block_name in card_build_spec_hashes:
-            build_hash = card_build_spec_hashes[block_name]
+        build_specs = card_build_specs.get(block_name)
+        if (
+            build_specs is not None
+            and block_name in card_specs
+            and build_specs != card_specs[block_name]
+        ):
+            build_hash = (
+                f"partial-{_spec_selection_hash(build_specs)}-"
+                f"{card_build_spec_hashes[block_name]}"
+            )
         elif block_name in card_spec_hashes:
             build_hash = card_spec_hashes[block_name]
         else:
@@ -3811,6 +3819,19 @@ def _card_build_hash(
         ),
         f"{card_name} build hash",
     )
+
+
+def _spec_selection_hash(specs: tuple[SpecBuild, ...]) -> str:
+    digest = hashlib.sha256()
+    for spec in specs:
+        digest.update(spec.spec.encode("utf-8"))
+        digest.update(b"\0")
+        for key, packages in sorted(spec.packages.items()):
+            digest.update(key.encode("utf-8"))
+            digest.update(b"=")
+            digest.update(" ".join(packages).encode("utf-8"))
+            digest.update(b"\0")
+    return digest.hexdigest()[:HASH_LENGTH]
 
 
 def _card_specs_hash(
