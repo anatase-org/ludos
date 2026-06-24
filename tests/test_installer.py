@@ -443,8 +443,6 @@ class InstallerHelperTests(unittest.TestCase):
                 "ANATASE_ROOT",
                 "-z",
                 "zstd,3",
-                "-C",
-                "1048576",
                 "-E",
                 "ztailpacking,fragments",
                 "--workers=8",

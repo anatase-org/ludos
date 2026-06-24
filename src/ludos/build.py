@@ -81,6 +81,16 @@ class BuildImagePlan:
 
 
 @dataclass(frozen=True)
+class OciImagePlan:
+    block: str
+    name: str
+    image: str
+    digest: str
+    packages: tuple[str, ...]
+    declared_package_ids: tuple[tuple[str, str], ...] = tuple()
+
+
+@dataclass(frozen=True)
 class BuildImageOutputs:
     images_by_block: tuple[tuple[str, str], ...] = tuple()
     rpm_files_by_block: tuple[tuple[str, tuple[str, ...]], ...] = tuple()
@@ -109,6 +119,7 @@ class ResolvedBuildMetadata:
     package_ids: tuple[tuple[str, str, str], ...]
     package_images: tuple[PackageImagePlan, ...]
     build_images: tuple[BuildImagePlan, ...]
+    oci_images: tuple[OciImagePlan, ...]
     package_dir: str
     repo_dir: str
     cache_dir: str
@@ -169,6 +180,19 @@ class SpecSource:
     spec_relpath: Path
     revision: str = ""
     stage_prefix: Path = Path(".")
+
+
+@dataclass(frozen=True)
+class ImageInfo:
+    digest: str
+    labels: dict[str, str]
+
+
+@dataclass(frozen=True)
+class RpmImageEntry:
+    name: str
+    arch: str
+    filename: str
 
 
 def _split_target_card(value: str) -> tuple[str, str | None]:
@@ -562,10 +586,12 @@ def _resolve_manifest_metadata(
     card_hashes = {}
     card_spec_hashes = {}
     card_build_spec_hashes = {}
+    card_oci_package_ids = {}
     spec_source_revisions = {}
     card_envs = {}
     card_sources = {}
     card_prepare_scripts = {}
+    oci_image_plans = []
     postprocess_blocks = []
     bootstrap_card = validation.bootstrap
     if bootstrap_card is None:
@@ -579,6 +605,7 @@ def _resolve_manifest_metadata(
         )
     if (
         bootstrap_card.files
+        or bootstrap_card.oci
         or bootstrap_card.specs
         or bootstrap_card.build.strip()
         or bootstrap_card.postprocess.strip()
@@ -606,11 +633,41 @@ def _resolve_manifest_metadata(
         if card.build.strip() and card.specs:
             raise ConfigError(f"{card.source}: card cannot define both build and specs")
         card_env = _card_env(inherited_env, card.env)
-        inherited_env.update({k: v for k, v in card_env.items() if k not in inherited_env})
         card_names.append(card_name)
-        card_envs[card_name] = card_env
         # log(f"{card_name}: {card_env} {inherited_env}")
         card_sources[card_name] = card.source
+        for oci_input in card.oci:
+            oci_packages = _packages_for_arch(oci_input.packages, arch)
+            oci_image = f"localhost/{oci_input.oci}:{distro}"
+            log(f"Resolving OCI input for card {card_name}: {oci_image}")
+            oci_info = _inspect_oci_image(
+                podman,
+                oci_image,
+                source=card.source,
+            )
+            oci_package_ids = _package_request_ids(oci_packages, arch)
+            card_oci_package_ids.setdefault(card_name, set()).update(oci_package_ids)
+            oci_image_plans.append(
+                OciImagePlan(
+                    block=card_name,
+                    name=oci_input.oci,
+                    image=oci_image,
+                    digest=oci_info.digest,
+                    packages=oci_packages,
+                    declared_package_ids=oci_package_ids,
+                )
+            )
+            card_env.update(
+                _oci_env(
+                    dict(inherited_env, **card_env),
+                    oci_input.env,
+                    oci_info.labels,
+                    source=card.source,
+                    image=oci_image,
+                )
+            )
+        card_envs[card_name] = card_env
+        inherited_env.update({k: v for k, v in card_env.items() if k not in inherited_env})
         if card.prepare.strip():
             card_prepare_scripts[card_name] = card.prepare.rstrip()
         card_packages = list(_packages_for_arch(card.packages, arch))
@@ -854,15 +911,17 @@ def _resolve_manifest_metadata(
 
         resolved_package_list = list(bootstrap_resolved_packages)
         resolved_package_list.extend(common_packages)
+        active_oci_package_ids = set()
         for card_name, card_resolution in zip(card_names, card_resolutions):
+            active_oci_package_ids.update(card_oci_package_ids.get(card_name, set()))
             card_packages = []
             for package in card_resolution:
                 if package in bootstrap_package_set or package in common_package_set:
                     continue
-                if (
-                    _resolved_package_id(package_id_by_nevra, package)
-                    in locally_built_package_ids
-                ):
+                package_id = _resolved_package_id(package_id_by_nevra, package)
+                if package_id in locally_built_package_ids:
+                    continue
+                if package_id in active_oci_package_ids:
                     continue
                 card_packages.append(package)
             if not card_packages and card_name not in build_card_names:
@@ -1074,6 +1133,7 @@ def _resolve_manifest_metadata(
             )
             for block_name in build_images_by_block
         ),
+        oci_images=tuple(oci_image_plans),
         package_dir=str(package_dir),
         repo_dir=str(repo_dir),
         cache_dir=str(distro_cache_dir),
@@ -1471,6 +1531,9 @@ def _build_final_manifest_image(
     build_images_by_block = dict(build_outputs.images_by_block)
     build_rpm_files_by_block = dict(build_outputs.rpm_files_by_block)
     build_file_blocks = set(build_outputs.file_blocks)
+    oci_rpm_files_by_index, oci_file_indexes = _resolve_oci_output_metadata_for_build(
+        metadata
+    )
     package_blocks = tuple(
         (block_name, block_packages)
         for block_name, block_packages in metadata.package_blocks
@@ -1491,6 +1554,8 @@ def _build_final_manifest_image(
             build_rpm_files_by_block=build_rpm_files_by_block,
             card_file_cards=card_file_cards,
             build_file_blocks=build_file_blocks,
+            oci_rpm_files_by_index=oci_rpm_files_by_index,
+            oci_file_indexes=oci_file_indexes,
         ),
         encoding="utf-8",
     )
@@ -1532,6 +1597,38 @@ def _build_final_manifest_image(
     )
 
 
+def _resolve_oci_output_metadata_for_build(
+    metadata: ResolvedBuildMetadata,
+) -> tuple[dict[int, tuple[str, ...]], set[int]]:
+    if not metadata.oci_images:
+        return {}, set()
+
+    card_sources = {
+        card_name: Path(source)
+        for card_name, source in metadata.card_sources
+    }
+    rpm_files_by_index = {}
+    file_indexes = set()
+    for index, plan in enumerate(metadata.oci_images):
+        source = card_sources.get(plan.block, Path(plan.block))
+        log(f"Resolving OCI output metadata for card {plan.block}: {plan.image}")
+        oci_rpms, oci_has_files = _oci_output_metadata_in_image(
+            metadata.podman,
+            plan.image,
+        )
+        oci_rpm_files = _select_oci_rpm_files(
+            source,
+            plan.name,
+            plan.packages,
+            oci_rpms,
+            metadata.arch,
+        )
+        rpm_files_by_index[index] = oci_rpm_files
+        if oci_has_files:
+            file_indexes.add(index)
+    return rpm_files_by_index, file_indexes
+
+
 def _render_final_containerfile(
     metadata: ResolvedBuildMetadata,
     *,
@@ -1542,7 +1639,11 @@ def _render_final_containerfile(
     build_rpm_files_by_block: dict[str, tuple[str, ...]],
     card_file_cards: set[str],
     build_file_blocks: set[str],
+    oci_rpm_files_by_index: dict[int, tuple[str, ...]] | None = None,
+    oci_file_indexes: set[int] | None = None,
 ) -> str:
+    oci_rpm_files_by_index = oci_rpm_files_by_index or {}
+    oci_file_indexes = oci_file_indexes or set()
     package_stage_names = {
         block_name: f"cards_{_identifier(block_name)}"
         for block_name, _block_packages in package_blocks
@@ -1552,6 +1653,15 @@ def _render_final_containerfile(
         block_name: f"builds_{_identifier(block_name)}"
         for block_name in build_images_by_block
     }
+    oci_stage_names = {
+        index: f"oci_{_identifier(plan.block)}_{_identifier(plan.name)}_{index}"
+        for index, plan in enumerate(metadata.oci_images)
+    }
+    oci_images_by_block: dict[str, list[tuple[int, OciImagePlan, str]]] = {}
+    for index, plan in enumerate(metadata.oci_images):
+        oci_images_by_block.setdefault(plan.block, []).append(
+            (index, plan, oci_stage_names[index])
+        )
     stage_lines = "".join(
         f"FROM {package_images_by_block[block_name]} AS {package_stage_names[block_name]}\n"
         for block_name, _block_packages in package_blocks
@@ -1560,6 +1670,10 @@ def _render_final_containerfile(
     stage_lines += "".join(
         f"FROM {image} AS {build_stage_names[block_name]}\n"
         for block_name, image in build_images_by_block.items()
+    )
+    stage_lines += "".join(
+        f"FROM {plan.image} AS {oci_stage_names[index]}\n"
+        for index, plan in enumerate(metadata.oci_images)
     )
 
     label_lines = "".join(
@@ -1611,6 +1725,14 @@ LUDOS_BOOTSTRAP
     all_built_package_ids = set().union(
         *built_package_ids_by_block.values()
     ) if built_package_ids_by_block else set()
+    oci_package_ids_by_block: dict[str, set[tuple[str, str]]] = {}
+    for plan in metadata.oci_images:
+        oci_package_ids_by_block.setdefault(plan.block, set()).update(
+            plan.declared_package_ids
+        )
+    all_oci_package_ids = set().union(
+        *oci_package_ids_by_block.values()
+    ) if oci_package_ids_by_block else set()
     install_steps = []
     postprocess_steps = []
 
@@ -1622,6 +1744,8 @@ LUDOS_BOOTSTRAP
                 for package in metadata.common_packages
                 if _resolved_package_id(package_id_by_nevra, package)
                 not in all_built_package_ids
+                and _resolved_package_id(package_id_by_nevra, package)
+                not in all_oci_package_ids
             ),
         )
         mounts = [
@@ -1634,7 +1758,27 @@ LUDOS_BOOTSTRAP
             )
         ]
         build_images = []
+        cache_images = []
         for card_name in metadata.card_order:
+            for oci_index, oci_plan, oci_stage_name in oci_images_by_block.get(
+                card_name,
+                [],
+            ):
+                rpm_mount = f"/rpms/{_identifier(card_name)}-oci-{_identifier(oci_plan.name)}"
+                mounts.append(
+                    (
+                        "type=bind",
+                        f"from={oci_stage_name}",
+                        "source=/rpms",
+                        f"target={rpm_mount}",
+                        "ro",
+                    )
+                )
+                install_paths += tuple(
+                    f"{rpm_mount}/{rpm_file}"
+                    for rpm_file in oci_rpm_files_by_index.get(oci_index, tuple())
+                )
+                cache_images.append(f"{oci_plan.image}@{oci_plan.digest}")
             card_block_packages = card_packages.get(card_name, tuple())
             if card_block_packages and card_name in package_stage_names:
                 mounts.append(
@@ -1662,6 +1806,7 @@ LUDOS_BOOTSTRAP
                     )
                 )
                 build_images.append(build_images_by_block[card_name])
+                cache_images.append(build_images_by_block[card_name])
                 install_paths += tuple(
                     f"/rpms/{_identifier(card_name)}-build/{rpm_file}"
                     for rpm_file in build_rpm_files
@@ -1674,7 +1819,7 @@ LUDOS_BOOTSTRAP
                     _dnf_install_script(
                         metadata.releasever,
                         install_paths,
-                        cache_images=tuple(build_images),
+                        cache_images=tuple(cache_images or build_images),
                     ),
                 )
             )
@@ -1685,16 +1830,23 @@ LUDOS_BOOTSTRAP
                 card_file_cards,
                 build_file_blocks,
                 build_stage_names,
+                oci_images_by_block,
+                oci_file_indexes,
             )
         )
     else:
         installed_common = set(metadata.bootstrap_packages)
         installed_built_package_ids = set()
+        installed_oci_package_ids = set()
         common_set = set(metadata.common_packages)
         for card_name in metadata.card_order:
             card_built_package_ids = built_package_ids_by_block.get(card_name, set())
+            card_oci_package_ids = oci_package_ids_by_block.get(card_name, set())
             skipped_built_package_ids = (
-                installed_built_package_ids | card_built_package_ids
+                installed_built_package_ids
+                | card_built_package_ids
+                | installed_oci_package_ids
+                | card_oci_package_ids
             )
             mounts = [
                 (
@@ -1706,6 +1858,7 @@ LUDOS_BOOTSTRAP
                 )
             ]
             build_images = []
+            cache_images = []
             common_needed = tuple(
                 package
                 for package in card_resolutions.get(card_name, tuple())
@@ -1722,6 +1875,25 @@ LUDOS_BOOTSTRAP
             )
             installed_common.update(common_needed)
             install_paths = _rpm_paths_for_packages("/rpms/common", common_needed)
+            for oci_index, oci_plan, oci_stage_name in oci_images_by_block.get(
+                card_name,
+                [],
+            ):
+                rpm_mount = f"/rpms/{_identifier(card_name)}-oci-{_identifier(oci_plan.name)}"
+                mounts.append(
+                    (
+                        "type=bind",
+                        f"from={oci_stage_name}",
+                        "source=/rpms",
+                        f"target={rpm_mount}",
+                        "ro",
+                    )
+                )
+                install_paths += tuple(
+                    f"{rpm_mount}/{rpm_file}"
+                    for rpm_file in oci_rpm_files_by_index.get(oci_index, tuple())
+                )
+                cache_images.append(f"{oci_plan.image}@{oci_plan.digest}")
             card_block_packages = card_packages.get(card_name, tuple())
             if card_block_packages and card_name in package_stage_names:
                 mounts.append(
@@ -1749,6 +1921,7 @@ LUDOS_BOOTSTRAP
                     )
                 )
                 build_images.append(build_images_by_block[card_name])
+                cache_images.append(build_images_by_block[card_name])
                 install_paths += tuple(
                     f"/rpms/{_identifier(card_name)}-build/{rpm_file}"
                     for rpm_file in build_rpm_files
@@ -1765,12 +1938,13 @@ LUDOS_BOOTSTRAP
     _dnf_install_script(
         metadata.releasever,
         install_paths,
-        cache_images=tuple(build_images),
+        cache_images=tuple(cache_images or build_images),
     ),
 )}
 """
                 )
             installed_built_package_ids.update(card_built_package_ids)
+            installed_oci_package_ids.update(card_oci_package_ids)
             if card_name in postprocess_blocks:
                 postprocess_steps.append(
                     _postprocess_step(
@@ -1780,6 +1954,8 @@ LUDOS_BOOTSTRAP
                         card_name in build_file_blocks,
                         build_stage_names.get(card_name, ""),
                         card_envs.get(card_name, {}),
+                        oci_images_by_block.get(card_name, []),
+                        oci_file_indexes,
                     )
                 )
 
@@ -1840,7 +2016,13 @@ dnf5 -y \\
 
 
 def _mounted_image_cache_comments(images: tuple[str, ...]) -> str:
-    return "".join(f"# build-image: {_image_tag(image)}\n" for image in images)
+    return "".join(f"# build-image: {_image_cache_key(image)}\n" for image in images)
+
+
+def _image_cache_key(image: str) -> str:
+    if "@" in image:
+        return image.rsplit("@", 1)[-1]
+    return _image_tag(image)
 
 
 def _run_with_mounts(
@@ -1862,9 +2044,27 @@ def _postprocess_step(
     has_build_files: bool,
     build_stage_name: str,
     card_env: dict[str, str],
+    oci_images: list[tuple[int, OciImagePlan, str]] | None = None,
+    oci_file_indexes: set[int] | None = None,
 ) -> str:
     mounts = []
     identifier = _identifier(block_name)
+    oci_images = oci_images or []
+    oci_file_indexes = oci_file_indexes or set()
+    has_oci_files = False
+    for mount_index, (oci_index, _oci_plan, oci_stage_name) in enumerate(oci_images):
+        if oci_index not in oci_file_indexes:
+            continue
+        has_oci_files = True
+        mounts.append(
+            (
+                "type=bind",
+                f"from={oci_stage_name}",
+                "source=/files",
+                f"target=/ludos/oci-files/{mount_index}",
+                "ro",
+            )
+        )
     if has_card_files:
         mounts.append(
             (
@@ -1885,7 +2085,11 @@ def _postprocess_step(
             )
         )
     set_command = "" if _starts_with_set_command(postprocess) else "set -e\n"
-    setup = _postprocess_file_setup(has_card_files, has_build_files)
+    setup = _postprocess_file_setup(
+        has_card_files,
+        has_build_files,
+        has_oci_files,
+    )
     postprocess = _substitute_variables(postprocess, card_env)
     return f"""#
 # Postprocess: {block_name}
@@ -1905,6 +2109,8 @@ def _combined_postprocess_step(
     card_file_cards: set[str],
     build_file_blocks: set[str],
     build_stage_names: dict[str, str],
+    oci_images_by_block: dict[str, list[tuple[int, OciImagePlan, str]]],
+    oci_file_indexes: set[int],
 ) -> str:
     if not postprocess_blocks:
         return ""
@@ -1915,6 +2121,20 @@ def _combined_postprocess_step(
     mounts = []
     for card_name in metadata.card_order:
         identifier = _identifier(card_name)
+        for mount_index, (oci_index, _oci_plan, oci_stage_name) in enumerate(
+            oci_images_by_block.get(card_name, [])
+        ):
+            if oci_index not in oci_file_indexes:
+                continue
+            mounts.append(
+                (
+                    "type=bind",
+                    f"from={oci_stage_name}",
+                    "source=/files",
+                    f"target=/ludos/oci-files/{identifier}/{mount_index}",
+                    "ro",
+                )
+            )
         if card_name in card_file_cards:
             mounts.append(
                 (
@@ -1952,6 +2172,7 @@ def _combined_postprocess_step(
 #
 rm -rf /files
 mkdir -p /files
+for dir in /ludos/oci-files/{identifier}/*; do [ -d "$dir" ] && cp -a "$dir"/. /files/; done
 if [ -d /ludos/card-files/{identifier} ]; then cp -a /ludos/card-files/{identifier}/. /files/; fi
 if [ -d /ludos/build-files/{identifier} ]; then cp -a /ludos/build-files/{identifier}/. /files/; fi
 {set_command}{postprocess}
@@ -1965,10 +2186,18 @@ rm -rf /files
     ) if mounts else "RUN /bin/sh <<'LUDOS_POSTPROCESS'\n" + "\n".join(scripts) + "LUDOS_POSTPROCESS\n"
 
 
-def _postprocess_file_setup(has_card_files: bool, has_build_files: bool) -> str:
-    if not has_card_files and not has_build_files:
+def _postprocess_file_setup(
+    has_card_files: bool,
+    has_build_files: bool,
+    has_oci_files: bool = False,
+) -> str:
+    if not has_card_files and not has_build_files and not has_oci_files:
         return ""
     lines = ["rm -rf /files", "mkdir -p /files"]
+    if has_oci_files:
+        lines.append(
+            'for dir in /ludos/oci-files/*; do [ -d "$dir" ] && cp -a "$dir"/. /files/; done'
+        )
     if has_card_files:
         lines.append("cp -a /ludos/card-files/. /files/")
     if has_build_files:
@@ -2015,6 +2244,114 @@ fi
         elif line == "F\t1":
             has_files = True
     return tuple(rpm_files), has_files
+
+
+def _inspect_oci_image(podman: str, image: str, *, source: Path) -> ImageInfo:
+    if not _image_exists(podman, image):
+        raise ConfigError(f"{source}: OCI image is not cached: {image}")
+    result = subprocess.run(
+        [podman, "image", "inspect", image, "--format", "{{json .}}"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"{source}: failed to inspect OCI image: {image}") from exc
+    labels = data.get("Labels") or {}
+    if not isinstance(labels, dict):
+        labels = {}
+    digest = _image_digest(data)
+    if not digest:
+        raise ConfigError(f"{source}: OCI image has no inspectable digest: {image}")
+    return ImageInfo(
+        digest=digest,
+        labels={str(key): str(value) for key, value in labels.items()},
+    )
+
+
+def _image_digest(data: dict) -> str:
+    repo_digests = data.get("RepoDigests") or ()
+    for repo_digest in repo_digests:
+        digest = str(repo_digest).rsplit("@", 1)[-1]
+        if digest.startswith("sha256:"):
+            return digest
+    image_id = str(data.get("Id") or "")
+    if image_id.startswith("sha256:"):
+        return image_id
+    if image_id:
+        return f"sha256:{image_id}"
+    return ""
+
+
+def _oci_output_metadata_in_image(
+    podman: str,
+    image: str,
+) -> tuple[tuple[RpmImageEntry, ...], bool]:
+    script = r"""
+image=$1
+mount_path=$(podman image mount "$image")
+cleanup() { podman image unmount "$image" >/dev/null; }
+trap cleanup EXIT
+if [ -d "$mount_path/rpms" ]; then
+  find "$mount_path/rpms" -maxdepth 1 -type f -name "*.rpm" | sort | while read -r rpm_path; do
+    name=$(rpm -qp --queryformat '%{NAME}' "$rpm_path")
+    arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_path")
+    printf "R\t%s\t%s\t%s\n" "$name" "$arch" "${rpm_path##*/}"
+  done
+fi
+if [ -d "$mount_path/files" ] && [ -n "$(find "$mount_path/files" -type f -print -quit)" ]; then
+  printf "F\t1\n"
+else
+  printf "F\t0\n"
+fi
+"""
+    listing = subprocess.run(
+        [podman, "unshare", "/bin/sh", "-eu", "-c", script, "--", image],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    rpm_entries = []
+    has_files = False
+    for line in listing.stdout.splitlines():
+        if line.startswith("R\t"):
+            _prefix, name, arch, filename = line.split("\t", 3)
+            rpm_entries.append(RpmImageEntry(name=name, arch=arch, filename=filename))
+        elif line == "F\t1":
+            has_files = True
+    return tuple(rpm_entries), has_files
+
+
+def _select_oci_rpm_files(
+    source: Path,
+    oci_name: str,
+    packages: tuple[str, ...],
+    rpm_entries: tuple[RpmImageEntry, ...],
+    arch: str,
+) -> tuple[str, ...]:
+    selected = []
+    for package in packages:
+        matches = []
+        for package_id in _package_request_ids_one(package, arch):
+            matches.extend(
+                entry
+                for entry in rpm_entries
+                if (entry.name, entry.arch) == package_id
+            )
+        matches = list({entry.filename: entry for entry in matches}.values())
+        if not matches:
+            raise ConfigError(
+                f"{source}: OCI input '{oci_name}' does not contain listed package '{package}'"
+            )
+        if len(matches) > 1:
+            filenames = ", ".join(entry.filename for entry in matches)
+            raise ConfigError(
+                f"{source}: OCI input '{oci_name}' has ambiguous RPMs for '{package}': {filenames}"
+            )
+        selected.append(matches[0].filename)
+    return tuple(dict.fromkeys(selected))
 
 
 def _metadata_build_result(
@@ -4423,6 +4760,34 @@ def _card_env(
     for key, value in card_env.items():
         values[key] = _expand_expression(str(value), values, None)
     return {k: values[k] for k in ENV_ALWAYS_AVAILABLE + tuple(card_env) if k in values}
+
+
+def _oci_env(
+    variables: dict[str, str],
+    oci_env: dict[str, str | int],
+    labels: dict[str, str],
+    *,
+    source: Path,
+    image: str,
+) -> dict[str, str]:
+    values = dict(variables)
+
+    def replace_label(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key not in labels:
+            raise ConfigError(
+                f"{source}: OCI image {image} does not define label '{key}'"
+            )
+        return labels[key]
+
+    result = {}
+    for key, value in oci_env.items():
+        expanded = re.sub(r"\$\{label:([^}]+)\}", replace_label, str(value))
+        expanded = _substitute_variables(expanded, values)
+        result[key] = expanded
+        values[key] = expanded
+    return result
+
 
 def _expand_expression(
     value: str, variables: dict[str, str], base_dir: Path | None

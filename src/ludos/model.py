@@ -43,11 +43,19 @@ class SpecBuild:
 
 
 @dataclass(frozen=True)
+class OciInput:
+    oci: str
+    packages: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    env: dict[str, str | int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Card:
     version: int
     priority: int = 1
     env: dict[str, str | int] = field(default_factory=dict)
     packages: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    oci: tuple[OciInput, ...] = tuple()
     build_deps: tuple[str, ...] = tuple()
     specs: tuple[SpecBuild, ...] = tuple()
     repos: tuple["RepoRef", ...] = tuple()
@@ -61,11 +69,14 @@ class Card:
     @classmethod
     def from_file(cls, path: Path) -> "Card":
         data = _load_mapping(path)
+        packages = _packages_dict(data, "packages", path)
+        oci_packages, oci = _oci_inputs_tuple(data, path)
         return cls(
             version=_required_version(data, path),
             priority=_optional_int(data, "priority", path, default=1),
             env=_env_dict(data, path, include_default=False),
-            packages=_packages_dict(data, "packages", path),
+            packages=_merge_packages(packages, oci_packages),
+            oci=oci,
             build_deps=_string_tuple(data, "build-deps", path),
             specs=_spec_builds_tuple(data, "specs", path),
             repos=_repo_refs_tuple(data, "repos", path),
@@ -461,6 +472,56 @@ def _packages_dict(
             )
         result[arch] = tuple(packages)
     return result
+
+
+def _merge_packages(
+    left: dict[str, tuple[str, ...]],
+    right: dict[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    result = dict(left)
+    for arch, packages in right.items():
+        result[arch] = tuple(dict.fromkeys((*result.get(arch, tuple()), *packages)))
+    return result
+
+
+def _oci_inputs_tuple(
+    data: dict[str, Any],
+    path: Path,
+) -> tuple[dict[str, tuple[str, ...]], tuple[OciInput, ...]]:
+    value = data.get("oci")
+    if value is None:
+        return {}, tuple()
+    if not isinstance(value, list):
+        raise ConfigError(f"{path}: 'oci' must be a list of strings or mappings")
+
+    packages: list[str] = []
+    oci_inputs = []
+    for index, item in enumerate(value):
+        label = f"oci[{index}]"
+        if isinstance(item, str):
+            if not item.strip():
+                raise ConfigError(f"{path}: '{label}' must not be empty")
+            packages.append(item)
+            continue
+        if not isinstance(item, dict):
+            raise ConfigError(f"{path}: '{label}' must be a string or mapping")
+
+        allowed = {"oci", "packages", "env"}
+        for key in item:
+            if key not in allowed:
+                raise ConfigError(f"{path}: '{label}.{key}' is not supported")
+        oci_name = item.get("oci")
+        if not isinstance(oci_name, str) or not oci_name.strip():
+            raise ConfigError(f"{path}: '{label}.oci' must be a non-empty string")
+        oci_inputs.append(
+            OciInput(
+                oci=oci_name,
+                packages=_packages_dict(item, "packages", path, label),
+                env=_env_dict(item, path, include_default=False),
+            )
+        )
+
+    return {"*": tuple(packages)} if packages else {}, tuple(oci_inputs)
 
 
 def _spec_replace_dict(

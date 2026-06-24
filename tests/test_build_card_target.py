@@ -9,16 +9,19 @@ from unittest.mock import patch, sentinel
 from ludos.build import (
     BuildImageOutputs,
     BuildImagePlan,
+    ImageInfo,
+    OciImagePlan,
     PackageImagePlan,
     ResolvedBuildMetadata,
     build_manifest,
     _cleanup_dnf_workspaces,
     _build_final_manifest_image,
+    _inspect_oci_image,
     _render_final_containerfile,
     _resolve_manifest_metadata,
     _resolve_cache_key,
 )
-from ludos.model import ConfigError
+from ludos.model import Card, ConfigError
 
 
 class TargetCardBuildTests(unittest.TestCase):
@@ -137,6 +140,7 @@ class TargetCardBuildTests(unittest.TestCase):
             patch("ludos.build.shutil.which", side_effect=lambda command: command),
             patch("ludos.build._image_exists", return_value=True),
             patch("ludos.build._extract_image_paths"),
+            patch("ludos.build._apply_repo_priority"),
             patch(
                 "ludos.build._card_specs_hash",
                 return_value=("scxhash", tuple()),
@@ -242,6 +246,7 @@ class TargetCardBuildTests(unittest.TestCase):
                 patch("ludos.build.shutil.which", side_effect=lambda command: command),
                 patch("ludos.build._image_exists", return_value=True),
                 patch("ludos.build._extract_image_paths"),
+                patch("ludos.build._apply_repo_priority"),
                 patch(
                     "ludos.build._card_specs_hash",
                     return_value=(spec_hash, tuple()),
@@ -281,6 +286,7 @@ class TargetCardBuildTests(unittest.TestCase):
             patch("ludos.build.shutil.which", side_effect=lambda command: command),
             patch("ludos.build._image_exists", return_value=True),
             patch("ludos.build._extract_image_paths"),
+            patch("ludos.build._apply_repo_priority"),
             patch("ludos.build._stage_card_specs", return_value=tuple()) as stage,
             patch(
                 "ludos.build._resolve_staged_spec_builder_packages",
@@ -327,6 +333,7 @@ class TargetCardBuildTests(unittest.TestCase):
             patch("ludos.build.shutil.which", side_effect=lambda command: command),
             patch("ludos.build._image_exists", return_value=True),
             patch("ludos.build._extract_image_paths"),
+            patch("ludos.build._apply_repo_priority"),
             patch("ludos.build._stage_card_specs", return_value=tuple()),
             patch(
                 "ludos.build._resolve_staged_spec_builder_packages",
@@ -363,6 +370,7 @@ class TargetCardBuildTests(unittest.TestCase):
             patch("ludos.build.shutil.which", side_effect=lambda command: command),
             patch("ludos.build._image_exists", return_value=True),
             patch("ludos.build._extract_image_paths"),
+            patch("ludos.build._apply_repo_priority"),
             patch(
                 "ludos.build._card_specs_hash",
                 return_value=("scxhash", tuple()),
@@ -545,6 +553,267 @@ class TargetCardBuildTests(unittest.TestCase):
             _resolve_cache_key(second, ("repo:tag",)),
         )
 
+    def test_card_parses_oci_strings_as_packages_and_mappings_as_inputs(self) -> None:
+        card_path = self.root / "oci-card.yml"
+        card_path.write_text(
+            "\n".join(
+                (
+                    "version: 1",
+                    "packages:",
+                    "  - bash",
+                    "oci:",
+                    "  - efibootmgr",
+                    "  - oci: kernel",
+                    "    packages:",
+                    "      x86_64:",
+                    "        - kernel-core",
+                    "        - kernel-devel",
+                    "    env:",
+                    "      nvidia: ${label:org.anatase.kernel.nvidia}",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        card = Card.from_file(card_path)
+
+        self.assertEqual(card.packages["*"], ("bash", "efibootmgr"))
+        self.assertEqual(len(card.oci), 1)
+        self.assertEqual(card.oci[0].oci, "kernel")
+        self.assertEqual(
+            card.oci[0].packages["x86_64"],
+            ("kernel-core", "kernel-devel"),
+        )
+        self.assertEqual(
+            card.oci[0].env["nvidia"],
+            "${label:org.anatase.kernel.nvidia}",
+        )
+
+    def test_card_rejects_invalid_oci_shape(self) -> None:
+        card_path = self.root / "bad-oci-card.yml"
+        card_path.write_text("version: 1\noci: kernel\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ConfigError, "'oci' must be a list"):
+            Card.from_file(card_path)
+
+    def test_oci_label_env_is_inherited_by_later_cards(self) -> None:
+        self._write_oci_manifest()
+
+        def resolve_packages(
+            _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
+        ):
+            resolved = tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+            for package, resolved_package in zip(packages, resolved):
+                package_id_by_nevra[resolved_package] = (package, "x86_64")
+            return resolved
+
+        with (
+            patch("ludos.build.shutil.which", side_effect=lambda command: command),
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._extract_image_paths"),
+            patch("ludos.build._apply_repo_priority"),
+            patch(
+                "ludos.build._inspect_oci_image",
+                return_value=ImageInfo(
+                    digest="sha256:kernel111",
+                    labels={"org.anatase.kernel.nvidia": "580.95.05"},
+                ),
+            ),
+            patch("ludos.build._oci_output_metadata_in_image") as oci_metadata,
+            patch(
+                "ludos.build._card_specs_hash",
+                return_value=("nvidiaspechash", tuple()),
+            ),
+            patch("ludos.build._stage_card_specs", return_value=tuple()),
+            patch(
+                "ludos.build._resolve_staged_spec_builder_packages",
+                return_value=("spec-builddep",),
+            ),
+            patch("ludos.build._resolve_packages", side_effect=resolve_packages),
+        ):
+            metadata = _resolve_manifest_metadata(
+                self.manifest,
+                target_card="cards/drivers/nvidia/nvidia.yml",
+            )
+
+        card_envs = {name: dict(values) for name, values in metadata.card_envs}
+        self.assertEqual(card_envs["base-kernel"]["nvidia"], "580.95.05")
+        self.assertEqual(card_envs["drivers-nvidia"]["version"], "580.95.05")
+        self.assertEqual(metadata.oci_images[0].image, "localhost/kernel:f44-x86_64")
+        oci_metadata.assert_not_called()
+
+    def test_oci_digest_does_not_change_owning_build_image_hash(self) -> None:
+        self._write_oci_manifest(scx_uses_oci=True)
+
+        def resolve_packages(
+            _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
+        ):
+            resolved = tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+            for package, resolved_package in zip(packages, resolved):
+                package_id_by_nevra[resolved_package] = (package, "x86_64")
+            return resolved
+
+        build_images = []
+        oci_digests = []
+        for digest in ("sha256:first", "sha256:second"):
+            with (
+                patch("ludos.build.shutil.which", side_effect=lambda command: command),
+                patch("ludos.build._image_exists", return_value=True),
+                patch("ludos.build._extract_image_paths"),
+                patch("ludos.build._apply_repo_priority"),
+                patch(
+                    "ludos.build._inspect_oci_image",
+                    return_value=ImageInfo(digest=digest, labels={}),
+                ),
+                patch("ludos.build._oci_output_metadata_in_image") as oci_metadata,
+                patch("ludos.build._stage_card_specs", return_value=tuple()),
+                patch(
+                    "ludos.build._resolve_staged_spec_builder_packages",
+                    return_value=("spec-builddep",),
+                ),
+                patch("ludos.build._resolve_packages", side_effect=resolve_packages),
+            ):
+                metadata = _resolve_manifest_metadata(
+                    self.manifest,
+                    target_card="cards/base/scx",
+                )
+            build_images.append(metadata.build_images[0].image)
+            oci_digests.append(metadata.oci_images[0].digest)
+            oci_metadata.assert_not_called()
+
+        self.assertEqual(build_images[0], build_images[1])
+        self.assertEqual(oci_digests, ["sha256:first", "sha256:second"])
+
+    def test_missing_oci_label_is_rejected(self) -> None:
+        self._write_oci_manifest()
+
+        with (
+            patch("ludos.build.shutil.which", side_effect=lambda command: command),
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._extract_image_paths"),
+            patch("ludos.build._apply_repo_priority"),
+            patch(
+                "ludos.build._inspect_oci_image",
+                return_value=ImageInfo(digest="sha256:kernel111", labels={}),
+            ),
+            patch("ludos.build._oci_output_metadata_in_image") as oci_metadata,
+        ):
+            with self.assertRaisesRegex(ConfigError, "does not define label"):
+                _resolve_manifest_metadata(
+                    self.manifest,
+                    target_card="cards/drivers/nvidia/nvidia.yml",
+                )
+            oci_metadata.assert_not_called()
+
+    def test_missing_oci_image_is_rejected(self) -> None:
+        with patch("ludos.build._image_exists", return_value=False):
+            with self.assertRaisesRegex(ConfigError, "OCI image is not cached"):
+                _inspect_oci_image(
+                    "podman",
+                    "localhost/kernel:f44-x86_64",
+                    source=self.scx_source,
+                )
+
+    def test_final_build_rejects_missing_oci_package(self) -> None:
+        metadata = replace(
+            self._metadata(),
+            oci_images=(
+                OciImagePlan(
+                    block="base-scx",
+                    name="kernel",
+                    image="localhost/kernel:f44-x86_64",
+                    digest="sha256:kernel111",
+                    packages=("kernel-core",),
+                    declared_package_ids=(("kernel-core", "x86_64"),),
+                ),
+            ),
+        )
+        Path(metadata.build_dir).mkdir(parents=True)
+
+        with (
+            patch(
+                "ludos.build._oci_output_metadata_in_image",
+                return_value=(tuple(), False),
+            ),
+            patch("ludos.build._run_container_build") as container_build,
+        ):
+            with self.assertRaisesRegex(
+                ConfigError,
+                "does not contain listed package 'kernel-core'",
+            ):
+                _build_final_manifest_image(
+                    metadata,
+                    build_outputs=BuildImageOutputs(),
+                    mode="separated",
+                    cache_only=False,
+                )
+
+        container_build.assert_not_called()
+
+    def test_containerfile_mounts_only_selected_oci_rpms_and_files(self) -> None:
+        metadata = self._metadata()
+        bootstrap_packages = ("bash-0:1-1.fc44.x86_64",)
+        common_packages = ("kernel-core-0:1-1.fc44.x86_64",)
+        metadata = replace(
+            metadata,
+            bootstrap_packages=bootstrap_packages,
+            common_packages=common_packages,
+            card_resolutions=(
+                (
+                    "base-scx",
+                    (
+                        "kernel-core-0:1-1.fc44.x86_64",
+                        "jq-0:1-1.fc44.x86_64",
+                    ),
+                ),
+            ),
+            package_ids=(
+                ("kernel-core-0:1-1.fc44.x86_64", "kernel-core", "x86_64"),
+                ("jq-0:1-1.fc44.x86_64", "jq", "x86_64"),
+            ),
+            postprocess_blocks=(("base-scx", "touch /files/seen"),),
+            oci_images=(
+                OciImagePlan(
+                    block="base-scx",
+                    name="kernel",
+                    image="localhost/kernel:f44-x86_64",
+                    digest="sha256:kernel111",
+                    packages=("kernel-core",),
+                    declared_package_ids=(("kernel-core", "x86_64"),),
+                ),
+            ),
+        )
+        package_blocks = (
+            ("common", (*bootstrap_packages, *common_packages)),
+            *metadata.package_blocks,
+        )
+
+        containerfile = _render_final_containerfile(
+            metadata,
+            mode="separated",
+            package_blocks=package_blocks,
+            package_images_by_block={
+                "common": "localhost/cards:f44-x86_64-common-11111111",
+                "base-scx": "localhost/cards:f44-x86_64-base-scx-22222222",
+            },
+            build_images_by_block={},
+            build_rpm_files_by_block={},
+            card_file_cards=set(),
+            build_file_blocks=set(),
+            oci_rpm_files_by_index={
+                0: ("kernel-core-1-1.x86_64.rpm",),
+            },
+            oci_file_indexes={0},
+        )
+
+        self.assertIn("FROM localhost/kernel:f44-x86_64 AS oci_base_scx_kernel_0", containerfile)
+        self.assertIn("/rpms/base_scx-oci-kernel/kernel-core-1-1.x86_64.rpm", containerfile)
+        self.assertNotIn("/rpms/common/kernel-core-0:1-1.fc44.x86_64.rpm", containerfile)
+        self.assertNotIn("kernel-extra-1-1.x86_64.rpm", containerfile)
+        self.assertIn("from=oci_base_scx_kernel_0,source=/files,target=/ludos/oci-files/0,ro", containerfile)
+        self.assertIn("# build-image: sha256:kernel111", containerfile)
+
     def _metadata(
         self,
         *,
@@ -591,6 +860,7 @@ class TargetCardBuildTests(unittest.TestCase):
                 ),
             ),
             build_images=build_images,
+            oci_images=(),
             package_dir=str(cache / "packages"),
             repo_dir=str(cache / "repos"),
             cache_dir=str(cache),
@@ -710,6 +980,103 @@ class TargetCardBuildTests(unittest.TestCase):
                 "    packages:",
                 "      - hhd",
             ),
+        )
+
+    def _write_oci_manifest(self, *, scx_uses_oci: bool = False) -> None:
+        (self.root / "repos").mkdir()
+        (self.root / "repos" / "fedora.repo").write_text(
+            "[fedora]\nname=Fedora\nbaseurl=https://example.com\n",
+            encoding="utf-8",
+        )
+        cards = ["  - cards/base/kernel"]
+        if scx_uses_oci:
+            cards.append("  - cards/base/scx")
+        else:
+            cards.append("  - cards/drivers/nvidia/nvidia.yml")
+        self.manifest.write_text(
+            "\n".join(
+                (
+                    "version: 1",
+                    "releasever: '44'",
+                    "distro: f$releasever-$arch",
+                    "orchestrator: quay.io/fedora/fedora:$releasever",
+                    "bootstrap: cards/bootstrap.yml",
+                    "repos:",
+                    "  - repo: fedora",
+                    "    priority: 10",
+                    "cards:",
+                    *cards,
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        self._write_card(
+            self.root / "cards" / "bootstrap.yml",
+            (
+                "version: 1",
+                "packages:",
+                "  - bash",
+            ),
+        )
+        kernel_lines = [
+            "version: 1",
+            "oci:",
+            "  - oci: kernel",
+            "    packages:",
+            "      - kernel-core",
+        ]
+        if not scx_uses_oci:
+            kernel_lines.extend(
+                (
+                    "    env:",
+                    "      nvidia: ${label:org.anatase.kernel.nvidia}",
+                )
+            )
+        self._write_card(
+            self.root / "cards" / "base" / "kernel.yml",
+            tuple(kernel_lines),
+        )
+        if scx_uses_oci:
+            self._write_card(
+                self.scx_source,
+                (
+                    "version: 1",
+                    "oci:",
+                    "  - oci: kernel",
+                    "    packages:",
+                    "      - kernel-core",
+                    "build-deps:",
+                    "  - rpm-build",
+                    "specs:",
+                    "  - spec: scx.spec",
+                    "    packages:",
+                    "      - scx",
+                ),
+            )
+            (self.scx_source.parent / "scx.spec").write_text(
+                "Name: scx\nVersion: 1\n",
+                encoding="utf-8",
+            )
+            return
+        nvidia_source = self.root / "cards" / "drivers" / "nvidia" / "nvidia.yml"
+        self._write_card(
+            nvidia_source,
+            (
+                "version: 1",
+                "env:",
+                "  version: $nvidia",
+                "build-deps:",
+                "  - rpm-build",
+                "specs:",
+                "  - spec: nvidia-driver.spec",
+                "    packages:",
+                "      - nvidia-driver",
+            ),
+        )
+        (nvidia_source.parent / "nvidia-driver.spec").write_text(
+            "Name: nvidia-driver\nVersion: 1\n",
+            encoding="utf-8",
         )
 
     def _write_card(self, path: Path, lines: tuple[str, ...]) -> None:

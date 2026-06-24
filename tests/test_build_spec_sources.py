@@ -399,7 +399,7 @@ class GitSpecSourceTests(unittest.TestCase):
 
 
 class SpecBuildRequiresResolutionTests(unittest.TestCase):
-    def test_builddep_resolution_uses_no_best_and_keeps_direct_requires(self) -> None:
+    def test_builddep_resolution_keeps_direct_requires_from_partial_transaction(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace_dir = Path(temp_dir)
             spec_path = workspace_dir / "pkg.spec"
@@ -438,7 +438,7 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
                 )
 
         self.assertEqual(packages, ("cargo-0:1.94.1-1.fc44.x86_64",))
-        self.assertIn("--no-best", seen_commands[0])
+        self.assertNotIn("--no-best", seen_commands[0])
         self.assertEqual(seen_hash_inputs[0][0][0], "pkg.spec")
         self.assertEqual(len(seen_hash_inputs[0][0][1]), 64)
 
