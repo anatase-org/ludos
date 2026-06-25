@@ -302,8 +302,16 @@ def _copy_boot_assets(ctx: InstallerContext, container_id: str, run_ref: str) ->
             str(ctx.boot_assets / "initramfs.img"),
         ]
     )
-    shim, grub = _container_efi_assets(ctx, run_ref)
+    shim, mok_manager, grub = _container_efi_assets(ctx, run_ref)
     _run_host([ctx.podman, "cp", f"{container_id}:{shim}", str(ctx.boot_assets / "shimx64.efi")])
+    _run_host(
+        [
+            ctx.podman,
+            "cp",
+            f"{container_id}:{mok_manager}",
+            str(ctx.boot_assets / "mmx64.efi"),
+        ]
+    )
     _run_host([ctx.podman, "cp", f"{container_id}:{grub}", str(ctx.boot_assets / "grubx64.efi")])
     _copy_container_ludos_efi_assets(ctx, container_id, run_ref)
 
@@ -385,7 +393,7 @@ def _kernel_asset_script() -> str:
     )
 
 
-def _container_efi_assets(ctx: InstallerContext, run_ref: str) -> tuple[str, str]:
+def _container_efi_assets(ctx: InstallerContext, run_ref: str) -> tuple[str, str, str]:
     result = _run_host(
         [
             ctx.podman,
@@ -400,9 +408,9 @@ def _container_efi_assets(ctx: InstallerContext, run_ref: str) -> tuple[str, str
         capture=True,
     )
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(lines) != 2:
-        raise ConfigError("installer image did not report shim and GRUB EFI paths")
-    return lines[0], lines[1]
+    if len(lines) != 3:
+        raise ConfigError("installer image did not report shim, MokManager, and GRUB EFI paths")
+    return lines[0], lines[1], lines[2]
 
 
 def _efi_asset_script() -> str:
@@ -417,12 +425,17 @@ def _efi_asset_script() -> str:
             '  echo "installer image is missing shim EFI file; install shim-x64" >&2',
             "  exit 1",
             "fi",
+            'mok_manager=$(find $search_roots -type f -iname "mmx64*.efi" 2>/dev/null | sort | tail -n 1)',
+            'if [ -z "$mok_manager" ]; then',
+            '  echo "installer image is missing MokManager EFI file; install shim-x64" >&2',
+            "  exit 1",
+            "fi",
             'grub=$(find $search_roots -type f -iname "grubx64.efi" 2>/dev/null | sort | tail -n 1)',
             'if [ -z "$grub" ]; then',
             '  echo "installer image is missing grubx64.efi" >&2',
             "  exit 1",
             "fi",
-            'printf "%s\\n%s\\n" "$shim" "$grub"',
+            'printf "%s\\n%s\\n%s\\n" "$shim" "$mok_manager" "$grub"',
         ]
     )
 
@@ -552,6 +565,7 @@ def _create_efi_image(ctx: InstallerContext) -> None:
     shutil.copy2(kernel, efi_tree / "vmlinuz")
     shutil.copy2(initramfs, efi_tree / "initramfs.img")
     shutil.copy2(ctx.boot_assets / "shimx64.efi", efi_tree / "EFI/BOOT/BOOTX64.EFI")
+    shutil.copy2(ctx.boot_assets / "mmx64.efi", efi_tree / "EFI/BOOT/mmx64.efi")
     shutil.copy2(ctx.boot_assets / "grubx64.efi", efi_tree / "EFI/BOOT/grubx64.efi")
     (efi_tree / "EFI/BOOT/grub.cfg").write_text(
         _grub_config(ctx.iso_label, ctx.menuentry, platform="efi"),
@@ -753,6 +767,7 @@ def _copy_live_iso_payload(ctx: InstallerContext, iso_tree: Path) -> None:
     visible_efi = iso_tree / "EFI/BOOT"
     visible_efi.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ctx.boot_assets / "shimx64.efi", visible_efi / "BOOTX64.EFI")
+    shutil.copy2(ctx.boot_assets / "mmx64.efi", visible_efi / "mmx64.efi")
     shutil.copy2(ctx.boot_assets / "grubx64.efi", visible_efi / "grubx64.efi")
     (visible_efi / "grub.cfg").write_text(
         _grub_config(ctx.iso_label, ctx.menuentry, platform="efi"),

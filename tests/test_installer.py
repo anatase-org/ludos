@@ -358,8 +358,10 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn("/usr/lib/ostree-boot", script)
         self.assertIn('shimx64*.efi', script)
         self.assertIn("install shim-x64", script)
+        self.assertIn('mmx64*.efi', script)
+        self.assertIn("MokManager EFI file", script)
         self.assertIn('grubx64.efi', script)
-        self.assertIn('printf "%s\\n%s\\n" "$shim" "$grub"', script)
+        self.assertIn('printf "%s\\n%s\\n%s\\n" "$shim" "$mok_manager" "$grub"', script)
 
     def test_container_ludos_efi_asset_dir_checks_standard_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -461,7 +463,7 @@ class InstallerHelperTests(unittest.TestCase):
 
             self.assertEqual(ctx.iso_label, "ANATASE_ISO")
             self.assertEqual(ctx.rootfs_label, "ANATASE_ROOT")
-            self.assertEqual(ctx.efi_label, "ANATASE_MOK")
+            self.assertEqual(ctx.efi_label, "ANATASE_KEY")
             self.assertEqual(ctx.menuentry, "Anatase Installer")
 
     def test_grub_config_accepts_named_menuentry(self) -> None:
@@ -497,8 +499,8 @@ class InstallerHelperTests(unittest.TestCase):
             installer=manifest.installer,
         )
 
-        self.assertEqual(_fat_label_for_manifest(manifest, "MOK"), "ANATASE_MOK")
-        self.assertEqual(_fat_label_for_manifest(long_manifest, "MOK"), "ANATASE_MOK")
+        self.assertEqual(_fat_label_for_manifest(manifest, "KEY"), "ANATASE_KEY")
+        self.assertEqual(_fat_label_for_manifest(long_manifest, "KEY"), "ANATASE_KEY")
 
     def test_mkfs_erofs_tar_command_reads_tar_from_stdin(self) -> None:
         self.assertEqual(
@@ -595,6 +597,7 @@ class InstallerHelperTests(unittest.TestCase):
             ctx.efi_img.write_text("efi", encoding="utf-8")
             ctx.boot_assets.mkdir()
             (ctx.boot_assets / "shimx64.efi").write_text("shim", encoding="utf-8")
+            (ctx.boot_assets / "mmx64.efi").write_text("mok", encoding="utf-8")
             (ctx.boot_assets / "grubx64.efi").write_text("grub", encoding="utf-8")
             (ctx.boot_assets / LUDOS_EFI_BOOT_ASSETS).mkdir()
             (ctx.boot_assets / LUDOS_EFI_BOOT_ASSETS / "anatase.der").write_text(
@@ -614,6 +617,7 @@ class InstallerHelperTests(unittest.TestCase):
             self.assertEqual((iso_tree / LIVE_ROOT_IMAGE).read_text(encoding="utf-8"), "erofs")
             self.assertEqual((iso_tree / EFI_BOOT_IMAGE).read_text(encoding="utf-8"), "efi")
             self.assertEqual((iso_tree / "EFI/BOOT/BOOTX64.EFI").read_text(encoding="utf-8"), "shim")
+            self.assertEqual((iso_tree / "EFI/BOOT/mmx64.efi").read_text(encoding="utf-8"), "mok")
             self.assertEqual((iso_tree / "EFI/BOOT/grubx64.efi").read_text(encoding="utf-8"), "grub")
             self.assertEqual((iso_tree / "anatase.der").read_text(encoding="utf-8"), "cert")
             self.assertIn(
