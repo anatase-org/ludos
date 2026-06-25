@@ -22,7 +22,7 @@ from .rechunk.alg import main as rechunk_main
 
 
 DEFAULT_CACHE_DIR = Path("cache")
-DEFAULT_OSTREE_REF = "master"
+DEFAULT_OSTREE_REF = "os"
 DEFAULT_OCI_WRITERS = 4
 OCI_VERSION_LABEL = "org.opencontainers.image.version"
 SOURCE_MOUNT = "/ludos/source"
