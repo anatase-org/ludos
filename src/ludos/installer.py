@@ -16,6 +16,7 @@ from .model import ConfigError, InstallerConfig, Manifest
 
 
 DEFAULT_LABEL_BASE = "LUDOS"
+FAT_LABEL_MAX = 11
 CONTAINER_WORKDIR = "/ludos/installer"
 EROFS_COMPRESSION = "zstd,3"
 EROFS_FEATURES = "ztailpacking,fragments"
@@ -23,6 +24,8 @@ BIOS_GRUB_DIR = Path("boot/grub/i386-pc")
 BIOS_ELTORITO_IMAGE = BIOS_GRUB_DIR / "eltorito.img"
 EFI_BOOT_IMAGE = Path("images/efiboot.img")
 LIVE_ROOT_IMAGE = Path("LiveOS/squashfs.img")
+LUDOS_EFI_ASSET_DIR = Path("/usr/lib/ludos/efi")
+LUDOS_EFI_BOOT_ASSETS = Path("ludos-efi")
 BIOS_GRUB_MODULES = (
     "biosdisk",
     "iso9660",
@@ -90,6 +93,10 @@ class InstallerContext:
     @property
     def rootfs_label(self) -> str:
         return _label_for_manifest(self.manifest, "ROOT")
+
+    @property
+    def efi_label(self) -> str:
+        return _fat_label_for_manifest(self.manifest, "KEY")
 
     @property
     def menuentry(self) -> str:
@@ -298,6 +305,46 @@ def _copy_boot_assets(ctx: InstallerContext, container_id: str, run_ref: str) ->
     shim, grub = _container_efi_assets(ctx, run_ref)
     _run_host([ctx.podman, "cp", f"{container_id}:{shim}", str(ctx.boot_assets / "shimx64.efi")])
     _run_host([ctx.podman, "cp", f"{container_id}:{grub}", str(ctx.boot_assets / "grubx64.efi")])
+    _copy_container_ludos_efi_assets(ctx, container_id, run_ref)
+
+
+def _copy_container_ludos_efi_assets(
+    ctx: InstallerContext,
+    container_id: str,
+    run_ref: str,
+) -> None:
+    payload = ctx.boot_assets / LUDOS_EFI_BOOT_ASSETS
+    if payload.exists():
+        shutil.rmtree(payload)
+    if not _container_ludos_efi_asset_dir(ctx, run_ref):
+        return
+    log(f"Copying optional EFI payload from {LUDOS_EFI_ASSET_DIR}")
+    payload.mkdir(parents=True)
+    _run_host(
+        [
+            ctx.podman,
+            "cp",
+            f"{container_id}:{LUDOS_EFI_ASSET_DIR}/.",
+            str(payload),
+        ]
+    )
+
+
+def _container_ludos_efi_asset_dir(ctx: InstallerContext, run_ref: str) -> bool:
+    result = _run_host(
+        [
+            ctx.podman,
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/sh",
+            run_ref,
+            "-ceu",
+            f"test -d {shlex.quote(str(LUDOS_EFI_ASSET_DIR))}",
+        ],
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def _container_kernel_assets(ctx: InstallerContext, run_ref: str) -> tuple[str, str]:
@@ -501,6 +548,7 @@ def _create_efi_image(ctx: InstallerContext) -> None:
 
     kernel, initramfs = _kernel_and_initramfs(ctx.boot_assets)
     log(f"Adding UEFI kernel payload: {kernel.parent.name}")
+    _copy_ludos_efi_payload(ctx.boot_assets, efi_tree)
     shutil.copy2(kernel, efi_tree / "vmlinuz")
     shutil.copy2(initramfs, efi_tree / "initramfs.img")
     shutil.copy2(ctx.boot_assets / "shimx64.efi", efi_tree / "EFI/BOOT/BOOTX64.EFI")
@@ -512,7 +560,17 @@ def _create_efi_image(ctx: InstallerContext) -> None:
 
     size_kib = _efi_image_size_kib(efi_tree)
     log(f"Formatting EFI system partition image: {ctx.efi_img}")
-    _run(ctx, ["mkfs.vfat", "-C", str(_tool_path(ctx, ctx.efi_img)), str(size_kib)])
+    _run(
+        ctx,
+        [
+            "mkfs.vfat",
+            "-n",
+            ctx.efi_label,
+            "-C",
+            str(_tool_path(ctx, ctx.efi_img)),
+            str(size_kib),
+        ],
+    )
     _run(ctx, ["mmd", "-i", str(_tool_path(ctx, ctx.efi_img)), "::/EFI", "::/EFI/BOOT"])
     _run(
         ctx,
@@ -606,6 +664,16 @@ def _label_for_manifest(manifest: Manifest, suffix: str) -> str:
     return f"{_label_base(manifest.name)}_{suffix}"
 
 
+def _fat_label_for_manifest(manifest: Manifest, suffix: str) -> str:
+    suffix = _label_base(suffix)
+    separator = "_" if suffix else ""
+    base_len = FAT_LABEL_MAX - len(separator) - len(suffix)
+    if base_len < 1:
+        raise ConfigError(f"FAT label suffix is too long: {suffix}")
+    base = _label_base(manifest.name)[:base_len].rstrip("_") or DEFAULT_LABEL_BASE[:base_len]
+    return f"{base}{separator}{suffix}"
+
+
 def _label_base(name: str) -> str:
     value = name.strip() or DEFAULT_LABEL_BASE
     value = value.upper()
@@ -672,6 +740,8 @@ def _create_iso(ctx: InstallerContext) -> None:
 
 
 def _copy_live_iso_payload(ctx: InstallerContext, iso_tree: Path) -> None:
+    _copy_ludos_efi_payload(ctx.boot_assets, iso_tree)
+
     live_root = iso_tree / LIVE_ROOT_IMAGE
     live_root.parent.mkdir(parents=True)
     shutil.copy2(ctx.root_erofs, live_root)
@@ -681,13 +751,19 @@ def _copy_live_iso_payload(ctx: InstallerContext, iso_tree: Path) -> None:
     shutil.copy2(ctx.efi_img, efi_boot)
 
     visible_efi = iso_tree / "EFI/BOOT"
-    visible_efi.mkdir(parents=True)
+    visible_efi.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ctx.boot_assets / "shimx64.efi", visible_efi / "BOOTX64.EFI")
     shutil.copy2(ctx.boot_assets / "grubx64.efi", visible_efi / "grubx64.efi")
     (visible_efi / "grub.cfg").write_text(
         _grub_config(ctx.iso_label, ctx.menuentry, platform="efi"),
         encoding="utf-8",
     )
+
+
+def _copy_ludos_efi_payload(boot_assets: Path, efi_root: Path) -> None:
+    payload = boot_assets / LUDOS_EFI_BOOT_ASSETS
+    if payload.is_dir():
+        shutil.copytree(payload, efi_root, dirs_exist_ok=True)
 
 
 def _create_bios_boot_image(ctx: InstallerContext, iso_tree: Path) -> Path:

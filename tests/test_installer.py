@@ -12,12 +12,16 @@ from ludos.installer import (
     BIOS_ELTORITO_IMAGE,
     CONTAINER_WORKDIR,
     EFI_BOOT_IMAGE,
+    LUDOS_EFI_ASSET_DIR,
+    LUDOS_EFI_BOOT_ASSETS,
     InstallerContext,
     LIVE_ROOT_IMAGE,
     bootc_installer,
     _build_installer_image,
+    _container_ludos_efi_asset_dir,
     _copy_installer_files,
     _copy_live_iso_payload,
+    _copy_ludos_efi_payload,
     _efi_asset_script,
     _efi_image_size_kib,
     _grub_config,
@@ -26,6 +30,7 @@ from ludos.installer import (
     _installer_image_ref,
     _installer_latest_image_ref,
     _installer_build_script,
+    _fat_label_for_manifest,
     _label_base,
     _container_name,
     _erofs_profile,
@@ -356,6 +361,23 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn('grubx64.efi', script)
         self.assertIn('printf "%s\\n%s\\n" "$shim" "$grub"', script)
 
+    def test_container_ludos_efi_asset_dir_checks_standard_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _context(Path(tmp))
+
+            with patch(
+                "ludos.installer._run_host",
+                return_value=subprocess.CompletedProcess(["podman"], 0),
+            ) as run:
+                self.assertTrue(_container_ludos_efi_asset_dir(ctx, "installer:image"))
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[:5], ["podman", "run", "--rm", "--entrypoint", "/bin/sh"])
+        self.assertIn("installer:image", command)
+        self.assertIn(f"test -d {LUDOS_EFI_ASSET_DIR}", command)
+        self.assertFalse(run.call_args.kwargs["check"])
+
     def test_kernel_and_initramfs_use_copied_boot_assets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             boot_assets = Path(tmp)
@@ -365,6 +387,31 @@ class InstallerHelperTests(unittest.TestCase):
             self.assertEqual(
                 _kernel_and_initramfs(boot_assets),
                 (boot_assets / "vmlinuz", boot_assets / "initramfs.img"),
+            )
+
+    def test_copy_ludos_efi_payload_merges_payload_into_efi_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            boot_assets = root / "boot-assets"
+            payload = boot_assets / LUDOS_EFI_BOOT_ASSETS
+            payload.mkdir(parents=True)
+            (payload / "anatase.der").write_text("cert", encoding="utf-8")
+            (payload / "EFI/anatase").mkdir(parents=True)
+            (payload / "EFI/anatase/tool.efi").write_text("tool", encoding="utf-8")
+            efi_root = root / "efi-tree"
+            (efi_root / "EFI/BOOT").mkdir(parents=True)
+            (efi_root / "EFI/BOOT/BOOTX64.EFI").write_text("shim", encoding="utf-8")
+
+            _copy_ludos_efi_payload(boot_assets, efi_root)
+
+            self.assertEqual((efi_root / "anatase.der").read_text(encoding="utf-8"), "cert")
+            self.assertEqual(
+                (efi_root / "EFI/anatase/tool.efi").read_text(encoding="utf-8"),
+                "tool",
+            )
+            self.assertEqual(
+                (efi_root / "EFI/BOOT/BOOTX64.EFI").read_text(encoding="utf-8"),
+                "shim",
             )
 
     def test_tool_command_uses_orchestrator_not_payload_ref(self) -> None:
@@ -414,6 +461,7 @@ class InstallerHelperTests(unittest.TestCase):
 
             self.assertEqual(ctx.iso_label, "ANATASE_ISO")
             self.assertEqual(ctx.rootfs_label, "ANATASE_ROOT")
+            self.assertEqual(ctx.efi_label, "ANATASE_MOK")
             self.assertEqual(ctx.menuentry, "Anatase Installer")
 
     def test_grub_config_accepts_named_menuentry(self) -> None:
@@ -433,6 +481,24 @@ class InstallerHelperTests(unittest.TestCase):
     def test_label_base_sanitizes_manifest_name(self) -> None:
         self.assertEqual(_label_base("My OS"), "MY_OS")
         self.assertEqual(_label_base(" My++OS "), "MY_OS")
+
+    def test_fat_label_for_manifest_fits_vfat_limit(self) -> None:
+        manifest = _manifest()
+        long_manifest = Manifest(
+            version=manifest.version,
+            env=manifest.env,
+            releasever=manifest.releasever,
+            distro=manifest.distro,
+            orchestrator=manifest.orchestrator,
+            bootstrap=manifest.bootstrap,
+            repos=manifest.repos,
+            cards=manifest.cards,
+            name="Anatase Workstation",
+            installer=manifest.installer,
+        )
+
+        self.assertEqual(_fat_label_for_manifest(manifest, "MOK"), "ANATASE_MOK")
+        self.assertEqual(_fat_label_for_manifest(long_manifest, "MOK"), "ANATASE_MOK")
 
     def test_mkfs_erofs_tar_command_reads_tar_from_stdin(self) -> None:
         self.assertEqual(
@@ -530,6 +596,16 @@ class InstallerHelperTests(unittest.TestCase):
             ctx.boot_assets.mkdir()
             (ctx.boot_assets / "shimx64.efi").write_text("shim", encoding="utf-8")
             (ctx.boot_assets / "grubx64.efi").write_text("grub", encoding="utf-8")
+            (ctx.boot_assets / LUDOS_EFI_BOOT_ASSETS).mkdir()
+            (ctx.boot_assets / LUDOS_EFI_BOOT_ASSETS / "anatase.der").write_text(
+                "cert",
+                encoding="utf-8",
+            )
+            (ctx.boot_assets / LUDOS_EFI_BOOT_ASSETS / "EFI/BOOT").mkdir(parents=True)
+            (ctx.boot_assets / LUDOS_EFI_BOOT_ASSETS / "EFI/BOOT/grubx64.efi").write_text(
+                "custom",
+                encoding="utf-8",
+            )
             iso_tree = ctx.output_dir / "iso-tree"
             iso_tree.mkdir()
 
@@ -539,6 +615,7 @@ class InstallerHelperTests(unittest.TestCase):
             self.assertEqual((iso_tree / EFI_BOOT_IMAGE).read_text(encoding="utf-8"), "efi")
             self.assertEqual((iso_tree / "EFI/BOOT/BOOTX64.EFI").read_text(encoding="utf-8"), "shim")
             self.assertEqual((iso_tree / "EFI/BOOT/grubx64.efi").read_text(encoding="utf-8"), "grub")
+            self.assertEqual((iso_tree / "anatase.der").read_text(encoding="utf-8"), "cert")
             self.assertIn(
                 "root=live:CDLABEL=ANATASE_ISO",
                 (iso_tree / "EFI/BOOT/grub.cfg").read_text(encoding="utf-8"),
