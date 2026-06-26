@@ -188,13 +188,6 @@ class ImageInfo:
     labels: dict[str, str]
 
 
-@dataclass(frozen=True)
-class RpmImageEntry:
-    name: str
-    arch: str
-    filename: str
-
-
 def _split_target_card(value: str) -> tuple[str, str | None]:
     card_text, separator, spec = value.rpartition(":")
     if not separator:
@@ -1347,7 +1340,7 @@ def build_build_images(
             if _image_exists(manifest.podman, plan.image):
                 log(f"Reusing build output image: {plan.image}")
                 images_by_block[plan.block] = plan.image
-                rpm_files, has_files = _build_output_metadata_in_image(
+                rpm_files, has_files = _output_metadata_in_image(
                     manifest.podman, plan.image
                 )
                 rpm_files_by_block[plan.block] = rpm_files
@@ -1423,7 +1416,7 @@ def build_build_images(
                 files_dir=build_output.files_dir,
             )
             images_by_block[plan.block] = plan.image
-            rpm_files, has_files = _build_output_metadata_in_image(
+            rpm_files, has_files = _output_metadata_in_image(
                 manifest.podman, plan.image
             )
             rpm_files_by_block[plan.block] = rpm_files
@@ -1612,7 +1605,7 @@ def _resolve_oci_output_metadata_for_build(
     for index, plan in enumerate(metadata.oci_images):
         source = card_sources.get(plan.block, Path(plan.block))
         log(f"Resolving OCI output metadata for card {plan.block}: {plan.image}")
-        oci_rpms, oci_has_files = _oci_output_metadata_in_image(
+        oci_rpms, oci_has_files = _output_metadata_in_image(
             metadata.podman,
             plan.image,
         )
@@ -2212,7 +2205,7 @@ def _rpm_paths_for_packages(mount_dir: str, packages: tuple[str, ...]) -> tuple[
     )
 
 
-def _build_output_metadata_in_image(
+def _output_metadata_in_image(
     podman: str,
     image: str,
 ) -> tuple[tuple[str, ...], bool]:
@@ -2285,73 +2278,52 @@ def _image_digest(data: dict) -> str:
     return ""
 
 
-def _oci_output_metadata_in_image(
-    podman: str,
-    image: str,
-) -> tuple[tuple[RpmImageEntry, ...], bool]:
-    script = r"""
-image=$1
-mount_path=$(podman image mount "$image")
-cleanup() { podman image unmount "$image" >/dev/null; }
-trap cleanup EXIT
-if [ -d "$mount_path/rpms" ]; then
-  find "$mount_path/rpms" -maxdepth 1 -type f -name "*.rpm" | sort | while read -r rpm_path; do
-    name=$(rpm -qp --queryformat '%{NAME}' "$rpm_path")
-    arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_path")
-    printf "R\t%s\t%s\t%s\n" "$name" "$arch" "${rpm_path##*/}"
-  done
-fi
-if [ -d "$mount_path/files" ] && [ -n "$(find "$mount_path/files" -type f -print -quit)" ]; then
-  printf "F\t1\n"
-else
-  printf "F\t0\n"
-fi
-"""
-    listing = subprocess.run(
-        [podman, "unshare", "/bin/sh", "-eu", "-c", script, "--", image],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    rpm_entries = []
-    has_files = False
-    for line in listing.stdout.splitlines():
-        if line.startswith("R\t"):
-            _prefix, name, arch, filename = line.split("\t", 3)
-            rpm_entries.append(RpmImageEntry(name=name, arch=arch, filename=filename))
-        elif line == "F\t1":
-            has_files = True
-    return tuple(rpm_entries), has_files
-
-
 def _select_oci_rpm_files(
     source: Path,
     oci_name: str,
     packages: tuple[str, ...],
-    rpm_entries: tuple[RpmImageEntry, ...],
+    rpm_files: tuple[str, ...],
     arch: str,
 ) -> tuple[str, ...]:
     selected = []
+    rpm_files_by_id = {}
+    for rpm_file in rpm_files:
+        package_id = _rpm_filename_package_id(rpm_file)
+        if package_id is None:
+            continue
+        rpm_files_by_id.setdefault(package_id, []).append(rpm_file)
     for package in packages:
         matches = []
         for package_id in _package_request_ids_one(package, arch):
-            matches.extend(
-                entry
-                for entry in rpm_entries
-                if (entry.name, entry.arch) == package_id
-            )
-        matches = list({entry.filename: entry for entry in matches}.values())
+            matches.extend(rpm_files_by_id.get(package_id, ()))
+        matches = list(dict.fromkeys(matches))
         if not matches:
             raise ConfigError(
                 f"{source}: OCI input '{oci_name}' does not contain listed package '{package}'"
             )
         if len(matches) > 1:
-            filenames = ", ".join(entry.filename for entry in matches)
+            filenames = ", ".join(matches)
             raise ConfigError(
                 f"{source}: OCI input '{oci_name}' has ambiguous RPMs for '{package}': {filenames}"
             )
-        selected.append(matches[0].filename)
+        selected.append(matches[0])
     return tuple(dict.fromkeys(selected))
+
+
+def _rpm_filename_package_id(filename: str) -> tuple[str, str] | None:
+    if not filename.endswith(".rpm"):
+        return None
+    nevra = filename[:-4]
+    name_version_release, separator, arch = nevra.rpartition(".")
+    if not separator or arch not in RPM_ARCH_SUFFIXES:
+        return None
+    name_version, separator, _release = name_version_release.rpartition("-")
+    if not separator:
+        return None
+    name, separator, _version = name_version.rpartition("-")
+    if not separator:
+        return None
+    return name, arch
 
 
 def _metadata_build_result(
