@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, NamedTuple, Sequence, TypedDict
 
-INFO_KEY = "dev.hhd.rechunk.info"
+INFO_KEY = "org.anatase.ludos.info"
 
 
 class File(NamedTuple):
