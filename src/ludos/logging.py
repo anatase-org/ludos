@@ -239,11 +239,20 @@ def _make_file_handler() -> logging.Handler:
 
 
 logger = logging.getLogger("ludos")
-logger.setLevel(logging.INFO)
-logger.propagate = False
-logger.handlers.clear()
-logger.addHandler(LudosHandler())
-logger.addHandler(_make_file_handler())
+_logging_configured = False
+
+
+def configure_logging() -> None:
+    global _logging_configured
+
+    if _logging_configured:
+        return
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.handlers.clear()
+    logger.addHandler(LudosHandler())
+    logger.addHandler(_make_file_handler())
+    _logging_configured = True
 
 
 def configure_tracebacks() -> None:
@@ -291,6 +300,7 @@ def pstream(message: str) -> None:
 
 
 def main() -> None:
+    configure_logging()
     log(LOGO_STR)
 
 

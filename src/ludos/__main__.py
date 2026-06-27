@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -10,8 +11,8 @@ from .bootc import DEFAULT_OCI_WRITERS, bootc_create, ostree_import
 from .build import build_manifest
 from .cleanup import cleanup_local_images
 from .installer import bootc_installer
-from .logging import LOGO_STR, configure_tracebacks, error, log
-from .model import ConfigError, validate_manifest
+from .logging import LOGO_STR, configure_logging, configure_tracebacks, error, log
+from .model import ConfigError, Project, validate_manifest
 from .contrib.package import package_target
 from .contrib.patchwork import patch_target
 from .contrib.update import update_targets
@@ -353,6 +354,9 @@ def build_parser() -> argparse.ArgumentParser:
 def show_logo(_args: argparse.Namespace) -> int:
     log(LOGO_STR)
     log("Starting Ludos...")
+    project = getattr(_args, "project", None)
+    if project is not None:
+        log(f"Using project: {project.name} at {project.root}")
     return 0
 
 
@@ -502,7 +506,13 @@ def main() -> int:
     args = parser.parse_args()
     if not hasattr(args, "func"):
         return 0
+    original_cwd = Path.cwd()
+    project_config = _discover_project_config(original_cwd)
+    if project_config is not None:
+        os.chdir(project_config.parent)
+    configure_logging()
     try:
+        args.project = Project.from_file(project_config) if project_config else None
         return args.func(args)
     except KeyboardInterrupt:
         error("User requested to exit...")
@@ -513,6 +523,18 @@ def main() -> int:
     except subprocess.CalledProcessError as exc:
         error(f"command failed with exit status {exc.returncode}")
         return 1
+    finally:
+        if project_config is not None:
+            os.chdir(original_cwd)
+
+
+def _discover_project_config(start: Path) -> Path | None:
+    root = start.resolve()
+    for directory in (root, *root.parents):
+        config = directory / "ludos.yml"
+        if config.exists():
+            return config
+    return None
 
 
 if __name__ == "__main__":

@@ -14,6 +14,32 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class Project:
+    name: str
+    root: Path
+
+    @classmethod
+    def from_file(cls, path: Path) -> "Project":
+        root = path.resolve().parent
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
+
+        if data is None:
+            return cls(name=root.name, root=root)
+        if not isinstance(data, dict):
+            raise ConfigError(f"{path}: expected a YAML mapping")
+
+        name = data.get("name", root.name)
+        if not isinstance(name, str):
+            raise ConfigError(f"{path}: 'name' must be a string")
+
+        name = name.strip()
+        return cls(name=name or root.name, root=root)
+
+
+@dataclass(frozen=True)
 class UpstreamRef:
     type: str
     url: str
