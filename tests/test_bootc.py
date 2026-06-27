@@ -13,6 +13,7 @@ from ludos.bootc import (
     DEFAULT_OSTREE_REF,
     DEFAULT_OCI_WRITERS,
     _bootc_encapsulate_supports_jobs,
+    _manifest_artifact_name,
     _export_rechunked_oci,
     _git_revision,
     _oci_export_line_rewriter,
@@ -150,6 +151,34 @@ class BootcCommandTests(unittest.TestCase):
             "registry.example.com-team-anatase-test",
         )
 
+    def test_manifest_artifact_name_uses_manifest_image_and_distro(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "anatase.yml"
+            (root / ".env").write_text("releasever=44\n", encoding="utf-8")
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "env:",
+                        "  arch: x86_64",
+                        "releasever: $releasever",
+                        "distro: f$releasever-$arch",
+                        "orchestrator: quay.io/fedora/fedora:$releasever",
+                        "bootstrap: cards/bootstrap.yml",
+                        "repos: []",
+                        "cards:",
+                        "  - cards/base/kernel",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                _manifest_artifact_name(manifest),
+                "anatase-f44-x86_64",
+            )
+
     def test_bootc_create_builds_imports_rechunks_and_exports_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -160,17 +189,30 @@ class BootcCommandTests(unittest.TestCase):
             events: list[str] = []
             metadata = (
                 SimpleNamespace(
+                    image="anatase",
+                    distro="f44-x86_64",
                     root_dir=str(root),
                     manifest_labels=(
                         ("org.opencontainers.image.title", "Anatase"),
                         ("org.opencontainers.image.version", "44.20260622"),
                     ),
                 ),
-                SimpleNamespace(root_dir=str(root), manifest_labels=()),
+                SimpleNamespace(
+                    image="other",
+                    distro="f44-x86_64",
+                    root_dir=str(root),
+                    manifest_labels=(),
+                ),
             )
             results = (
-                SimpleNamespace(output_image="localhost/anatase:f44", podman="podman"),
-                SimpleNamespace(output_image="localhost/other:f44", podman="podman"),
+                SimpleNamespace(
+                    output_image="localhost/anatase:f44-x86_64",
+                    podman="podman",
+                ),
+                SimpleNamespace(
+                    output_image="localhost/other:f44-x86_64",
+                    podman="podman",
+                ),
             )
 
             def mark(name):
@@ -225,27 +267,27 @@ class BootcCommandTests(unittest.TestCase):
                 "build-build",
                 "final",
                 "cleanup",
-                "import:localhost/anatase:f44",
-                "rechunk:anatase-f44",
-                "export:anatase-f44",
-                "import:localhost/other:f44",
-                "rechunk:other-f44",
-                "export:other-f44",
+                "import:localhost/anatase:f44-x86_64",
+                "rechunk:anatase-f44-x86_64",
+                "export:anatase-f44-x86_64",
+                "import:localhost/other:f44-x86_64",
+                "rechunk:other-f44-x86_64",
+                "export:other-f44-x86_64",
             ],
         )
         ostree_import_mock.assert_has_calls(
             [
                 call(
-                    "localhost/anatase:f44",
+                    "localhost/anatase:f44-x86_64",
                     cache_dir=(root / "cache").resolve(),
-                    orchestrator="localhost/anatase:f44",
+                    orchestrator="localhost/anatase:f44-x86_64",
                     ostree_ref=DEFAULT_OSTREE_REF,
                     ostree_version="44.20260622",
                 ),
                 call(
-                    "localhost/other:f44",
+                    "localhost/other:f44-x86_64",
                     cache_dir=(root / "cache").resolve(),
-                    orchestrator="localhost/other:f44",
+                    orchestrator="localhost/other:f44-x86_64",
                     ostree_ref=DEFAULT_OSTREE_REF,
                 ),
             ]
@@ -256,11 +298,23 @@ class BootcCommandTests(unittest.TestCase):
                     repo=str((root / "cache" / "ostree").resolve()),
                     ref=DEFAULT_OSTREE_REF,
                     contentmeta_fn=str(
-                        (root / "cache" / "rechunk" / "anatase-f44" / "contentmeta.json").resolve()
+                        (
+                            root
+                            / "cache"
+                            / "rechunk"
+                            / "anatase-f44-x86_64"
+                            / "contentmeta.json"
+                        ).resolve()
                     ),
                     chunks_fn=str(chunks.resolve()),
                     result_fn=str(
-                        (root / "cache" / "rechunk" / "anatase-f44" / "results.txt").resolve()
+                        (
+                            root
+                            / "cache"
+                            / "rechunk"
+                            / "anatase-f44-x86_64"
+                            / "results.txt"
+                        ).resolve()
                     ),
                     labels=[
                         "org.opencontainers.image.title=Anatase",
@@ -268,23 +322,35 @@ class BootcCommandTests(unittest.TestCase):
                     ],
                     revision="a" * 40,
                     git_dir=str(root),
-                    ostree_image="localhost/anatase:f44",
+                    ostree_image="localhost/anatase:f44-x86_64",
                     podman="podman",
                 ),
                 call(
                     repo=str((root / "cache" / "ostree").resolve()),
                     ref=DEFAULT_OSTREE_REF,
                     contentmeta_fn=str(
-                        (root / "cache" / "rechunk" / "other-f44" / "contentmeta.json").resolve()
+                        (
+                            root
+                            / "cache"
+                            / "rechunk"
+                            / "other-f44-x86_64"
+                            / "contentmeta.json"
+                        ).resolve()
                     ),
                     chunks_fn=str(chunks.resolve()),
                     result_fn=str(
-                        (root / "cache" / "rechunk" / "other-f44" / "results.txt").resolve()
+                        (
+                            root
+                            / "cache"
+                            / "rechunk"
+                            / "other-f44-x86_64"
+                            / "results.txt"
+                        ).resolve()
                     ),
                     labels=[],
                     revision="a" * 40,
                     git_dir=str(root),
-                    ostree_image="localhost/other:f44",
+                    ostree_image="localhost/other:f44-x86_64",
                     podman="podman",
                 ),
             ]
@@ -293,20 +359,24 @@ class BootcCommandTests(unittest.TestCase):
             [
                 call(
                     podman="podman",
-                    image="localhost/anatase:f44",
+                    image="localhost/anatase:f44-x86_64",
                     ostree_dir=(root / "cache" / "ostree").resolve(),
                     oci_dir=(root / "cache" / "oci").resolve(),
-                    work_dir=(root / "cache" / "rechunk" / "anatase-f44").resolve(),
-                    safe_name="anatase-f44",
+                    work_dir=(
+                        root / "cache" / "rechunk" / "anatase-f44-x86_64"
+                    ).resolve(),
+                    safe_name="anatase-f44-x86_64",
                     writers=8,
                 ),
                 call(
                     podman="podman",
-                    image="localhost/other:f44",
+                    image="localhost/other:f44-x86_64",
                     ostree_dir=(root / "cache" / "ostree").resolve(),
                     oci_dir=(root / "cache" / "oci").resolve(),
-                    work_dir=(root / "cache" / "rechunk" / "other-f44").resolve(),
-                    safe_name="other-f44",
+                    work_dir=(
+                        root / "cache" / "rechunk" / "other-f44-x86_64"
+                    ).resolve(),
+                    safe_name="other-f44-x86_64",
                     writers=8,
                 ),
             ]

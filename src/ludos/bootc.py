@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _datetime
 import json
 import os
 import re
@@ -9,7 +10,11 @@ import threading
 from pathlib import Path
 
 from .build import (
+    _cache_name,
     _cleanup_dnf_workspaces,
+    _load_dotenv,
+    _local_prefix,
+    _substitute_variables,
     _terminate_process_group,
     build_build_images,
     build_final_manifest_images,
@@ -17,7 +22,7 @@ from .build import (
     resolve_build_manifests,
 )
 from .logging import log, piter, pstream, warning
-from .model import ConfigError
+from .model import ConfigError, Manifest
 from .rechunk.alg import main as rechunk_main
 
 
@@ -83,7 +88,7 @@ def bootc_create(
 
     for manifest, result in zip(metadata, results):
         image = result.output_image
-        safe_name = _safe_oci_name(image)
+        safe_name = _bootc_artifact_name(manifest.image, manifest.distro)
         work_dir = work_root / safe_name
         git_dir = Path(manifest.root_dir)
         revision = _git_revision(git_dir)
@@ -250,6 +255,69 @@ def _resolve_chunks_path(manifests: tuple[Path, ...], chunks: Path | None) -> Pa
     if not chunks_path.is_file():
         raise ConfigError(f"chunks file is missing: {chunks_path}")
     return chunks_path
+
+
+def _manifest_artifact_path(
+    manifest_path: Path,
+    parent: Path,
+    *,
+    manifest: Manifest | None = None,
+    cache_version: str | None = None,
+) -> Path:
+    return parent / _manifest_artifact_name(
+        manifest_path,
+        manifest=manifest,
+        cache_version=cache_version,
+    )
+
+
+def _manifest_artifact_name(
+    manifest_path: Path,
+    *,
+    manifest: Manifest | None = None,
+    cache_version: str | None = None,
+) -> str:
+    manifest_path = manifest_path.expanduser().resolve()
+    manifest = manifest or Manifest.from_file(manifest_path)
+    env = _manifest_artifact_env(manifest_path, manifest, cache_version)
+    image = _cache_name(manifest_path.stem, "image")
+    distro = _cache_name(_substitute_variables(manifest.distro, env), "distro")
+    return _bootc_artifact_name(image, distro)
+
+
+def _manifest_artifact_env(
+    manifest_path: Path,
+    manifest: Manifest,
+    cache_version: str | None,
+) -> dict[str, str]:
+    root_dir = manifest_path.resolve().parent
+    env = {key: str(value) for key, value in manifest.env.items()}
+    local_values = _load_dotenv(root_dir / ".env")
+    local_prefix = local_values.pop("local_prefix", manifest.local_prefix)
+    _local_prefix(local_prefix)
+    env.update(local_values)
+    if cache_version is None:
+        cache_version = _datetime.date.today().strftime("%Y%m%d")
+    else:
+        cache_version = _cache_name(cache_version, "version")
+    env["version"] = cache_version
+    releasever = _cache_name(
+        _substitute_variables(manifest.releasever, env),
+        "releasever",
+    )
+    env["releasever"] = releasever
+    arch = _cache_name(
+        _substitute_variables(str(env.get("arch", "")), env),
+        "arch",
+    )
+    env["arch"] = arch
+    return {key: _substitute_variables(value, env) for key, value in env.items()}
+
+
+def _bootc_artifact_name(image: str, distro: str) -> str:
+    image = _cache_name(image, "image")
+    distro = _cache_name(distro, "distro")
+    return _safe_oci_name(f"{image}-{distro}")
 
 
 def _manifest_labels(labels: tuple[tuple[str, str], ...]) -> list[str]:

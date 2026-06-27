@@ -9,7 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .bootc import DEFAULT_CACHE_DIR, _safe_oci_name
+from .bootc import DEFAULT_CACHE_DIR, _manifest_artifact_path, _safe_oci_name
 from .build import FileRef, _parse_file_ref, _validate_relative_file_path
 from .logging import log, stream
 from .model import ConfigError, InstallerConfig, Manifest
@@ -115,7 +115,13 @@ def bootc_installer(
 ) -> int:
     manifest_path = manifest_path.expanduser().resolve()
     manifest = Manifest.from_file(manifest_path)
-    output_dir = _resolve_output_dir(manifest_path, ref, output, cache_dir)
+    output_dir = _resolve_output_dir(
+        manifest_path,
+        ref,
+        output,
+        cache_dir,
+        manifest=manifest,
+    )
     podman = shutil.which("podman")
     if podman is None:
         raise ConfigError("podman must be installed to create an installer ISO")
@@ -162,6 +168,8 @@ def _resolve_output_dir(
     ref: str,
     output: Path | None,
     cache_dir: Path | None,
+    *,
+    manifest: Manifest | None = None,
 ) -> Path:
     if output is not None:
         return output.expanduser().resolve()
@@ -170,7 +178,7 @@ def _resolve_output_dir(
         if cache_dir is not None
         else (manifest_path.resolve().parent / DEFAULT_CACHE_DIR).resolve()
     )
-    return cache_root / "iso" / _safe_ref_name(ref)
+    return _manifest_artifact_path(manifest_path, cache_root / "iso", manifest=manifest)
 
 
 def _safe_ref_name(ref: str) -> str:

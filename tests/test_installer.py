@@ -200,17 +200,37 @@ class InstallerHelperTests(unittest.TestCase):
                 (root / "custom-output").resolve(),
             )
 
-    def test_default_output_uses_safe_ref_name_under_cache(self) -> None:
+    def test_default_output_uses_manifest_artifact_name_under_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            manifest = root / "anatase.yml"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "env:",
+                        "  arch: x86_64",
+                        "  releasever: 44",
+                        "releasever: $releasever",
+                        "distro: f$releasever-$arch",
+                        "orchestrator: quay.io/fedora/fedora:$releasever",
+                        "bootstrap: cards/bootstrap.yml",
+                        "repos: []",
+                        "cards:",
+                        "  - cards/base/kernel",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
             self.assertEqual(
                 _resolve_output_dir(
-                    root / "anatase.yml",
+                    manifest,
                     "cache/oci/anatase-f44-x86_64",
                     None,
                     None,
                 ),
-                root / "cache/iso/cache-oci-anatase-f44-x86_64",
+                root / "cache/iso/anatase-f44-x86_64",
             )
 
     def test_source_image_ref_accepts_oci_directory(self) -> None:
