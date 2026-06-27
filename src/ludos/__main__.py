@@ -16,6 +16,7 @@ from .model import ConfigError, Project, validate_manifest
 from .contrib.package import package_target
 from .contrib.patchwork import patch_target
 from .contrib.update import update_targets
+from .upload.file import delete_file, upload_file
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -191,6 +192,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repository subdirectory to copy and track.",
     )
     package_fork.set_defaults(func=package_command)
+
+    upload = subcommands.add_parser(
+        "upload",
+        help="Upload Ludos artifacts.",
+    )
+    upload_subcommands = upload.add_subparsers(dest="upload_action", required=True)
+    upload_file_parser = upload_subcommands.add_parser(
+        "file",
+        help="Upload a file to S3 and update SHA256SUMS.",
+    )
+    upload_file_parser.add_argument("path", type=Path, help="Local file to upload.")
+    upload_file_parser.add_argument("output_path", help="S3 object key to write.")
+    upload_file_parser.add_argument(
+        "download_name",
+        help="Filename to use for downloads and SHA256SUMS.",
+    )
+    upload_file_parser.set_defaults(func=upload_command)
+    upload_delete_parser = upload_subcommands.add_parser(
+        "delete",
+        help="Delete a file from S3.",
+    )
+    upload_delete_parser.add_argument("output_path", help="S3 object key to delete.")
+    upload_delete_parser.set_defaults(func=upload_command)
 
     bootc = subcommands.add_parser(
         "bootc",
@@ -465,6 +489,14 @@ def package_command(args: argparse.Namespace) -> int:
         card=args.card,
         subdir=args.subdir,
     )
+
+
+def upload_command(args: argparse.Namespace) -> int:
+    if args.upload_action == "file":
+        return upload_file(args.path, args.output_path, args.download_name)
+    if args.upload_action == "delete":
+        return delete_file(args.output_path)
+    raise ConfigError(f"unknown upload action: {args.upload_action}")
 
 
 def bootc_command(args: argparse.Namespace) -> int:
