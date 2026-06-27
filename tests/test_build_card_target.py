@@ -620,7 +620,7 @@ class TargetCardBuildTests(unittest.TestCase):
                     labels={"org.anatase.kernel.nvidia": "580.95.05"},
                 ),
             ),
-            patch("ludos.build._oci_output_metadata_in_image") as oci_metadata,
+            patch("ludos.build._output_metadata_in_image") as oci_metadata,
             patch(
                 "ludos.build._card_specs_hash",
                 return_value=("nvidiaspechash", tuple()),
@@ -666,7 +666,7 @@ class TargetCardBuildTests(unittest.TestCase):
                     "ludos.build._inspect_oci_image",
                     return_value=ImageInfo(digest=digest, labels={}),
                 ),
-                patch("ludos.build._oci_output_metadata_in_image") as oci_metadata,
+                patch("ludos.build._output_metadata_in_image") as oci_metadata,
                 patch("ludos.build._stage_card_specs", return_value=tuple()),
                 patch(
                     "ludos.build._resolve_staged_spec_builder_packages",
@@ -697,7 +697,7 @@ class TargetCardBuildTests(unittest.TestCase):
                 "ludos.build._inspect_oci_image",
                 return_value=ImageInfo(digest="sha256:kernel111", labels={}),
             ),
-            patch("ludos.build._oci_output_metadata_in_image") as oci_metadata,
+            patch("ludos.build._output_metadata_in_image") as oci_metadata,
         ):
             with self.assertRaisesRegex(ConfigError, "does not define label"):
                 _resolve_manifest_metadata(
@@ -733,7 +733,7 @@ class TargetCardBuildTests(unittest.TestCase):
 
         with (
             patch(
-                "ludos.build._oci_output_metadata_in_image",
+                "ludos.build._output_metadata_in_image",
                 return_value=(tuple(), False),
             ),
             patch("ludos.build._run_container_build") as container_build,

@@ -10,6 +10,7 @@ from unittest.mock import call, patch
 
 from ludos.__main__ import build_parser
 from ludos.bootc import (
+    DEFAULT_OSTREE_REF,
     DEFAULT_OCI_WRITERS,
     _bootc_encapsulate_supports_jobs,
     _export_rechunked_oci,
@@ -238,14 +239,14 @@ class BootcCommandTests(unittest.TestCase):
                     "localhost/anatase:f44",
                     cache_dir=(root / "cache").resolve(),
                     orchestrator="localhost/anatase:f44",
-                    ostree_ref="master",
+                    ostree_ref=DEFAULT_OSTREE_REF,
                     ostree_version="44.20260622",
                 ),
                 call(
                     "localhost/other:f44",
                     cache_dir=(root / "cache").resolve(),
                     orchestrator="localhost/other:f44",
-                    ostree_ref="master",
+                    ostree_ref=DEFAULT_OSTREE_REF,
                 ),
             ]
         )
@@ -253,7 +254,7 @@ class BootcCommandTests(unittest.TestCase):
             [
                 call(
                     repo=str((root / "cache" / "ostree").resolve()),
-                    ref="master",
+                    ref=DEFAULT_OSTREE_REF,
                     contentmeta_fn=str(
                         (root / "cache" / "rechunk" / "anatase-f44" / "contentmeta.json").resolve()
                     ),
@@ -272,7 +273,7 @@ class BootcCommandTests(unittest.TestCase):
                 ),
                 call(
                     repo=str((root / "cache" / "ostree").resolve()),
-                    ref="master",
+                    ref=DEFAULT_OSTREE_REF,
                     contentmeta_fn=str(
                         (root / "cache" / "rechunk" / "other-f44" / "contentmeta.json").resolve()
                     ),
@@ -388,7 +389,7 @@ class BootcCommandTests(unittest.TestCase):
                 "/ludos/rechunk/contentmeta.json",
                 "--jobs",
                 "8",
-                "master",
+                DEFAULT_OSTREE_REF,
                 "oci:/ludos/oci/anatase-f44:latest",
             ]
         )
@@ -420,7 +421,7 @@ class BootcCommandTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertNotIn("--jobs", command)
         self.assertNotIn("8", command)
-        self.assertIn("master", command)
+        self.assertIn(DEFAULT_OSTREE_REF, command)
 
     def test_export_rechunked_oci_removes_existing_target_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
