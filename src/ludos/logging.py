@@ -93,11 +93,30 @@ class LudosHandler(logging.Handler):
                     + (len(levelname) + 2 if levelno >= logging.WARNING else 0)
                 )
                 line_prefix = Text(" " * width, no_wrap=True)
-            try:
-                target.print(line_prefix, line, sep="")
-            except MarkupError:
-                target.print(line_prefix, line, sep="", markup=False)
+            self._emit_rendered_line(target, line_prefix, line)
         target.file.flush()
+
+    def _emit_rendered_line(
+        self,
+        target: Console,
+        line_prefix: Text,
+        line: str,
+    ) -> None:
+        if self._should_use_tqdm_write(target):
+            with target.capture() as capture:
+                self._print_line(target, line_prefix, line)
+            tqdm.write(capture.get().rstrip("\n"), file=target.file)
+            return
+        self._print_line(target, line_prefix, line)
+
+    def _print_line(self, target: Console, line_prefix: Text, line: str) -> None:
+        try:
+            target.print(line_prefix, line, sep="")
+        except MarkupError:
+            target.print(line_prefix, line, sep="", markup=False)
+
+    def _should_use_tqdm_write(self, target: Console) -> bool:
+        return target.is_terminal and not AGENT
 
     def _emit_stream(self, record: logging.LogRecord) -> None:
         lines = self._stream_record_lines(record.getMessage())

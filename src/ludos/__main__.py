@@ -17,6 +17,7 @@ from .contrib.package import package_target
 from .contrib.patchwork import patch_target
 from .contrib.update import update_targets
 from .upload.file import delete_file, upload_file
+from .upload.registry import registry_init, upload_oci
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -216,6 +217,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     upload_file_parser.set_defaults(func=upload_command)
+    upload_registry_init_parser = upload_subcommands.add_parser(
+        "registry-init",
+        help="Initialize S3 objects required for a static OCI registry.",
+    )
+    upload_registry_init_parser.set_defaults(func=upload_command)
+    upload_oci_parser = upload_subcommands.add_parser(
+        "oci",
+        help="Upload a local OCI layout to S3 as a static OCI repository.",
+    )
+    upload_oci_parser.add_argument(
+        "local_oci_path",
+        type=Path,
+        help="Path to a local OCI layout directory.",
+    )
+    upload_oci_parser.add_argument(
+        "ref",
+        help="OCI repository path within the registry, without the registry host.",
+    )
+    upload_oci_parser.add_argument(
+        "--tag",
+        action="append",
+        required=True,
+        dest="tags",
+        help="Tag to publish. May be specified more than once.",
+    )
+    upload_oci_parser.set_defaults(func=upload_command)
 
     bootc = subcommands.add_parser(
         "bootc",
@@ -502,6 +529,10 @@ def upload_command(args: argparse.Namespace) -> int:
             raise ConfigError("upload file requires <path> <output-path> <download-name>")
         path, output_path, download_name = args.file_args
         return upload_file(Path(path), output_path, download_name)
+    if args.upload_action == "registry-init":
+        return registry_init()
+    if args.upload_action == "oci":
+        return upload_oci(args.local_oci_path, args.ref, tuple(args.tags))
     raise ConfigError(f"unknown upload action: {args.upload_action}")
 
 

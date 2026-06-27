@@ -8,9 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ludos.__main__ import build_parser
+from ludos.upload.common import S3Config, _s3_config_from_env
 from ludos.upload.file import (
-    S3Config,
-    _s3_config_from_env,
     delete_file,
     upload_file,
 )
@@ -36,6 +35,8 @@ class FakeS3Client:
         self.puts: list[dict[str, object]] = []
         self.deletes: list[dict[str, object]] = []
         self.gets: list[dict[str, object]] = []
+        self.heads: list[dict[str, object]] = []
+        self.calls: list[tuple[str, str]] = []
 
     def upload_file(
         self,
@@ -56,17 +57,28 @@ class FakeS3Client:
                 "Callback": Callback,
             }
         )
+        self.calls.append(("upload_file", key))
         if Callback is not None:
             Callback(len(data))  # type: ignore[operator]
         self.objects[(bucket, key)] = data
 
     def get_object(self, *, Bucket: str, Key: str) -> dict[str, BytesIO]:
         self.gets.append({"Bucket": Bucket, "Key": Key})
+        self.calls.append(("get_object", Key))
         try:
             body = self.objects[(Bucket, Key)]
         except KeyError as exc:
             raise FakeClientError("NoSuchKey") from exc
         return {"Body": BytesIO(body)}
+
+    def head_object(self, *, Bucket: str, Key: str) -> dict[str, int]:
+        self.heads.append({"Bucket": Bucket, "Key": Key})
+        self.calls.append(("head_object", Key))
+        try:
+            body = self.objects[(Bucket, Key)]
+        except KeyError as exc:
+            raise FakeClientError("NoSuchKey") from exc
+        return {"ContentLength": len(body)}
 
     def put_object(
         self,
@@ -84,10 +96,12 @@ class FakeS3Client:
                 "ContentType": ContentType,
             }
         )
+        self.calls.append(("put_object", Key))
         self.objects[(Bucket, Key)] = Body
 
     def delete_object(self, *, Bucket: str, Key: str) -> None:
         self.deletes.append({"Bucket": Bucket, "Key": Key})
+        self.calls.append(("delete_object", Key))
         self.objects.pop((Bucket, Key), None)
 
 

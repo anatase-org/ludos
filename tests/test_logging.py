@@ -60,6 +60,24 @@ class LudosLoggingTests(unittest.TestCase):
             "        | OT: using fuse: 0\n",
         )
 
+    def test_terminal_log_lines_use_tqdm_write(self) -> None:
+        output = io.StringIO()
+        handler = LudosHandler()
+        created = _datetime.datetime(2026, 6, 16, 12, 34).timestamp()
+
+        with (
+            patch("ludos.logging.AGENT", False),
+            patch(
+                "ludos.logging.console",
+                Console(file=output, force_terminal=True, color_system=None),
+            ),
+            patch("ludos.logging.tqdm.write") as write,
+        ):
+            handler._emit_lines(logging.INFO, "INFO", created, ["progress-safe"])
+
+        write.assert_called_once_with("[12:34] progress-safe", file=output)
+        self.assertEqual(output.getvalue(), "")
+
     def test_piter_is_hidden_when_not_terminal(self) -> None:
         output = io.StringIO()
         console = Console(file=output, force_terminal=False, color_system=None)
