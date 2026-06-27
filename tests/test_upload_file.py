@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 from ludos.__main__ import build_parser
 from ludos.upload.file import (
@@ -103,15 +104,54 @@ class UploadFileTests(unittest.TestCase):
         )
 
         self.assertEqual(args.upload_action, "file")
-        self.assertEqual(args.path, Path("cache/iso/anatase.iso"))
-        self.assertEqual(args.output_path, "isos/anatase.iso")
-        self.assertEqual(args.download_name, "anatase-44.20260627.iso")
+        self.assertFalse(args.delete)
+        self.assertEqual(
+            args.file_args,
+            [
+                "cache/iso/anatase.iso",
+                "isos/anatase.iso",
+                "anatase-44.20260627.iso",
+            ],
+        )
 
-    def test_upload_delete_parser(self) -> None:
-        args = build_parser().parse_args(["upload", "delete", "isos/anatase.iso"])
+    def test_upload_file_delete_parser(self) -> None:
+        args = build_parser().parse_args(
+            ["upload", "file", "--delete", "isos/anatase.iso"]
+        )
 
-        self.assertEqual(args.upload_action, "delete")
-        self.assertEqual(args.output_path, "isos/anatase.iso")
+        self.assertEqual(args.upload_action, "file")
+        self.assertTrue(args.delete)
+        self.assertEqual(args.file_args, ["isos/anatase.iso"])
+
+    def test_upload_file_command_dispatches_upload(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "upload",
+                "file",
+                "cache/iso/anatase.iso",
+                "isos/anatase.iso",
+                "anatase-44.20260627.iso",
+            ]
+        )
+
+        with patch("ludos.__main__.upload_file", return_value=0) as upload:
+            self.assertEqual(args.func(args), 0)
+
+        upload.assert_called_once_with(
+            Path("cache/iso/anatase.iso"),
+            "isos/anatase.iso",
+            "anatase-44.20260627.iso",
+        )
+
+    def test_upload_file_command_dispatches_delete(self) -> None:
+        args = build_parser().parse_args(
+            ["upload", "file", "--delete", "isos/anatase.iso"]
+        )
+
+        with patch("ludos.__main__.delete_file", return_value=0) as delete:
+            self.assertEqual(args.func(args), 0)
+
+        delete.assert_called_once_with("isos/anatase.iso")
 
     def test_s3_api_parses_endpoint_and_bucket(self) -> None:
         config = _s3_config_from_env(ENV)

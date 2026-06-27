@@ -202,19 +202,20 @@ def build_parser() -> argparse.ArgumentParser:
         "file",
         help="Upload a file to S3 and update SHA256SUMS.",
     )
-    upload_file_parser.add_argument("path", type=Path, help="Local file to upload.")
-    upload_file_parser.add_argument("output_path", help="S3 object key to write.")
     upload_file_parser.add_argument(
-        "download_name",
-        help="Filename to use for downloads and SHA256SUMS.",
+        "--delete",
+        action="store_true",
+        help="Delete the S3 object instead of uploading a file.",
+    )
+    upload_file_parser.add_argument(
+        "file_args",
+        nargs="+",
+        help=(
+            "Upload args: <path> <output-path> <download-name>. "
+            "Delete args: --delete <output-path>."
+        ),
     )
     upload_file_parser.set_defaults(func=upload_command)
-    upload_delete_parser = upload_subcommands.add_parser(
-        "delete",
-        help="Delete a file from S3.",
-    )
-    upload_delete_parser.add_argument("output_path", help="S3 object key to delete.")
-    upload_delete_parser.set_defaults(func=upload_command)
 
     bootc = subcommands.add_parser(
         "bootc",
@@ -493,9 +494,14 @@ def package_command(args: argparse.Namespace) -> int:
 
 def upload_command(args: argparse.Namespace) -> int:
     if args.upload_action == "file":
-        return upload_file(args.path, args.output_path, args.download_name)
-    if args.upload_action == "delete":
-        return delete_file(args.output_path)
+        if args.delete:
+            if len(args.file_args) != 1:
+                raise ConfigError("upload file --delete requires <output-path>")
+            return delete_file(args.file_args[0])
+        if len(args.file_args) != 3:
+            raise ConfigError("upload file requires <path> <output-path> <download-name>")
+        path, output_path, download_name = args.file_args
+        return upload_file(Path(path), output_path, download_name)
     raise ConfigError(f"unknown upload action: {args.upload_action}")
 
 
