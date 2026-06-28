@@ -149,6 +149,23 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(args.output_path, "isos/anatase.iso")
         self.assertEqual(args.download_name, "anatase-44.20260627.iso")
 
+    def test_upload_file_parser_allows_missing_download_name(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "file",
+                "upload",
+                "cache/iso/anatase.iso",
+                "isos/anatase.iso",
+            ]
+        )
+
+        self.assertEqual(args.registry_action, "file")
+        self.assertEqual(args.registry_file_action, "upload")
+        self.assertEqual(args.path, Path("cache/iso/anatase.iso"))
+        self.assertEqual(args.output_path, "isos/anatase.iso")
+        self.assertIsNone(args.download_name)
+
     def test_upload_file_delete_parser(self) -> None:
         args = build_parser().parse_args(
             ["registry", "file", "delete", "isos/anatase.iso"]
@@ -177,6 +194,26 @@ class UploadFileTests(unittest.TestCase):
             Path("cache/iso/anatase.iso"),
             "isos/anatase.iso",
             "anatase-44.20260627.iso",
+        )
+
+    def test_upload_file_command_dispatches_upload_without_download_name(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "file",
+                "upload",
+                "cache/iso/anatase.iso",
+                "isos/anatase.iso",
+            ]
+        )
+
+        with patch("ludos.__main__.upload_file", return_value=0) as upload:
+            self.assertEqual(args.func(args), 0)
+
+        upload.assert_called_once_with(
+            Path("cache/iso/anatase.iso"),
+            "isos/anatase.iso",
+            None,
         )
 
     def test_upload_file_command_dispatches_delete(self) -> None:
@@ -228,6 +265,32 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(
             client.objects[("anatase-artifacts", "isos/SHA256SUMS")].decode("utf-8"),
             f"{digest} anatase-44.20260627.iso\n",
+        )
+
+    def test_upload_without_download_name_omits_content_disposition_and_uses_filename(
+        self,
+    ) -> None:
+        client = FakeS3Client()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "anatase.iso"
+            path.write_bytes(b"installer")
+            digest = hashlib.sha256(b"installer").hexdigest()
+
+            upload_file(
+                path,
+                "isos/anatase.iso",
+                environ=ENV,
+                client=client,
+            )
+
+        self.assertEqual(client.uploads[0]["Bucket"], "anatase-artifacts")
+        self.assertEqual(client.uploads[0]["Key"], "isos/anatase.iso")
+        self.assertEqual(client.uploads[0]["ExtraArgs"], {})
+        self.assertIsNotNone(client.uploads[0]["Callback"])
+        self.assertEqual(client.gets[0]["Key"], "isos/SHA256SUMS")
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "isos/SHA256SUMS")].decode("utf-8"),
+            f"{digest} anatase.iso\n",
         )
 
     def test_upload_replaces_download_name_and_preserves_other_entries(self) -> None:

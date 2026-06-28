@@ -238,6 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     registry_file_upload.add_argument(
         "download_name",
+        nargs="?",
         help="Filename to publish in SHA256SUMS and Content-Disposition.",
     )
     registry_file_upload.set_defaults(func=registry_command)

@@ -37,7 +37,7 @@ class S3Object:
 def upload_file(
     path: Path,
     output_path: str,
-    download_name: str,
+    download_name: str | None = None,
     *,
     environ: Mapping[str, str] | None = None,
     client: Any | None = None,
@@ -45,14 +45,18 @@ def upload_file(
     source = Path(path)
     if not source.is_file():
         raise ConfigError(f"upload source is not a file: {source}")
-    _validate_download_name(download_name)
+    if download_name is not None:
+        _validate_download_name(download_name)
 
     target = _s3_object(output_path, environ=environ)
     s3 = client if client is not None else _create_s3_client(target.config, environ)
     log(f"Calculating digest for {source}")
     digest = _sha256_file(source)
     log(f"Digest of {source}\n{digest}")
-    content_disposition = _content_disposition(download_name)
+    checksum_name = download_name or source.name
+    extra_args = {}
+    if download_name is not None:
+        extra_args["ContentDisposition"] = _content_disposition(download_name)
     size_bytes = source.stat().st_size
 
     log(f"Uploading file: {source} -> {target.key}")
@@ -68,14 +72,14 @@ def upload_file(
                 str(source),
                 target.config.bucket,
                 target.key,
-                ExtraArgs={"ContentDisposition": content_disposition},
+                ExtraArgs=extra_args,
                 Callback=progress.update,
             )
     except Exception as exc:
         raise ConfigError(f"S3 upload failed for {target.key}: {exc}") from exc
 
     entries = _read_sha256sums(s3, target)
-    updated = _update_sha256sums(entries, digest, download_name)
+    updated = _update_sha256sums(entries, digest, checksum_name)
     _write_sha256sums(s3, target, updated)
     log(f"Uploaded {target.key} and updated {target.checksum_key}")
     return 0
@@ -185,4 +189,3 @@ def _update_sha256sums(
 ) -> list[tuple[str, str]]:
     preserved = [entry for entry in entries if entry[1] != download_name]
     return [(digest, download_name), *preserved][:SHA256SUMS_LIMIT]
-
