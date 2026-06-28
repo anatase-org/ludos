@@ -21,7 +21,7 @@ DOCKER_MANIFEST_LIST_MEDIA_TYPE = (
 DEFAULT_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
 DEFAULT_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
 OCI_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
-OCI_MUTABLE_CACHE_CONTROL = "public, max-age=60, must-revalidate"
+OCI_MUTABLE_CACHE_CONTROL = "no-cache, max-age=0, must-revalidate"
 REGISTRY_PING_BODY = b"{}"
 
 _REF_COMPONENT_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
