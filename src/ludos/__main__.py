@@ -10,6 +10,7 @@ from pathlib import Path
 from .bootc import DEFAULT_OCI_WRITERS, bootc_create, ostree_import
 from .build import build_manifest
 from .cleanup import cleanup_local_images
+from .flatpaks import build_flatpak
 from .installer import bootc_installer
 from .logging import LOGO_STR, configure_logging, configure_tracebacks, error, log
 from .model import ConfigError, Project, validate_manifest
@@ -68,10 +69,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not mount or enable shared ccache/sccache directories for builder runs.",
     )
-    build.add_argument(
+    target = build.add_mutually_exclusive_group()
+    target.add_argument(
         "--card",
         default=None,
         help="Build only the selected card output, using the same card path format as the manifest.",
+    )
+    target.add_argument(
+        "--flatpak",
+        type=Path,
+        default=None,
+        help="Build a flatpak app from the selected flatpak directory or card YAML.",
     )
     build.set_defaults(func=build_command)
 
@@ -548,6 +556,22 @@ def validate_command(args: argparse.Namespace) -> int:
 
 def build_command(args: argparse.Namespace) -> int:
     show_logo(args)
+
+    if args.flatpak is not None:
+        result = build_flatpak(
+            args.manifest,
+            args.flatpak,
+            cards_dir=args.cards_dir,
+            cache_dir=args.cache_dir,
+            cache_version=args.version,
+            cache_only=args.cache,
+            ccache=not args.no_ccache,
+        )
+        log(
+            f"Built flatpak {result.ref}: {result.image} "
+            f"(latest: {result.latest_image})"
+        )
+        return 0
 
     result = build_manifest(
         args.manifest,

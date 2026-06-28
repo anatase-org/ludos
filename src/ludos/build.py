@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as _datetime
 import fnmatch
 import glob
 import hashlib
@@ -18,8 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .common import resolve_manifest_context
 from .logging import log, stream
-from .model import ConfigError, SpecBuild, _resolve_card_path, validate_manifest
+from .model import ConfigError, SpecBuild, _resolve_card_path
 
 
 HASH_LENGTH = 8
@@ -352,191 +352,48 @@ def _resolve_manifest_metadata(
     target_card: str | None = None,
     dnf_workspace_dirs: list[Path] | None = None,
 ) -> ResolvedBuildMetadata:
-    log(f"Validating manifest: {manifest_path}")
-    validation = validate_manifest(manifest_path, cards_dir)
-    if validation.missing_bootstrap:
-        raise ConfigError(
-            f"{manifest_path}: missing bootstrap card: {validation.missing_bootstrap}"
-        )
-    if validation.missing_repos:
-        missing = ", ".join(validation.missing_repos)
-        raise ConfigError(f"{manifest_path}: missing repository definitions: {missing}")
-    if validation.missing_cards:
-        missing = ", ".join(validation.missing_cards)
-        raise ConfigError(f"{manifest_path}: missing card definitions: {missing}")
-
-    root_dir = manifest_path.resolve().parent
-    image = _cache_name(manifest_path.resolve().stem, "image")
-    manifest_env = {key: str(value) for key, value in validation.manifest.env.items()}
-    local_values = _load_dotenv(root_dir / ".env")
-    local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
-    local_prefix = _local_prefix(local_prefix)
-    manifest_env.update(local_values)
-    if cache_version is None:
-        cache_version = _datetime.date.today().strftime("%Y%m%d")
-        load_only_version = False
-    else:
-        cache_version = _cache_name(cache_version, "version")
-        load_only_version = True
-    manifest_env["version"] = cache_version
-    releasever = _cache_name(
-        _substitute_variables(validation.manifest.releasever, manifest_env),
-        "releasever",
+    context = resolve_manifest_context(
+        manifest_path,
+        cards_dir=cards_dir,
+        cache_dir=cache_dir,
+        cache_version=cache_version,
+        cache_only=cache_only,
+        ccache=ccache,
+        dnf_workspace_dirs=dnf_workspace_dirs,
+        image_exists=_image_exists,
+        create_orchestrator_image=_create_orchestrator_image,
+        create_repo_image=_create_repo_image,
+        extract_image_paths=_extract_image_paths,
+        apply_repo_priority=_apply_repo_priority,
+        require_buildah=_require_buildah,
     )
-    manifest_env["releasever"] = releasever
-    arch = _cache_name(
-        _substitute_variables(str(manifest_env.get("arch", "")), manifest_env),
-        "arch",
-    )
-    manifest_env["arch"] = arch
-    manifest_env = {
-        key: _substitute_variables(value, manifest_env)
-        for key, value in manifest_env.items()
-    }
-    distro = _cache_name(
-        _substitute_variables(validation.manifest.distro, manifest_env),
-        "distro",
-    )
-    orchestrator_source = _substitute_variables(
-        validation.manifest.orchestrator, manifest_env
-    )
-    output_image = f"localhost/{local_prefix}{image}:{distro}"
-    if cache_only:
-        log("Using cache-only mode")
-
-    if cache_dir is None:
-        cache_dir = root_dir / "cache"
-    else:
-        cache_dir = cache_dir.expanduser().resolve()
-    log(f"Preparing cache directories under {cache_dir}")
-    distro_cache_dir = cache_dir / distro
-    package_dir = distro_cache_dir / "packages"
-    dnf_dir = distro_cache_dir / "dnf"
-    build_dir = distro_cache_dir / "build" / image
-    card_build_dir = distro_cache_dir / "cards"
-    dnf_resolve_dir = dnf_dir / "resolves"
-    build_artifact_cache_dir = distro_cache_dir / "build-artifacts"
-    spec_source_cache_dir = cache_dir / "spec-sources" / "git"
-    ccache_dir = cache_dir / "ccache" if ccache else None
-
-    distro_cache_dir.mkdir(parents=True, exist_ok=True)
-    dnf_dir.mkdir(parents=True, exist_ok=True)
-    dnf_workspace_dir = Path(tempfile.mkdtemp(prefix="run-", dir=dnf_dir))
-    if dnf_workspace_dirs is not None:
-        dnf_workspace_dirs.append(dnf_workspace_dir)
-    repo_dir = dnf_workspace_dir / "repos"
-    dnf_cache_dir = dnf_workspace_dir / "cache"
-    dnf_persist_dir = dnf_workspace_dir / "persist"
-    dnf_log_dir = dnf_workspace_dir / "log"
-    package_dir.mkdir(parents=True, exist_ok=True)
-    build_dir.mkdir(parents=True, exist_ok=True)
-    card_build_dir.mkdir(parents=True, exist_ok=True)
-    build_artifact_cache_dir.mkdir(parents=True, exist_ok=True)
-    spec_source_cache_dir.mkdir(parents=True, exist_ok=True)
-    if ccache_dir is not None:
-        ccache_dir.mkdir(parents=True, exist_ok=True)
-    repo_dir.mkdir(parents=True, exist_ok=True)
-    dnf_cache_dir.mkdir(parents=True, exist_ok=True)
-    dnf_persist_dir.mkdir(parents=True, exist_ok=True)
-    dnf_log_dir.mkdir(parents=True, exist_ok=True)
-    dnf_resolve_dir.mkdir(parents=True, exist_ok=True)
-
-    podman = shutil.which("podman")
-    if not podman:
-        raise ConfigError("podman must be installed to build")
-    log(f"Using Podman: {podman}")
-    buildah = shutil.which("buildah")
-    if buildah:
-        log(f"Using Buildah: {buildah}")
-
-    orchestrator_deps = tuple(
-        _substitute_variables(package, manifest_env)
-        for package in validation.manifest.orchestrator_deps
-    )
-    if orchestrator_deps:
-        orchestrator_tag = f"{distro}-{_package_hash(orchestrator_deps)}-{cache_version}"
-    else:
-        orchestrator_tag = f"{distro}-base-{cache_version}"
-
-    orchestrator_image = _local_image(local_prefix, "orchestrator", orchestrator_tag)
-    if _image_exists(podman, orchestrator_image):
-        log(f"Reusing orchestrator image: {orchestrator_image}")
-    elif load_only_version or cache_only:
-        raise ConfigError(f"orchestrator image is not cached: {orchestrator_image}")
-    else:
-        log(f"Creating orchestrator image: {orchestrator_image}")
-        _create_orchestrator_image(
-            podman=podman,
-            buildah=buildah,
-            source=orchestrator_source,
-            image=orchestrator_image,
-            packages=_build_deps(orchestrator_deps),
-        )
-    orchestrator = orchestrator_image
-
-    log(f"Using DNF metadata workspace: {dnf_workspace_dir}")
-
-    repo_images = []
-    for repo in validation.repos:
-        log(f"Rendering repository metadata: {repo.ref.repo}")
-        repo_variables = dict(manifest_env)
-        for key, value in repo.ref.vars.items():
-            repo_variables[key] = _substitute_variables(value, repo_variables)
-
-        rendered_repo = _substitute_variables(
-            repo.source.read_text(encoding="utf-8"),
-            repo_variables,
-        )
-        repo_lines = rendered_repo.rstrip().splitlines()
-        repo_lines.append("metadata_expire=never")
-        rendered_repo = "\n".join(repo_lines) + "\n"
-        repo_id = _repo_id(rendered_repo, repo.source)
-        repo_image = _local_image(
-            local_prefix,
-            "repos",
-            f"{distro}-{repo.ref.repo}-{cache_version}",
-        )
-        repo_images.append(repo_image)
-        if _image_exists(podman, repo_image):
-            log(f"Reusing repository metadata image: {repo_image}")
-            _extract_image_paths(
-                podman,
-                repo_image,
-                {
-                    "repos": repo_dir,
-                    "cache": dnf_cache_dir,
-                    "persist": dnf_persist_dir,
-                },
-            )
-            _apply_repo_priority(repo_dir / repo.source.name, repo.ref.priority)
-            continue
-        if load_only_version or cache_only:
-            raise ConfigError(
-                f"repository metadata image is not cached: {repo_image}"
-            )
-
-        log(f"Creating repository metadata image: {repo_image}")
-        _create_repo_image(
-            podman=podman,
-            buildah=_require_buildah(buildah),
-            orchestrator=orchestrator,
-            root_dir=root_dir,
-            image=repo_image,
-            repo_name=repo.source.name,
-            repo_id=repo_id,
-            rendered_repo=rendered_repo,
-        )
-        log(f"Extracting repository metadata: {repo.ref.repo}")
-        _extract_image_paths(
-            podman,
-            repo_image,
-            {
-                "repos": repo_dir,
-                "cache": dnf_cache_dir,
-                "persist": dnf_persist_dir,
-            },
-        )
-        _apply_repo_priority(repo_dir / repo.source.name, repo.ref.priority)
+    validation = context.validation
+    root_dir = context.root_dir
+    image = context.image
+    manifest_env = context.manifest_env
+    local_prefix = context.local_prefix
+    cache_version = context.cache_version
+    releasever = context.releasever
+    arch = context.arch
+    distro = context.distro
+    output_image = context.output_image
+    distro_cache_dir = context.distro_cache_dir
+    package_dir = context.package_dir
+    build_dir = context.build_dir
+    card_build_dir = context.card_build_dir
+    repo_dir = context.repo_dir
+    dnf_cache_dir = context.dnf_cache_dir
+    dnf_persist_dir = context.dnf_persist_dir
+    dnf_log_dir = context.dnf_log_dir
+    dnf_resolve_dir = context.dnf_resolve_dir
+    build_artifact_cache_dir = context.build_artifact_cache_dir
+    spec_source_cache_dir = context.spec_source_cache_dir
+    ccache_dir = context.ccache_dir
+    dnf_workspace_dir = context.dnf_workspace_dir
+    podman = context.podman
+    buildah = context.buildah
+    orchestrator = context.orchestrator
+    repo_images = list(context.repo_images)
 
     card_entries = []
     used_card_names = set()
@@ -3256,6 +3113,7 @@ def _run_specs_build(
     arch: str,
     spec_source_cache_dir: Path,
     source_revisions: tuple[tuple[str, str], ...],
+    rpmbuild_defines: tuple[str, ...] = tuple(),
 ) -> CardBuildOutput:
     workspace_dir = build_dir / "workspace"
     rpm_dir = build_dir / "rpms"
@@ -3296,7 +3154,12 @@ def _run_specs_build(
         if prepared_env:
             card_env.update(prepared_env)
 
-    build_script = _specs_build_script(staged_specs, workspace_dir, arch)
+    build_script = _specs_build_script(
+        staged_specs,
+        workspace_dir,
+        arch,
+        rpmbuild_defines=rpmbuild_defines,
+    )
     command = [
         podman,
         "run",
@@ -3718,10 +3581,14 @@ def _resolve_staged_spec_builder_packages(
     repo_images: tuple[str, ...],
     *,
     card_name: str,
+    rpmbuild_defines: tuple[str, ...] = tuple(),
 ) -> tuple[str, ...]:
     packages = []
     for target, spec_paths in _spec_paths_by_build_target(staged_specs):
         log(f"Resolving spec BuildRequires for card: {card_name} ({target})")
+        build_requires_kwargs = {}
+        if rpmbuild_defines:
+            build_requires_kwargs["rpmbuild_defines"] = rpmbuild_defines
         target_builder_packages = _resolve_spec_build_requires(
             orchestrator_dnf_base,
             releasever,
@@ -3732,6 +3599,7 @@ def _resolve_staged_spec_builder_packages(
             resolve_cache_dir,
             repo_images,
             include_dependencies=False,
+            **build_requires_kwargs,
         )
         packages.extend(target_builder_packages)
         if target != arch:
@@ -3745,6 +3613,7 @@ def _resolve_staged_spec_builder_packages(
                 resolve_cache_dir,
                 repo_images,
                 include_dependencies=True,
+                **build_requires_kwargs,
             )
             log(
                 f"Resolving spec BuildRequires arch variants for card: "
@@ -3775,6 +3644,7 @@ def _resolve_spec_build_requires(
     repo_images: tuple[str, ...],
     *,
     include_dependencies: bool = True,
+    rpmbuild_defines: tuple[str, ...] = tuple(),
 ) -> tuple[str, ...]:
     if not spec_paths:
         return tuple()
@@ -3787,6 +3657,9 @@ def _resolve_spec_build_requires(
         workspace_dir,
         "/ludos/specs:ro",
     )
+    define_args = []
+    for define in rpmbuild_defines:
+        define_args.extend(["--define", define])
     cmd = [
         *dnf_base,
         "--assumeno",
@@ -3805,6 +3678,7 @@ def _resolve_spec_build_requires(
         f"_target_cpu {arch}",
         "--define",
         f"_target {arch}-redhat-linux-gnu",
+        *define_args,
         "--spec",
         *spec_args,
     ]
@@ -3974,6 +3848,8 @@ def _specs_build_script(
     staged_specs: tuple[StagedSpec, ...],
     workspace_dir: Path,
     arch: str,
+    *,
+    rpmbuild_defines: tuple[str, ...] = tuple(),
 ) -> str:
     topdir = "/workspace/rpmbuild"
     lines = [
@@ -4014,6 +3890,11 @@ def _specs_build_script(
     wanted = tuple(
         dict.fromkeys(package for staged in staged_specs for package in staged.packages)
     )
+    extra_defines = " ".join(
+        f"--define {shlex.quote(define)}" for define in rpmbuild_defines
+    )
+    if extra_defines:
+        extra_defines = f" {extra_defines}"
     lines.extend(
         [
             'cat > "$topdir/wanted.txt" <<\'LUDOS_WANTED_RPMS\'',
@@ -4071,9 +3952,9 @@ def _specs_build_script(
                 "  fi",
                 f"  echo {shlex.quote(f'Building packages from {topdir}/SPECS/{spec_name}')}",
                 "  if [ \"$target\" = i686 ]; then",
-                f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\" --define \"__meson $topdir/ludos-meson-i686\"",
+                f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\" --define \"__meson $topdir/ludos-meson-i686\"{extra_defines}",
                 "  else",
-                f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"",
+                f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"{extra_defines}",
                 "  fi",
                 "done",
             ]
