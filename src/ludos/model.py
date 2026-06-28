@@ -126,6 +126,7 @@ class RepoRef:
 class InstallerConfig:
     files: tuple[str, ...] = tuple()
     build: str = ""
+    ostree: bool = False
 
 
 @dataclass(frozen=True)
@@ -385,13 +386,14 @@ def _installer_config(data: dict[str, Any], path: Path) -> InstallerConfig:
     if not isinstance(value, dict):
         raise ConfigError(f"{path}: 'installer' must be a mapping")
 
-    allowed = {"files", "build"}
+    allowed = {"files", "build", "ostree"}
     for key in value:
         if key not in allowed:
             raise ConfigError(f"{path}: 'installer.{key}' is not supported")
     return InstallerConfig(
         files=_string_tuple(value, "files", path),
         build=_optional_string(value, "build", path),
+        ostree=_optional_bool(value, "ostree", path, "installer"),
     )
 
 

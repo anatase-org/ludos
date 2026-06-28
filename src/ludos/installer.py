@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -139,10 +140,12 @@ def bootc_installer(
     log(f"Preparing installer output directory: {prepare_ctx.output_dir}")
     _prepare_output_dir(prepare_ctx.output_dir)
     source_ref = _source_image_ref(ref)
+    log(f"Importing installer source image into local storage: {source_ref}")
+    source_image = _pull_source_image(prepare_ctx, source_ref)
     log("Preparing installer image build context")
     _prepare_installer_build_context(prepare_ctx)
-    log(f"Building installer image from {source_ref}")
-    installer_image = _build_installer_image(prepare_ctx, source_ref)
+    log(f"Building installer image from {source_image}")
+    installer_image = _build_installer_image(prepare_ctx, source_image)
     ctx = InstallerContext(
         manifest=manifest,
         manifest_path=manifest_path,
@@ -223,6 +226,37 @@ def _source_image_ref(ref: str) -> str:
     return ref
 
 
+def _pull_source_image(ctx: InstallerContext, source_ref: str) -> str:
+    result = _run_host(
+        [ctx.podman, "pull", "--quiet", source_ref],
+        capture=True,
+    )
+    image_ref = _pulled_image_ref(result.stdout, source_ref)
+    inspect = _run_host(
+        [ctx.podman, "image", "inspect", image_ref, "--format", "{{.Id}}"],
+        capture=True,
+    )
+    return _normalize_image_id(inspect.stdout.strip())
+
+
+def _pulled_image_ref(output: str, fallback: str) -> str:
+    line = _last_output_line(output)
+    if not line:
+        return fallback
+    if line.startswith("Loaded image: "):
+        return line.removeprefix("Loaded image: ").strip()
+    return line
+
+
+def _normalize_image_id(value: str) -> str:
+    image_id = value.strip()
+    if image_id.startswith("sha256:"):
+        image_id = image_id.removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", image_id):
+        raise ConfigError(f"podman image inspect returned an invalid image ID: {value}")
+    return f"sha256:{image_id.lower()}"
+
+
 def _prepare_installer_build_context(ctx: InstallerContext) -> None:
     if ctx.build_context.exists():
         shutil.rmtree(ctx.build_context)
@@ -235,14 +269,31 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
     containerfile = ctx.build_context / "Containerfile"
     has_files = (ctx.build_context / "files").is_dir()
     containerfile.write_text(
-        _installer_containerfile(base_ref, has_files, ctx.manifest.installer.build),
+        _installer_containerfile(
+            base_ref,
+            has_files,
+            ctx.manifest.installer.build,
+            ostree=ctx.manifest.installer.ostree,
+        ),
         encoding="utf-8",
     )
     log(f"Committing installer image: {image}")
+    build_options = []
+    if ctx.manifest.installer.ostree:
+        build_options.extend(
+            [
+                "--cap-add",
+                "SYS_ADMIN",
+                "--build-arg",
+                f"LUDOS_INSTALLER_SOURCE_IMAGE={_containers_storage_image_id(base_ref)}",
+                *_podman_storage_volume_options(ctx),
+            ]
+        )
     _run_host(
         [
             ctx.podman,
             "build",
+            *build_options,
             "--tag",
             image,
             "--tag",
@@ -263,12 +314,27 @@ def _installer_latest_image_ref() -> str:
     return "localhost/installer:latest"
 
 
-def _installer_containerfile(base_ref: str, has_files: bool, build_script: str) -> str:
+def _installer_containerfile(
+    base_ref: str,
+    has_files: bool,
+    build_script: str,
+    *,
+    ostree: bool = False,
+) -> str:
     if "\n" in base_ref:
         raise ConfigError("installer base image ref must not contain newlines")
     lines = [f"FROM {base_ref}"]
     if has_files:
         lines.append("COPY files/ /files/")
+    if ostree:
+        lines.extend(
+            [
+                "ARG LUDOS_INSTALLER_SOURCE_IMAGE",
+                "RUN /bin/sh -ex <<'LUDOS_INSTALLER_OSTREE'",
+                _installer_ostree_script().rstrip(),
+                "LUDOS_INSTALLER_OSTREE",
+            ]
+        )
     lines.extend(
         [
             "RUN /bin/sh -ex <<'LUDOS_INSTALLER_BUILD'",
@@ -278,6 +344,70 @@ def _installer_containerfile(base_ref: str, has_files: bool, build_script: str) 
         ]
     )
     return "\n".join(lines)
+
+
+def _installer_ostree_script() -> str:
+    return "\n".join(
+        [
+            'repo="/ostree/repo"',
+            'if [ ! -d "${repo}/objects" ]; then',
+            '  echo "installer OSTree repo is missing objects: ${repo}" >&2',
+            "  exit 1",
+            "fi",
+            'if [ -z "${LUDOS_INSTALLER_SOURCE_IMAGE:-}" ]; then',
+            '  echo "LUDOS_INSTALLER_SOURCE_IMAGE is not set" >&2',
+            "  exit 1",
+            "fi",
+            'digestfile="/run/ludos-installer-os-commit"',
+            'rm -f "${digestfile}"',
+            "bootc internals ostree-ext container image pull \\",
+            '  --ostree-digestfile "${digestfile}" \\',
+            "  --quiet \\",
+            '  "${repo}" \\',
+            '  "ostree-unverified-image:containers-storage:${LUDOS_INSTALLER_SOURCE_IMAGE}"',
+            'commit="$(cat "${digestfile}")"',
+            'if [ -z "${commit}" ]; then',
+            '  echo "ostree-ext did not write an installer os commit digest" >&2',
+            "  exit 1",
+            "fi",
+            'if ostree --repo="${repo}" refs | grep -qx os; then',
+            '  ostree --repo="${repo}" refs --delete os',
+            "fi",
+            'ostree --repo="${repo}" refs --create=os "${commit}"',
+            'ostree --repo="${repo}" summary --update',
+        ]
+    )
+
+
+def _containers_storage_image_id(image_id: str) -> str:
+    value = image_id.strip()
+    if value.startswith("sha256:"):
+        value = value.removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ConfigError(f"installer source image ID is invalid: {image_id}")
+    return value
+
+
+def _podman_storage_volume_options(ctx: InstallerContext) -> list[str]:
+    result = _run_host(
+        [ctx.podman, "info", "--format", "{{json .Store}}"],
+        capture=True,
+    )
+    try:
+        store = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ConfigError("failed to parse podman storage information") from exc
+    graph_root = str(store.get("graphRoot") or "").strip()
+    if not graph_root:
+        raise ConfigError("podman storage graphRoot is unavailable")
+    run_root = str(store.get("runRoot") or "").strip()
+    volumes = [
+        "--volume",
+        f"{graph_root}:/var/lib/containers/storage",
+    ]
+    if run_root:
+        volumes.extend(["--volume", f"{run_root}:/run/containers/storage"])
+    return volumes
 
 
 def _last_output_line(output: str) -> str:

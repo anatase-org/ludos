@@ -30,6 +30,7 @@ from ludos.installer import (
     _installer_image_ref,
     _installer_latest_image_ref,
     _installer_build_script,
+    _pull_source_image,
     _fat_label_for_manifest,
     _label_base,
     _container_name,
@@ -69,11 +70,12 @@ def _manifest(installer: InstallerConfig = InstallerConfig()) -> Manifest:
 def _context(
     tmp: Path,
     *,
+    installer: InstallerConfig = InstallerConfig(),
     orchestrator: str = "orchestrator",
     scratch: bool = False,
 ) -> InstallerContext:
     return InstallerContext(
-        manifest=_manifest(),
+        manifest=_manifest(installer),
         manifest_path=tmp / "anatase.yml",
         ref=str(tmp / "cache/oci/anatase-f44-x86_64"),
         output_dir=tmp / "cache/iso/anatase-installer",
@@ -170,6 +172,7 @@ class InstallerManifestTests(unittest.TestCase):
                         "cards:",
                         "  - cards/base/kernel",
                         "installer:",
+                        "  ostree: true",
                         "  files:",
                         "    - installer.ks",
                         "  build: |",
@@ -183,7 +186,33 @@ class InstallerManifestTests(unittest.TestCase):
 
         self.assertEqual(parsed.installer.files, ("installer.ks",))
         self.assertEqual(parsed.installer.build, "echo installer")
+        self.assertTrue(parsed.installer.ostree)
         self.assertEqual(parsed.name, "Test OS")
+
+    def test_manifest_installer_rejects_non_boolean_ostree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "anatase.yml"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "name: Test OS",
+                        "releasever: '44'",
+                        "distro: f44-$arch",
+                        "orchestrator: quay.io/fedora/fedora:44",
+                        "bootstrap: cards/bootstrap.yml",
+                        "repos: []",
+                        "cards:",
+                        "  - cards/base/kernel",
+                        "installer:",
+                        "  ostree: yes please",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "installer.ostree.*boolean"):
+                Manifest.from_file(manifest)
 
 
 class InstallerHelperTests(unittest.TestCase):
@@ -296,7 +325,14 @@ class InstallerHelperTests(unittest.TestCase):
             with (
                 patch("ludos.installer.shutil.which", return_value="podman"),
                 patch("ludos.installer._prepare_installer_build_context"),
-                patch("ludos.installer._build_installer_image", return_value="localhost/installer:test"),
+                patch(
+                    "ludos.installer._pull_source_image",
+                    return_value="sha256:" + "d" * 64,
+                ),
+                patch(
+                    "ludos.installer._build_installer_image",
+                    return_value="localhost/installer:test",
+                ) as build_image,
                 patch("ludos.installer._create_root_erofs", side_effect=record),
                 patch("ludos.installer._create_efi_image"),
                 patch("ludos.installer._create_iso"),
@@ -304,6 +340,7 @@ class InstallerHelperTests(unittest.TestCase):
                 bootc_installer(manifest, str(oci_dir), output=root / "out", scratch=True)
 
         self.assertEqual(seen, [("localhost/installer:test", True)])
+        self.assertEqual(build_image.call_args.args[1], "sha256:" + "d" * 64)
 
     def test_installer_image_ref_uses_installer_repository(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -327,6 +364,44 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn("RUN /bin/sh -ex <<'LUDOS_INSTALLER_BUILD'", containerfile)
         self.assertIn("echo installer", containerfile)
         self.assertIn("rm -rf /files", containerfile)
+        self.assertNotIn("LUDOS_INSTALLER_OSTREE", containerfile)
+
+    def test_installer_containerfile_adds_ostree_step_before_build(self) -> None:
+        containerfile = _installer_containerfile(
+            "sha256:abc",
+            has_files=True,
+            build_script="echo installer\n",
+            ostree=True,
+        )
+
+        self.assertIn("ARG LUDOS_INSTALLER_SOURCE_IMAGE", containerfile)
+        self.assertIn("bootc internals ostree-ext container image pull", containerfile)
+        self.assertIn("--ostree-digestfile", containerfile)
+        self.assertIn('ostree --repo="${repo}" refs --create=os "${commit}"', containerfile)
+        self.assertIn("ostree-unverified-image:containers-storage:", containerfile)
+        self.assertNotIn("container unencapsulate", containerfile)
+        self.assertNotIn("--write-ref os", containerfile)
+        self.assertLess(
+            containerfile.index("LUDOS_INSTALLER_OSTREE"),
+            containerfile.index("LUDOS_INSTALLER_BUILD"),
+        )
+
+    def test_pull_source_image_imports_to_storage_and_returns_image_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _context(Path(tmp))
+
+            def run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+                if command[:3] == ["podman", "pull", "--quiet"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64 + "\n")
+                if command[:3] == ["podman", "image", "inspect"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64 + "\n")
+                raise AssertionError(command)
+
+            with patch("ludos.installer._run_host", side_effect=run) as run_mock:
+                image_id = _pull_source_image(ctx, "oci:/cache/image:latest")
+
+        self.assertEqual(image_id, "sha256:" + "b" * 64)
+        self.assertEqual(run_mock.call_args_list[0].args[0], ["podman", "pull", "--quiet", "oci:/cache/image:latest"])
 
     def test_build_installer_image_builds_containerfile_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -353,6 +428,40 @@ class InstallerHelperTests(unittest.TestCase):
                 str(ctx.build_context),
             ]
         )
+
+    def test_build_installer_image_ostree_mounts_storage_and_passes_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _context(Path(tmp), installer=InstallerConfig(ostree=True))
+            ctx.build_context.mkdir(parents=True)
+            graph_root = Path(tmp) / "graph"
+            run_root = Path(tmp) / "run"
+
+            def run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+                if command[:3] == ["podman", "info", "--format"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=f'{{"graphRoot": "{graph_root}", "runRoot": "{run_root}"}}',
+                    )
+                return subprocess.CompletedProcess(command, 0, stdout="")
+
+            with patch("ludos.installer._run_host", side_effect=run) as run_mock:
+                image = _build_installer_image(ctx, "sha256:" + "c" * 64)
+
+            containerfile_text = (ctx.build_context / "Containerfile").read_text(
+                encoding="utf-8"
+            )
+            build_command = run_mock.call_args_list[-1].args[0]
+
+        self.assertEqual(image, f"localhost/installer:{_safe_ref_name(ctx.ref)}")
+        self.assertIn("FROM sha256:" + "c" * 64, containerfile_text)
+        self.assertIn("--cap-add", build_command)
+        self.assertIn("SYS_ADMIN", build_command)
+        self.assertIn("--build-arg", build_command)
+        self.assertIn("LUDOS_INSTALLER_SOURCE_IMAGE=" + "c" * 64, build_command)
+        self.assertNotIn("LUDOS_INSTALLER_SOURCE_IMAGE=sha256:" + "c" * 64, build_command)
+        self.assertIn(f"{graph_root}:/var/lib/containers/storage", build_command)
+        self.assertIn(f"{run_root}:/run/containers/storage", build_command)
 
     def test_container_name_is_deterministic_for_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
