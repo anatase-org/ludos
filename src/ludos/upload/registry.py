@@ -18,6 +18,8 @@ DOCKER_MANIFEST_LIST_MEDIA_TYPE = (
 )
 DEFAULT_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
 DEFAULT_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
+OCI_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+OCI_MUTABLE_CACHE_CONTROL = "public, max-age=60, must-revalidate"
 REGISTRY_PING_BODY = b"{}"
 
 _REF_COMPONENT_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
@@ -53,6 +55,7 @@ def registry_init(
                 Key=key,
                 Body=REGISTRY_PING_BODY,
                 ContentType="application/json",
+                CacheControl=OCI_MUTABLE_CACHE_CONTROL,
             )
         except Exception as exc:
             raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc
@@ -135,6 +138,7 @@ def upload_oci(
                     Key=tag_key,
                     Body=layout.manifest_bytes,
                     ContentType=layout.manifest.media_type,
+                    CacheControl=OCI_MUTABLE_CACHE_CONTROL,
                 )
             except Exception as exc:
                 raise ConfigError(f"S3 upload failed for {tag_key}: {exc}") from exc
@@ -362,7 +366,10 @@ def _upload_blob_if_needed(
                 str(path),
                 bucket,
                 key,
-                ExtraArgs={"ContentType": content_type},
+                ExtraArgs={
+                    "ContentType": content_type,
+                    "CacheControl": OCI_IMMUTABLE_CACHE_CONTROL,
+                },
                 Callback=update_progress,
             )
     except Exception as exc:
@@ -404,6 +411,7 @@ def _put_object_if_needed(
             Key=key,
             Body=body,
             ContentType=content_type,
+            CacheControl=OCI_IMMUTABLE_CACHE_CONTROL,
         )
     except Exception as exc:
         raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc

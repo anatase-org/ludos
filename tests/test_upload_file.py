@@ -87,15 +87,17 @@ class FakeS3Client:
         Key: str,
         Body: bytes,
         ContentType: str,
+        CacheControl: str | None = None,
     ) -> None:
-        self.puts.append(
-            {
-                "Bucket": Bucket,
-                "Key": Key,
-                "Body": Body,
-                "ContentType": ContentType,
-            }
-        )
+        put: dict[str, object] = {
+            "Bucket": Bucket,
+            "Key": Key,
+            "Body": Body,
+            "ContentType": ContentType,
+        }
+        if CacheControl is not None:
+            put["CacheControl"] = CacheControl
+        self.puts.append(put)
         self.calls.append(("put_object", Key))
         self.objects[(Bucket, Key)] = Body
 

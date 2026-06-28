@@ -14,6 +14,8 @@ from ludos.upload.registry import (
     DEFAULT_CONFIG_MEDIA_TYPE,
     DEFAULT_LAYER_MEDIA_TYPE,
     DEFAULT_MANIFEST_MEDIA_TYPE,
+    OCI_IMMUTABLE_CACHE_CONTROL,
+    OCI_MUTABLE_CACHE_CONTROL,
     registry_init,
     upload_oci,
 )
@@ -106,12 +108,14 @@ class UploadRegistryTests(unittest.TestCase):
                     "Key": "v2/",
                     "Body": b"{}",
                     "ContentType": "application/json",
+                    "CacheControl": OCI_MUTABLE_CACHE_CONTROL,
                 },
                 {
                     "Bucket": "anatase-artifacts",
                     "Key": "v2",
                     "Body": b"{}",
                     "ContentType": "application/json",
+                    "CacheControl": OCI_MUTABLE_CACHE_CONTROL,
                 },
             ],
         )
@@ -159,6 +163,10 @@ class UploadRegistryTests(unittest.TestCase):
             [DEFAULT_LAYER_MEDIA_TYPE, DEFAULT_CONFIG_MEDIA_TYPE],
         )
         self.assertEqual(
+            [item["ExtraArgs"]["CacheControl"] for item in client.uploads],
+            [OCI_IMMUTABLE_CACHE_CONTROL, OCI_IMMUTABLE_CACHE_CONTROL],
+        )
+        self.assertEqual(
             [item["ContentType"] for item in client.puts],
             [
                 DEFAULT_MANIFEST_MEDIA_TYPE,
@@ -169,6 +177,14 @@ class UploadRegistryTests(unittest.TestCase):
         self.assertEqual(
             [item["Body"] for item in client.puts],
             [layout.manifest_bytes, layout.manifest_bytes, layout.manifest_bytes],
+        )
+        self.assertEqual(
+            [item["CacheControl"] for item in client.puts],
+            [
+                OCI_IMMUTABLE_CACHE_CONTROL,
+                OCI_MUTABLE_CACHE_CONTROL,
+                OCI_MUTABLE_CACHE_CONTROL,
+            ],
         )
         self.assertNotIn(("anatase-artifacts", "v2"), client.objects)
         self.assertNotIn(("anatase-artifacts", "v2/"), client.objects)
