@@ -194,55 +194,86 @@ def build_parser() -> argparse.ArgumentParser:
     )
     package_fork.set_defaults(func=package_command)
 
-    upload = subcommands.add_parser(
-        "upload",
-        help="Upload Ludos artifacts.",
+    registry = subcommands.add_parser(
+        "registry",
+        help="Work with static registry artifacts.",
     )
-    upload_subcommands = upload.add_subparsers(dest="upload_action", required=True)
-    upload_file_parser = upload_subcommands.add_parser(
-        "file",
-        help="Upload a file to S3 and update SHA256SUMS.",
+    registry_subcommands = registry.add_subparsers(
+        dest="registry_action",
+        required=True,
     )
-    upload_file_parser.add_argument(
-        "--delete",
-        action="store_true",
-        help="Delete the S3 object instead of uploading a file.",
-    )
-    upload_file_parser.add_argument(
-        "file_args",
-        nargs="+",
-        help=(
-            "Upload args: <path> <output-path> <download-name>. "
-            "Delete args: --delete <output-path>."
-        ),
-    )
-    upload_file_parser.set_defaults(func=upload_command)
-    upload_registry_init_parser = upload_subcommands.add_parser(
-        "registry-init",
+    registry_init_parser = registry_subcommands.add_parser(
+        "init",
         help="Initialize S3 objects required for a static OCI registry.",
     )
-    upload_registry_init_parser.set_defaults(func=upload_command)
-    upload_oci_parser = upload_subcommands.add_parser(
+    registry_init_parser.set_defaults(func=registry_command)
+
+    registry_file = registry_subcommands.add_parser(
+        "file",
+        help="Work with registry-hosted files.",
+    )
+    registry_file_subcommands = registry_file.add_subparsers(
+        dest="registry_file_action",
+        required=True,
+    )
+    registry_file_upload = registry_file_subcommands.add_parser(
+        "upload",
+        help="Upload a file to S3 and update SHA256SUMS.",
+    )
+    registry_file_upload.add_argument(
+        "path",
+        type=Path,
+        help="Path to the local file to upload.",
+    )
+    registry_file_upload.add_argument(
+        "output_path",
+        help="S3 object path to write.",
+    )
+    registry_file_upload.add_argument(
+        "download_name",
+        help="Filename to publish in SHA256SUMS and Content-Disposition.",
+    )
+    registry_file_upload.set_defaults(func=registry_command)
+
+    registry_file_delete = registry_file_subcommands.add_parser(
+        "delete",
+        help="Delete a file from S3.",
+    )
+    registry_file_delete.add_argument(
+        "output_path",
+        help="S3 object path to delete.",
+    )
+    registry_file_delete.set_defaults(func=registry_command)
+
+    registry_oci = registry_subcommands.add_parser(
         "oci",
+        help="Work with static OCI repositories.",
+    )
+    registry_oci_subcommands = registry_oci.add_subparsers(
+        dest="registry_oci_action",
+        required=True,
+    )
+    registry_oci_upload = registry_oci_subcommands.add_parser(
+        "upload",
         help="Upload a local OCI layout to S3 as a static OCI repository.",
     )
-    upload_oci_parser.add_argument(
+    registry_oci_upload.add_argument(
         "local_oci_path",
         type=Path,
         help="Path to a local OCI layout directory.",
     )
-    upload_oci_parser.add_argument(
+    registry_oci_upload.add_argument(
         "ref",
         help="OCI repository path within the registry, without the registry host.",
     )
-    upload_oci_parser.add_argument(
+    registry_oci_upload.add_argument(
         "--tag",
         action="append",
         required=True,
         dest="tags",
         help="Tag to publish. May be specified more than once.",
     )
-    upload_oci_parser.set_defaults(func=upload_command)
+    registry_oci_upload.set_defaults(func=registry_command)
 
     bootc = subcommands.add_parser(
         "bootc",
@@ -519,21 +550,20 @@ def package_command(args: argparse.Namespace) -> int:
     )
 
 
-def upload_command(args: argparse.Namespace) -> int:
-    if args.upload_action == "file":
-        if args.delete:
-            if len(args.file_args) != 1:
-                raise ConfigError("upload file --delete requires <output-path>")
-            return delete_file(args.file_args[0])
-        if len(args.file_args) != 3:
-            raise ConfigError("upload file requires <path> <output-path> <download-name>")
-        path, output_path, download_name = args.file_args
-        return upload_file(Path(path), output_path, download_name)
-    if args.upload_action == "registry-init":
+def registry_command(args: argparse.Namespace) -> int:
+    if args.registry_action == "init":
         return registry_init()
-    if args.upload_action == "oci":
+    if args.registry_action == "file":
+        if args.registry_file_action == "upload":
+            return upload_file(args.path, args.output_path, args.download_name)
+        if args.registry_file_action == "delete":
+            return delete_file(args.output_path)
+        raise ConfigError(f"unknown registry file action: {args.registry_file_action}")
+    if args.registry_action == "oci":
+        if args.registry_oci_action != "upload":
+            raise ConfigError(f"unknown registry oci action: {args.registry_oci_action}")
         return upload_oci(args.local_oci_path, args.ref, tuple(args.tags))
-    raise ConfigError(f"unknown upload action: {args.upload_action}")
+    raise ConfigError(f"unknown registry action: {args.registry_action}")
 
 
 def bootc_command(args: argparse.Namespace) -> int:

@@ -23,15 +23,16 @@ from .test_upload_file import ENV, FakeS3Client
 
 class UploadRegistryTests(unittest.TestCase):
     def test_registry_init_parser(self) -> None:
-        args = build_parser().parse_args(["upload", "registry-init"])
+        args = build_parser().parse_args(["registry", "init"])
 
-        self.assertEqual(args.upload_action, "registry-init")
+        self.assertEqual(args.registry_action, "init")
 
     def test_upload_oci_parser(self) -> None:
         args = build_parser().parse_args(
             [
-                "upload",
+                "registry",
                 "oci",
+                "upload",
                 "cache/oci/anatase",
                 "images/anatase",
                 "--tag",
@@ -41,13 +42,14 @@ class UploadRegistryTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(args.upload_action, "oci")
+        self.assertEqual(args.registry_action, "oci")
+        self.assertEqual(args.registry_oci_action, "upload")
         self.assertEqual(args.local_oci_path, Path("cache/oci/anatase"))
         self.assertEqual(args.ref, "images/anatase")
         self.assertEqual(args.tags, ["latest", "f44"])
 
     def test_registry_init_command_dispatches(self) -> None:
-        args = build_parser().parse_args(["upload", "registry-init"])
+        args = build_parser().parse_args(["registry", "init"])
 
         with patch("ludos.__main__.registry_init", return_value=0) as init:
             self.assertEqual(args.func(args), 0)
@@ -57,8 +59,9 @@ class UploadRegistryTests(unittest.TestCase):
     def test_upload_oci_command_dispatches(self) -> None:
         args = build_parser().parse_args(
             [
-                "upload",
+                "registry",
                 "oci",
+                "upload",
                 "cache/oci/anatase",
                 "images/anatase",
                 "--tag",
@@ -81,7 +84,13 @@ class UploadRegistryTests(unittest.TestCase):
         with patch("sys.stderr", new=StringIO()):
             with self.assertRaises(SystemExit):
                 build_parser().parse_args(
-                    ["upload", "oci", "cache/oci/anatase", "images/anatase"]
+                    [
+                        "registry",
+                        "oci",
+                        "upload",
+                        "cache/oci/anatase",
+                        "images/anatase",
+                    ]
                 )
 
     def test_registry_init_uploads_v2_ping_objects(self) -> None:

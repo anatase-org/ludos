@@ -183,7 +183,7 @@ def _read_layout(path: Path) -> OciLayout:
         what="manifest",
     )
     if manifest.media_type in (OCI_INDEX_MEDIA_TYPE, DOCKER_MANIFEST_LIST_MEDIA_TYPE):
-        raise ConfigError("OCI image indexes are not supported for upload oci")
+        raise ConfigError("OCI image indexes are not supported for registry oci upload")
 
     manifest_path = path / "blobs" / "sha256" / manifest.hex_digest
     manifest_bytes = _read_blob_bytes(manifest_path, manifest)
@@ -304,7 +304,7 @@ def _validate_ref(ref: str) -> str:
 
 def _validate_tags(tags: tuple[str, ...]) -> tuple[str, ...]:
     if not tags:
-        raise ConfigError("upload oci requires at least one --tag")
+        raise ConfigError("registry oci upload requires at least one --tag")
     seen = set()
     result = []
     for tag in tags:
