@@ -16,7 +16,11 @@ from ludos.upload.registry import (
     DEFAULT_MANIFEST_MEDIA_TYPE,
     OCI_IMMUTABLE_CACHE_CONTROL,
     OCI_MUTABLE_CACHE_CONTROL,
+    delete_oci_tags,
+    list_oci_tags,
+    prune_oci_tags,
     registry_init,
+    tree_shake_oci,
     upload_oci,
 )
 
@@ -94,6 +98,142 @@ class UploadRegistryTests(unittest.TestCase):
                         "images/anatase",
                     ]
                 )
+
+    def test_delete_oci_parser(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "oci",
+                "delete",
+                "images/anatase",
+                "--tag",
+                "latest",
+                "--tag",
+                "f44",
+                "--dry-run",
+            ]
+        )
+
+        self.assertEqual(args.registry_action, "oci")
+        self.assertEqual(args.registry_oci_action, "delete")
+        self.assertEqual(args.ref, "images/anatase")
+        self.assertEqual(args.tags, ["latest", "f44"])
+        self.assertTrue(args.dry_run)
+
+    def test_list_oci_parser(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "oci", "list", "images/anatase"]
+        )
+
+        self.assertEqual(args.registry_action, "oci")
+        self.assertEqual(args.registry_oci_action, "list")
+        self.assertEqual(args.ref, "images/anatase")
+
+    def test_delete_oci_parser_requires_tag(self) -> None:
+        with patch("sys.stderr", new=StringIO()):
+            with self.assertRaises(SystemExit):
+                build_parser().parse_args(
+                    ["registry", "oci", "delete", "images/anatase"]
+                )
+
+    def test_prune_oci_parser(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "oci",
+                "prune",
+                "images/anatase",
+                "--pattern",
+                "f*",
+                "--dry-run",
+            ]
+        )
+
+        self.assertEqual(args.registry_action, "oci")
+        self.assertEqual(args.registry_oci_action, "prune")
+        self.assertEqual(args.ref, "images/anatase")
+        self.assertEqual(args.pattern, "f*")
+        self.assertEqual(args.rule, "descending")
+        self.assertEqual(args.number, 3)
+        self.assertTrue(args.dry_run)
+
+    def test_tree_shake_oci_parser(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "oci", "tree-shake", "images/anatase", "--dry-run"]
+        )
+
+        self.assertEqual(args.registry_action, "oci")
+        self.assertEqual(args.registry_oci_action, "tree-shake")
+        self.assertEqual(args.ref, "images/anatase")
+        self.assertTrue(args.dry_run)
+
+    def test_delete_oci_command_dispatches(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "oci",
+                "delete",
+                "images/anatase",
+                "--tag",
+                "latest",
+                "--tag",
+                "f44",
+                "--dry-run",
+            ]
+        )
+
+        with patch("ludos.__main__.delete_oci_tags", return_value=0) as delete:
+            self.assertEqual(args.func(args), 0)
+
+        delete.assert_called_once_with(
+            "images/anatase",
+            ("latest", "f44"),
+            dry_run=True,
+        )
+
+    def test_list_oci_command_dispatches(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "oci", "list", "images/anatase"]
+        )
+
+        with patch("ludos.__main__.list_oci_tags", return_value=0) as list_tags:
+            self.assertEqual(args.func(args), 0)
+
+        list_tags.assert_called_once_with("images/anatase")
+
+    def test_prune_oci_command_dispatches(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "oci",
+                "prune",
+                "images/anatase",
+                "--pattern",
+                "f*",
+                "--dry-run",
+            ]
+        )
+
+        with patch("ludos.__main__.prune_oci_tags", return_value=0) as prune:
+            self.assertEqual(args.func(args), 0)
+
+        prune.assert_called_once_with(
+            "images/anatase",
+            "f*",
+            rule="descending",
+            number=3,
+            dry_run=True,
+        )
+
+    def test_tree_shake_oci_command_dispatches(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "oci", "tree-shake", "images/anatase", "--dry-run"]
+        )
+
+        with patch("ludos.__main__.tree_shake_oci", return_value=0) as tree_shake:
+            self.assertEqual(args.func(args), 0)
+
+        tree_shake.assert_called_once_with("images/anatase", dry_run=True)
 
     def test_registry_init_uploads_v2_ping_objects(self) -> None:
         client = FakeS3Client()
@@ -446,6 +586,322 @@ class UploadRegistryTests(unittest.TestCase):
                             client=client,
                         )
 
+    def test_delete_oci_tags_deletes_only_tag_manifests(self) -> None:
+        client = FakeS3Client(
+            {
+                ("anatase-artifacts", "v2/images/anatase/manifests/latest"): b"tag",
+                ("anatase-artifacts", "v2/images/anatase/manifests/f44"): b"tag",
+                ("anatase-artifacts", "v2/images/anatase/blobs/sha256:abc"): b"blob",
+            }
+        )
+
+        self.assertEqual(
+            delete_oci_tags(
+                "images/anatase",
+                ("latest", "f44"),
+                environ=ENV,
+                client=client,
+            ),
+            0,
+        )
+
+        self.assertEqual(
+            [item["Key"] for item in client.deletes],
+            [
+                "v2/images/anatase/manifests/latest",
+                "v2/images/anatase/manifests/f44",
+            ],
+        )
+        self.assertEqual(client.heads, [])
+        self.assertEqual(client.lists, [])
+        self.assertIn(
+            ("anatase-artifacts", "v2/images/anatase/blobs/sha256:abc"),
+            client.objects,
+        )
+
+    def test_delete_oci_tags_warns_and_continues_on_missing_tag(self) -> None:
+        missing_key = "v2/images/anatase/manifests/missing"
+        client = FakeS3Client(
+            {("anatase-artifacts", "v2/images/anatase/manifests/latest"): b"tag"}
+        )
+        client.delete_errors[("anatase-artifacts", missing_key)] = "NoSuchKey"
+
+        with patch("ludos.upload.registry.warning") as warning:
+            self.assertEqual(
+                delete_oci_tags(
+                    "images/anatase",
+                    ("missing", "latest"),
+                    environ=ENV,
+                    client=client,
+                ),
+                0,
+            )
+
+        warning.assert_called_once_with("OCI tag is already missing: images/anatase:missing")
+        self.assertEqual(
+            [item["Key"] for item in client.deletes],
+            [missing_key, "v2/images/anatase/manifests/latest"],
+        )
+
+    def test_delete_oci_tags_dry_run_does_not_delete(self) -> None:
+        client = FakeS3Client(
+            {("anatase-artifacts", "v2/images/anatase/manifests/latest"): b"tag"}
+        )
+
+        with patch("ludos.upload.registry.log") as log:
+            self.assertEqual(
+                delete_oci_tags(
+                    "images/anatase",
+                    ("latest",),
+                    dry_run=True,
+                    environ=ENV,
+                    client=client,
+                ),
+                0,
+            )
+
+        self.assertEqual(client.deletes, [])
+        log.assert_called_once_with(
+            "Would delete tag: v2/images/anatase/manifests/latest"
+        )
+
+    def test_list_oci_tags_lists_tags_and_skips_sha_prefixes(self) -> None:
+        client = FakeS3Client(
+            {
+                ("anatase-artifacts", "v2/images/anatase/manifests/f44"): b"tag",
+                ("anatase-artifacts", "v2/images/anatase/manifests/latest"): b"tag",
+                ("anatase-artifacts", "v2/images/anatase/manifests/sha-test"): b"tag",
+                (
+                    "anatase-artifacts",
+                    "v2/images/anatase/manifests/sha256:" + "a" * 64,
+                ): b"manifest",
+                ("anatase-artifacts", "v2/images/anatase/blobs/sha256:abc"): b"blob",
+            }
+        )
+
+        with patch("ludos.upload.registry.log") as log:
+            self.assertEqual(
+                list_oci_tags("images/anatase", environ=ENV, client=client),
+                0,
+            )
+
+        self.assertEqual(
+            client.lists,
+            [
+                {
+                    "Bucket": "anatase-artifacts",
+                    "Prefix": "v2/images/anatase/manifests/",
+                }
+            ],
+        )
+        self.assertEqual(log.call_args_list, [call("f44"), call("latest")])
+        self.assertEqual(client.deletes, [])
+
+    def test_prune_oci_tags_keeps_descending_number_and_deletes_rest(self) -> None:
+        client = FakeS3Client(
+            {
+                ("anatase-artifacts", "v2/images/anatase/manifests/f44"): b"tag",
+                ("anatase-artifacts", "v2/images/anatase/manifests/f43"): b"tag",
+                ("anatase-artifacts", "v2/images/anatase/manifests/f42"): b"tag",
+                ("anatase-artifacts", "v2/images/anatase/manifests/f41"): b"tag",
+                ("anatase-artifacts", "v2/images/anatase/manifests/latest"): b"tag",
+                (
+                    "anatase-artifacts",
+                    "v2/images/anatase/manifests/sha256:" + "a" * 64,
+                ): b"manifest",
+                ("anatase-artifacts", "v2/images/anatase/blobs/sha256:abc"): b"blob",
+            }
+        )
+
+        self.assertEqual(
+            prune_oci_tags(
+                "images/anatase",
+                "f*",
+                rule="descending",
+                number=3,
+                environ=ENV,
+                client=client,
+            ),
+            0,
+        )
+
+        self.assertEqual(
+            client.lists,
+            [
+                {
+                    "Bucket": "anatase-artifacts",
+                    "Prefix": "v2/images/anatase/manifests/",
+                }
+            ],
+        )
+        self.assertEqual(
+            [item["Key"] for item in client.deletes],
+            ["v2/images/anatase/manifests/f41"],
+        )
+        self.assertIn(
+            ("anatase-artifacts", "v2/images/anatase/blobs/sha256:abc"),
+            client.objects,
+        )
+
+    def test_prune_oci_tags_dry_run_does_not_delete(self) -> None:
+        client = FakeS3Client(
+            {
+                ("anatase-artifacts", "v2/images/anatase/manifests/f44"): b"tag",
+                ("anatase-artifacts", "v2/images/anatase/manifests/f43"): b"tag",
+            }
+        )
+
+        with patch("ludos.upload.registry.log") as log:
+            self.assertEqual(
+                prune_oci_tags(
+                    "images/anatase",
+                    "f*",
+                    rule="descending",
+                    number=1,
+                    dry_run=True,
+                    environ=ENV,
+                    client=client,
+                ),
+                0,
+            )
+
+        self.assertEqual(client.deletes, [])
+        log.assert_called_once_with("Would delete tag: v2/images/anatase/manifests/f43")
+
+    def test_prune_oci_tags_rejects_unsupported_rule(self) -> None:
+        client = FakeS3Client()
+
+        with self.assertRaisesRegex(ConfigError, "unsupported registry oci prune rule"):
+            prune_oci_tags(
+                "images/anatase",
+                "f*",
+                rule="ascending",
+                number=1,
+                environ=ENV,
+                client=client,
+            )
+
+    def test_tree_shake_oci_deletes_unreferenced_blobs_only(self) -> None:
+        config_digest = "sha256:" + "1" * 64
+        first_layer_digest = "sha256:" + "2" * 64
+        second_layer_digest = "sha256:" + "3" * 64
+        unused_digest = "sha256:" + "4" * 64
+        latest_manifest = _manifest_bytes(config_digest, first_layer_digest)
+        latest_manifest_digest = "sha256:" + hashlib.sha256(latest_manifest).hexdigest()
+        client = FakeS3Client(
+            {
+                (
+                    "anatase-artifacts",
+                    "v2/images/anatase/manifests/latest",
+                ): latest_manifest,
+                (
+                    "anatase-artifacts",
+                    "v2/images/anatase/manifests/f44",
+                ): _manifest_bytes(config_digest, second_layer_digest),
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/manifests/{latest_manifest_digest}",
+                ): latest_manifest,
+                (
+                    "anatase-artifacts",
+                    "v2/images/anatase/manifests/sha256:" + "5" * 64,
+                ): _manifest_bytes(config_digest, unused_digest),
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{config_digest}",
+                ): b"config",
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{first_layer_digest}",
+                ): b"layer1",
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{second_layer_digest}",
+                ): b"layer2",
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{unused_digest}",
+                ): b"unused",
+            }
+        )
+
+        self.assertEqual(
+            tree_shake_oci("images/anatase", environ=ENV, client=client),
+            0,
+        )
+
+        self.assertEqual(
+            client.lists,
+            [
+                {
+                    "Bucket": "anatase-artifacts",
+                    "Prefix": "v2/images/anatase/manifests/",
+                },
+                {
+                    "Bucket": "anatase-artifacts",
+                    "Prefix": "v2/images/anatase/blobs/",
+                },
+            ],
+        )
+        self.assertEqual(
+            [item["Key"] for item in client.gets],
+            [
+                "v2/images/anatase/manifests/f44",
+                "v2/images/anatase/manifests/latest",
+            ],
+        )
+        self.assertEqual(
+            [item["Key"] for item in client.deletes],
+            [
+                "v2/images/anatase/manifests/sha256:" + "5" * 64,
+                f"v2/images/anatase/blobs/{unused_digest}",
+            ],
+        )
+
+    def test_tree_shake_oci_dry_run_does_not_delete(self) -> None:
+        config_digest = "sha256:" + "1" * 64
+        layer_digest = "sha256:" + "2" * 64
+        unused_digest = "sha256:" + "3" * 64
+        client = FakeS3Client(
+            {
+                (
+                    "anatase-artifacts",
+                    "v2/images/anatase/manifests/latest",
+                ): _manifest_bytes(config_digest, layer_digest),
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{layer_digest}",
+                ): b"layer",
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{unused_digest}",
+                ): b"unused",
+            }
+        )
+
+        with patch("ludos.upload.registry.log") as log:
+            self.assertEqual(
+                tree_shake_oci(
+                    "images/anatase",
+                    dry_run=True,
+                    environ=ENV,
+                    client=client,
+                ),
+                0,
+            )
+
+        self.assertEqual(client.deletes, [])
+        self.assertEqual(
+            log.call_args_list,
+            [
+                call("Downloading 1 manifests"),
+                call(
+                    f"Would delete blob: "
+                    f"v2/images/anatase/blobs/sha256:{'3' * 11}..."
+                ),
+            ],
+        )
+
 
 class TinyOciLayout:
     def __init__(
@@ -466,6 +922,29 @@ class TinyOciLayout:
         self.config_digest = f"sha256:{self.config_hex}"
         self.layer_digest = f"sha256:{self.layer_hex}"
         self.manifest_digest = f"sha256:{self.manifest_hex}"
+
+
+def _manifest_bytes(config_digest: str, *layer_digests: str) -> bytes:
+    return json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": DEFAULT_MANIFEST_MEDIA_TYPE,
+            "config": {
+                "mediaType": DEFAULT_CONFIG_MEDIA_TYPE,
+                "digest": config_digest,
+                "size": 1,
+            },
+            "layers": [
+                {
+                    "mediaType": DEFAULT_LAYER_MEDIA_TYPE,
+                    "digest": digest,
+                    "size": 1,
+                }
+                for digest in layer_digests
+            ],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def _create_oci_layout(root: Path, *, layer_bytes: bytes = b"tiny layer") -> TinyOciLayout:

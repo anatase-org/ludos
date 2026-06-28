@@ -36,6 +36,8 @@ class FakeS3Client:
         self.deletes: list[dict[str, object]] = []
         self.gets: list[dict[str, object]] = []
         self.heads: list[dict[str, object]] = []
+        self.lists: list[dict[str, object]] = []
+        self.delete_errors: dict[tuple[str, str], str] = {}
         self.calls: list[tuple[str, str]] = []
 
     def upload_file(
@@ -104,7 +106,28 @@ class FakeS3Client:
     def delete_object(self, *, Bucket: str, Key: str) -> None:
         self.deletes.append({"Bucket": Bucket, "Key": Key})
         self.calls.append(("delete_object", Key))
+        if (Bucket, Key) in self.delete_errors:
+            raise FakeClientError(self.delete_errors[(Bucket, Key)])
         self.objects.pop((Bucket, Key), None)
+
+    def list_objects_v2(
+        self,
+        *,
+        Bucket: str,
+        Prefix: str,
+        ContinuationToken: str | None = None,
+    ) -> dict[str, object]:
+        request: dict[str, object] = {"Bucket": Bucket, "Prefix": Prefix}
+        if ContinuationToken is not None:
+            request["ContinuationToken"] = ContinuationToken
+        self.lists.append(request)
+        self.calls.append(("list_objects_v2", Prefix))
+        contents = [
+            {"Key": key}
+            for bucket, key in sorted(self.objects)
+            if bucket == Bucket and key.startswith(Prefix)
+        ]
+        return {"Contents": contents, "IsTruncated": False}
 
 
 class UploadFileTests(unittest.TestCase):

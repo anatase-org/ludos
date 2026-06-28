@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import fnmatch
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..logging import log, piter
+from ..logging import log, piter, warning
 from ..model import ConfigError
 from .common import _client_error_code, _create_s3_client, _s3_config_from_env
 
@@ -147,6 +149,94 @@ def upload_oci(
     log(f"Uploaded {_format_mb(uploaded_layer_bytes)}.")
     log(f"Uploaded OCI repository {repo_ref} with tags: {', '.join(tag_list)}")
     return 0
+
+
+def delete_oci_tags(
+    ref: str,
+    tags: tuple[str, ...],
+    *,
+    dry_run: bool = False,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
+) -> int:
+    repo_ref = _validate_ref(ref)
+    tag_list = _validate_tags(tags, command="registry oci delete")
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+    for tag in tag_list:
+        _delete_tag(s3, config.bucket, repo_ref, tag, dry_run=dry_run)
+    return 0
+
+
+def list_oci_tags(
+    ref: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
+) -> int:
+    repo_ref = _validate_ref(ref)
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+    for tag in sorted(_list_oci_tags(s3, config.bucket, repo_ref)):
+        log(tag)
+    return 0
+
+
+def prune_oci_tags(
+    ref: str,
+    pattern: str,
+    *,
+    rule: str,
+    number: int,
+    dry_run: bool = False,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
+) -> int:
+    repo_ref = _validate_ref(ref)
+    _validate_prune_args(pattern, rule, number)
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+
+    tags = [
+        tag
+        for tag in _list_oci_tags(s3, config.bucket, repo_ref)
+        if fnmatch.fnmatchcase(tag, pattern)
+    ]
+    tags = _sort_prune_tags(tags, rule)
+    for tag in tags[number:]:
+        _delete_tag(s3, config.bucket, repo_ref, tag, dry_run=dry_run)
+    return 0
+
+
+def tree_shake_oci(
+    ref: str,
+    *,
+    dry_run: bool = False,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
+) -> int:
+    repo_ref = _validate_ref(ref)
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+
+    manifest_keys = _list_object_keys(s3, config.bucket, f"v2/{repo_ref}/manifests/")
+    references = _referenced_oci_digests(s3, config.bucket, repo_ref, manifest_keys)
+    for key, digest in _oci_digest_manifest_keys(manifest_keys, repo_ref):
+        if digest in references.manifest_digests:
+            continue
+        _delete_manifest(s3, config.bucket, key, dry_run=dry_run)
+    for key in _list_object_keys(s3, config.bucket, f"v2/{repo_ref}/blobs/"):
+        digest = key.rsplit("/", 1)[-1]
+        if digest in references.blob_digests:
+            continue
+        _delete_blob(s3, config.bucket, key, dry_run=dry_run)
+    return 0
+
+
+@dataclass(frozen=True)
+class OciReferences:
+    manifest_digests: set[str]
+    blob_digests: set[str]
 
 
 @dataclass(frozen=True)
@@ -306,9 +396,13 @@ def _validate_ref(ref: str) -> str:
     return "/".join(parts)
 
 
-def _validate_tags(tags: tuple[str, ...]) -> tuple[str, ...]:
+def _validate_tags(
+    tags: tuple[str, ...],
+    *,
+    command: str = "registry oci upload",
+) -> tuple[str, ...]:
     if not tags:
-        raise ConfigError("registry oci upload requires at least one --tag")
+        raise ConfigError(f"{command} requires at least one --tag")
     seen = set()
     result = []
     for tag in tags:
@@ -331,6 +425,203 @@ def _manifest_key(ref: str, digest: str) -> str:
 
 def _tag_key(ref: str, tag: str) -> str:
     return f"v2/{ref}/manifests/{tag}"
+
+
+def _validate_prune_args(pattern: str, rule: str, number: int) -> None:
+    if not pattern:
+        raise ConfigError("registry oci prune requires a non-empty --pattern")
+    if rule != "descending":
+        raise ConfigError(f"unsupported registry oci prune rule: {rule}")
+    if number < 0:
+        raise ConfigError("registry oci prune --number must be zero or greater")
+
+
+def _sort_prune_tags(tags: list[str], rule: str) -> list[str]:
+    if rule == "descending":
+        return sorted(tags, reverse=True)
+    raise ConfigError(f"unsupported registry oci prune rule: {rule}")
+
+
+def _list_oci_tags(client: Any, bucket: str, ref: str) -> tuple[str, ...]:
+    prefix = f"v2/{ref}/manifests/"
+    tags: list[str] = []
+    for _key, tag in _list_oci_tag_manifest_keys(client, bucket, ref):
+        tags.append(tag)
+    return tuple(tags)
+
+
+def _list_oci_tag_manifest_keys(
+    client: Any,
+    bucket: str,
+    ref: str,
+) -> tuple[tuple[str, str], ...]:
+    return _oci_tag_manifest_keys(
+        _list_object_keys(client, bucket, f"v2/{ref}/manifests/"),
+        ref,
+    )
+
+
+def _oci_tag_manifest_keys(
+    keys: tuple[str, ...],
+    ref: str,
+) -> tuple[tuple[str, str], ...]:
+    tags: list[tuple[str, str]] = []
+    for key, tag in _oci_manifest_names(keys, ref):
+        if "/" in tag or tag.startswith("sha") or not _TAG_RE.match(tag):
+            continue
+        tags.append((key, tag))
+    return tuple(tags)
+
+
+def _oci_digest_manifest_keys(
+    keys: tuple[str, ...],
+    ref: str,
+) -> tuple[tuple[str, str], ...]:
+    manifests: list[tuple[str, str]] = []
+    for key, name in _oci_manifest_names(keys, ref):
+        if "/" in name or not name.startswith("sha"):
+            continue
+        manifests.append((key, name))
+    return tuple(manifests)
+
+
+def _oci_manifest_names(keys: tuple[str, ...], ref: str) -> tuple[tuple[str, str], ...]:
+    prefix = f"v2/{ref}/manifests/"
+    return tuple((key, key[len(prefix) :]) for key in keys if key.startswith(prefix))
+
+
+def _list_object_keys(client: Any, bucket: str, prefix: str) -> tuple[str, ...]:
+    keys: list[str] = []
+    continuation_token: str | None = None
+    while True:
+        request: dict[str, object] = {
+            "Bucket": bucket,
+            "Prefix": prefix,
+        }
+        if continuation_token is not None:
+            request["ContinuationToken"] = continuation_token
+        try:
+            response = client.list_objects_v2(**request)
+        except Exception as exc:
+            raise ConfigError(f"S3 list failed for {prefix}: {exc}") from exc
+        for item in response.get("Contents", []):
+            key = item.get("Key") if isinstance(item, dict) else None
+            if isinstance(key, str) and key.startswith(prefix):
+                keys.append(key)
+        if not response.get("IsTruncated"):
+            return tuple(keys)
+        token = response.get("NextContinuationToken")
+        if not isinstance(token, str) or not token:
+            raise ConfigError(f"S3 list failed for {prefix}: missing continuation token")
+        continuation_token = token
+
+
+def _referenced_oci_digests(
+    client: Any,
+    bucket: str,
+    ref: str,
+    manifest_keys: tuple[str, ...],
+) -> OciReferences:
+    manifest_digests: set[str] = set()
+    blob_digests: set[str] = set()
+    tag_manifest_keys = _oci_tag_manifest_keys(manifest_keys, ref)
+    log(f"Downloading {len(tag_manifest_keys)} manifests")
+    with piter(
+        tag_manifest_keys,
+        desc="Downloading manifests",
+        unit="manifest",
+    ) as manifests:
+        for key, _tag in manifests:
+            data = _read_s3_object(client, bucket, key)
+            manifest_digests.add(f"sha256:{hashlib.sha256(data).hexdigest()}")
+            manifest = _loads_json(data, f"manifest object {key}")
+            config = _descriptor(
+                manifest.get("config"),
+                default_media_type=DEFAULT_CONFIG_MEDIA_TYPE,
+                what=f"manifest object {key} config",
+            )
+            blob_digests.add(config.digest)
+            layers = manifest.get("layers")
+            if not isinstance(layers, list):
+                raise ConfigError(f"manifest object {key} must contain a layers list")
+            for index, layer in enumerate(layers):
+                descriptor = _descriptor(
+                    layer,
+                    default_media_type=DEFAULT_LAYER_MEDIA_TYPE,
+                    what=f"manifest object {key} layer {index}",
+                )
+                blob_digests.add(descriptor.digest)
+    return OciReferences(manifest_digests=manifest_digests, blob_digests=blob_digests)
+
+
+def _read_s3_object(client: Any, bucket: str, key: str) -> bytes:
+    try:
+        response = client.get_object(Bucket=bucket, Key=key)
+    except Exception as exc:
+        raise ConfigError(f"S3 download failed for {key}: {exc}") from exc
+    body = response.get("Body")
+    if body is None:
+        return b""
+    data = body.read()
+    if isinstance(data, str):
+        return data.encode("utf-8")
+    return data
+
+
+def _delete_blob(
+    client: Any,
+    bucket: str,
+    key: str,
+    *,
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        log(f"Would delete blob: {_display_key(key)}")
+        return
+    log(f"Deleting blob: {_display_key(key)}")
+    try:
+        client.delete_object(Bucket=bucket, Key=key)
+    except Exception as exc:
+        raise ConfigError(f"S3 delete failed for {key}: {exc}") from exc
+
+
+def _delete_manifest(
+    client: Any,
+    bucket: str,
+    key: str,
+    *,
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        log(f"Would delete manifest: {_display_key(key)}")
+        return
+    log(f"Deleting manifest: {_display_key(key)}")
+    try:
+        client.delete_object(Bucket=bucket, Key=key)
+    except Exception as exc:
+        raise ConfigError(f"S3 delete failed for {key}: {exc}") from exc
+
+
+def _delete_tag(
+    client: Any,
+    bucket: str,
+    ref: str,
+    tag: str,
+    *,
+    dry_run: bool,
+) -> None:
+    key = _tag_key(ref, tag)
+    if dry_run:
+        log(f"Would delete tag: {_display_key(key)}")
+        return
+    log(f"Deleting tag: {_display_key(key)}")
+    try:
+        client.delete_object(Bucket=bucket, Key=key)
+    except Exception as exc:
+        if _client_error_code(exc) in ("404", "NoSuchKey", "NotFound"):
+            warning(f"OCI tag is already missing: {ref}:{tag}")
+            return
+        raise ConfigError(f"S3 delete failed for {key}: {exc}") from exc
 
 
 def _upload_blob_if_needed(

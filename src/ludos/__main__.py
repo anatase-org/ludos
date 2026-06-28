@@ -17,7 +17,14 @@ from .contrib.package import package_target
 from .contrib.patchwork import patch_target
 from .contrib.update import update_targets
 from .upload.file import delete_file, upload_file
-from .upload.registry import registry_init, upload_oci
+from .upload.registry import (
+    delete_oci_tags,
+    list_oci_tags,
+    prune_oci_tags,
+    registry_init,
+    tree_shake_oci,
+    upload_oci,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -274,6 +281,81 @@ def build_parser() -> argparse.ArgumentParser:
         help="Tag to publish. May be specified more than once.",
     )
     registry_oci_upload.set_defaults(func=registry_command)
+    registry_oci_list = registry_oci_subcommands.add_parser(
+        "list",
+        help="List OCI tags in S3.",
+    )
+    registry_oci_list.add_argument(
+        "ref",
+        help="OCI repository path within the registry, without the registry host.",
+    )
+    registry_oci_list.set_defaults(func=registry_command)
+    registry_oci_delete = registry_oci_subcommands.add_parser(
+        "delete",
+        help="Delete OCI tag manifests from S3.",
+    )
+    registry_oci_delete.add_argument(
+        "ref",
+        help="OCI repository path within the registry, without the registry host.",
+    )
+    registry_oci_delete.add_argument(
+        "--tag",
+        action="append",
+        required=True,
+        dest="tags",
+        help="Tag to delete. May be specified more than once.",
+    )
+    registry_oci_delete.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print tag manifests that would be deleted without deleting them.",
+    )
+    registry_oci_delete.set_defaults(func=registry_command)
+    registry_oci_prune = registry_oci_subcommands.add_parser(
+        "prune",
+        help="Prune OCI tag manifests from S3.",
+    )
+    registry_oci_prune.add_argument(
+        "ref",
+        help="OCI repository path within the registry, without the registry host.",
+    )
+    registry_oci_prune.add_argument(
+        "--pattern",
+        required=True,
+        help="Glob pattern for tag names to prune.",
+    )
+    registry_oci_prune.add_argument(
+        "--rule",
+        choices=("descending",),
+        default="descending",
+        help="Ordering rule for tags before keeping --number entries.",
+    )
+    registry_oci_prune.add_argument(
+        "--number",
+        type=int,
+        default=3,
+        help="Number of matching tags to keep.",
+    )
+    registry_oci_prune.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print tag manifests that would be deleted without deleting them.",
+    )
+    registry_oci_prune.set_defaults(func=registry_command)
+    registry_oci_tree_shake = registry_oci_subcommands.add_parser(
+        "tree-shake",
+        help="Delete OCI blobs not referenced by repository manifests.",
+    )
+    registry_oci_tree_shake.add_argument(
+        "ref",
+        help="OCI repository path within the registry, without the registry host.",
+    )
+    registry_oci_tree_shake.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print blobs that would be deleted without deleting them.",
+    )
+    registry_oci_tree_shake.set_defaults(func=registry_command)
 
     bootc = subcommands.add_parser(
         "bootc",
@@ -560,9 +642,23 @@ def registry_command(args: argparse.Namespace) -> int:
             return delete_file(args.output_path)
         raise ConfigError(f"unknown registry file action: {args.registry_file_action}")
     if args.registry_action == "oci":
-        if args.registry_oci_action != "upload":
-            raise ConfigError(f"unknown registry oci action: {args.registry_oci_action}")
-        return upload_oci(args.local_oci_path, args.ref, tuple(args.tags))
+        if args.registry_oci_action == "upload":
+            return upload_oci(args.local_oci_path, args.ref, tuple(args.tags))
+        if args.registry_oci_action == "list":
+            return list_oci_tags(args.ref)
+        if args.registry_oci_action == "delete":
+            return delete_oci_tags(args.ref, tuple(args.tags), dry_run=args.dry_run)
+        if args.registry_oci_action == "prune":
+            return prune_oci_tags(
+                args.ref,
+                args.pattern,
+                rule=args.rule,
+                number=args.number,
+                dry_run=args.dry_run,
+            )
+        if args.registry_oci_action == "tree-shake":
+            return tree_shake_oci(args.ref, dry_run=args.dry_run)
+        raise ConfigError(f"unknown registry oci action: {args.registry_oci_action}")
     raise ConfigError(f"unknown registry action: {args.registry_action}")
 
 
