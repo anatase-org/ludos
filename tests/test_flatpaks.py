@@ -53,6 +53,9 @@ flatpak:
   finish-args: |-
     --device=dri
   rename-icon: kate
+build-deps:
+  - rpm-build
+  - flatpak-rpm-macros
 specs:
   - spec: git+https://example.test/kate:kate.spec#branch=f$releasever
     packages:
@@ -70,6 +73,7 @@ postprocess: |
         self.assertEqual(card.flatpak.app_id, "org.kde.kate")
         self.assertEqual(card.flatpak.command, "kate")
         self.assertEqual(card.flatpak.rename_icon, "kate")
+        self.assertEqual(card.build_deps, ("rpm-build", "flatpak-rpm-macros"))
         self.assertEqual(card.specs[0].spec, "git+https://example.test/kate:kate.spec#branch=f$releasever")
         self.assertEqual(card.files, ("app/share/test.txt",))
         self.assertEqual(card.postprocess.strip(), "true")
@@ -85,6 +89,8 @@ flatpak:
   command: kate
   cleanup-commands: |
     true
+build-deps:
+  - rpm-build
 specs:
   - spec: kate.spec
     packages: [kate]
@@ -105,6 +111,8 @@ flatpak:
   id: org.kde.kate
   command: kate
   runtime-version: f44
+build-deps:
+  - rpm-build
 specs:
   - spec: kate.spec
     packages: [kate]
@@ -147,6 +155,8 @@ flatpak:
     --share=ipc
     --socket=wayland
     --talk-name=org.kde.KGlobalSettings
+build-deps:
+  - rpm-build
 specs:
   - spec: kate.spec
     packages: [kate]
@@ -184,6 +194,8 @@ version: 1
 flatpak:
   id: org.kde.kate
   command: kate
+build-deps:
+  - rpm-build
 specs:
   - spec: kate.spec
     packages: [kate]
@@ -215,15 +227,23 @@ postprocess: |
         self.assertIn("COPY --from=rpms /rpms /rpms", containerfile)
         self.assertIn("COPY files/ /flatpak/", containerfile)
         self.assertIn(
-            "rpm --root /flatpak --define '_install_langs *' -Uvh --nodeps --noscripts --notriggers /rpms/*.rpm",
+            "rpm --root /flatpak -Uvh --allfiles --nodeps --noscripts --notriggers /rpms/*.rpm",
             containerfile,
         )
         self.assertIn("warning: removing /usr entries from app flatpak payload", containerfile)
         self.assertIn("rm -rf /flatpak/usr", containerfile)
         self.assertIn("WORKDIR /flatpak", containerfile)
         self.assertIn("touch postprocessed", containerfile)
+        self.assertIn("cp -a \"$appdata_source\" \"/out/files/share/appdata/$app_id.appdata.xml\"", containerfile)
+        self.assertIn("appstreamcli compose --verbose --prefix /out/files --origin flatpak --components \"$app_id\"", containerfile)
+        self.assertIn("bundle = ET.SubElement(component, 'bundle', {'type': 'flatpak'})", containerfile)
+        self.assertIn("bundle.text = app_ref", containerfile)
+        self.assertIn("for dir in mime dbus-1 gnome-shell krunner app-info; do", containerfile)
         self.assertIn("FROM scratch", containerfile)
         self.assertIn("LABEL org.flatpak.ref=", containerfile)
+        self.assertIn("LABEL org.flatpak.subject=", containerfile)
+        self.assertIn("LABEL org.flatpak.body=", containerfile)
+        self.assertIn("LABEL org.flatpak.timestamp=", containerfile)
 
     def test_containerfile_rewrites_desktop_icon_for_rename_icon(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -238,6 +258,8 @@ flatpak:
   id: org.kde.kate
   command: kate
   rename-icon: kate
+build-deps:
+  - rpm-build
 specs:
   - spec: kate.spec
     packages: [kate]
@@ -277,6 +299,8 @@ version: 1
 flatpak:
   id: org.kde.kate
   command: kate
+build-deps:
+  - rpm-build
 specs:
   - spec: kate.spec
     packages: [kate]
@@ -318,6 +342,8 @@ version: 1
 flatpak:
   id: org.kde.kate
   command: kate
+build-deps:
+  - rpm-build
 specs:
   - spec: kate.spec
     packages: [kate]

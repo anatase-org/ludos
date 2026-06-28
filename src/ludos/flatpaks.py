@@ -4,11 +4,10 @@ import json
 import shlex
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 from .build import (
     _card_specs_hash,
@@ -30,15 +29,18 @@ from .build import (
 )
 from .common import ResolvedManifestContext, resolve_manifest_context
 from .logging import log
-from .model import ConfigError, SpecBuild, _spec_builds_tuple
-
-
-FLATPAK_BUILDER_DEPS = (
-    "rpm-build",
-    "rpmdevtools",
-    "redhat-rpm-config",
-    "flatpak-rpm-macros",
+from .model import (
+    ConfigError,
+    SpecBuild,
+    _load_mapping,
+    _optional_string,
+    _required_string,
+    _required_string_tuple,
+    _required_version,
+    _spec_builds_tuple,
+    _string_tuple,
 )
+
 
 FLATPAK_ARCHES = {
     "x86_64": "x86_64",
@@ -74,6 +76,7 @@ class FlatpakConfig:
 class FlatpakCard:
     version: int
     flatpak: FlatpakConfig
+    build_deps: tuple[str, ...]
     specs: tuple[SpecBuild, ...]
     files: tuple[str, ...] = tuple()
     postprocess: str = ""
@@ -82,20 +85,18 @@ class FlatpakCard:
     @classmethod
     def from_file(cls, path: Path) -> "FlatpakCard":
         data = _load_mapping(path)
-        allowed = {"version", "flatpak", "specs", "files", "postprocess"}
+        allowed = {"version", "flatpak", "build-deps", "specs", "files", "postprocess"}
         _reject_unknown_keys(path, data, allowed)
-        version = data.get("version")
-        if version != 1:
-            raise ConfigError(f"{path}: 'version' must be 1")
+        version = _required_version(data, path)
         flatpak = _flatpak_config(data, path)
-        specs = _spec_builds_tuple(data, "specs", path)
-        if not specs:
-            raise ConfigError(f"{path}: 'specs' must contain at least one item")
+        build_deps = _required_string_tuple(data, "build-deps", path)
+        specs = _required_spec_builds_tuple(data, "specs", path)
         files = _string_tuple(data, "files", path)
         postprocess = _optional_string(data, "postprocess", path)
         return cls(
             version=version,
             flatpak=flatpak,
+            build_deps=build_deps,
             specs=specs,
             files=files,
             postprocess=postprocess,
@@ -190,7 +191,7 @@ def _build_flatpak_with_context(
         card_name=block,
         rpmbuild_defines=rpmbuild_defines,
     )
-    builder_requests = _unique_packages((*FLATPAK_BUILDER_DEPS, *spec_builder_packages))
+    builder_requests = _unique_packages((*card.build_deps, *spec_builder_packages))
     builder_packages = _resolve_packages(
         orchestrator_dnf_base,
         context.releasever,
@@ -315,18 +316,6 @@ def _build_flatpak_with_context(
     )
 
 
-def _load_mapping(path: Path) -> dict[str, Any]:
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise ConfigError(f"{path}: file does not exist") from exc
-    except yaml.YAMLError as exc:
-        raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ConfigError(f"{path}: expected a YAML mapping")
-    return data
-
-
 def _reject_unknown_keys(path: Path, data: dict[str, Any], allowed: set[str], prefix: str = "") -> None:
     for key in data:
         if key not in allowed:
@@ -348,45 +337,27 @@ def _flatpak_config(data: dict[str, Any], path: Path) -> FlatpakConfig:
         "add-extensions",
     }
     _reject_unknown_keys(path, value, allowed, "flatpak")
-    app_id = _required_string(value, "id", path, "flatpak")
-    command = _required_string(value, "command", path, "flatpak")
-    finish_args = _optional_string(value, "finish-args", path, "flatpak")
+    app_id = _required_string(value, "id", path).strip()
+    command = _required_string(value, "command", path).strip()
+    finish_args = _optional_string(value, "finish-args", path)
     return FlatpakConfig(
         app_id=app_id,
         command=command,
         finish_args=finish_args,
-        rename_icon=_optional_string(value, "rename-icon", path, "flatpak"),
-        rename_desktop_file=_optional_string(value, "rename-desktop-file", path, "flatpak"),
-        rename_appdata_file=_optional_string(value, "rename-appdata-file", path, "flatpak"),
+        rename_icon=_optional_string(value, "rename-icon", path),
+        rename_desktop_file=_optional_string(value, "rename-desktop-file", path),
+        rename_appdata_file=_optional_string(value, "rename-appdata-file", path),
         add_extensions=_add_extensions(value, path),
     )
 
 
-def _required_string(data: dict[str, Any], key: str, path: Path, prefix: str = "") -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value.strip():
-        qualified = f"{prefix}.{key}" if prefix else key
-        raise ConfigError(f"{path}: '{qualified}' must be a non-empty string")
-    return value.strip()
-
-
-def _optional_string(data: dict[str, Any], key: str, path: Path, prefix: str = "") -> str:
-    value = data.get(key, "")
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        qualified = f"{prefix}.{key}" if prefix else key
-        raise ConfigError(f"{path}: '{qualified}' must be a string")
-    return value
-
-
-def _string_tuple(data: dict[str, Any], key: str, path: Path) -> tuple[str, ...]:
-    value = data.get(key)
-    if value is None:
-        return tuple()
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ConfigError(f"{path}: '{key}' must be a list of strings")
-    return tuple(value)
+def _required_spec_builds_tuple(
+    data: dict[str, Any], key: str, path: Path
+) -> tuple[SpecBuild, ...]:
+    specs = _spec_builds_tuple(data, key, path)
+    if not specs:
+        raise ConfigError(f"{path}: '{key}' must contain at least one item")
+    return specs
 
 
 def _add_extensions(data: dict[str, Any], path: Path) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
@@ -631,6 +602,7 @@ def _write_flatpak_containerfile(
     files_dir = final_build_dir / "files"
     staged_file_count = _stage_flatpak_files(card, flatpak_dir, files_dir)
     containerfile = final_build_dir / "Containerfile"
+    timestamp = str(int(time.time()))
     lines = [
         f"FROM {build_image} AS rpms",
         f"FROM {orchestrator} AS build",
@@ -640,7 +612,7 @@ def _write_flatpak_containerfile(
         "set -eux",
         "mkdir -p /flatpak",
         "rpm --root /flatpak --initdb",
-        "rpm --root /flatpak --define '_install_langs *' -Uvh --nodeps --noscripts --notriggers /rpms/*.rpm",
+        "rpm --root /flatpak -Uvh --allfiles --nodeps --noscripts --notriggers /rpms/*.rpm",
         "if [ -d /ludos/build-files ]; then cp -a /ludos/build-files/. /flatpak/; fi",
         "LUDOS_INSTALL_FLATPAK_RPMS",
     ]
@@ -674,6 +646,8 @@ def _write_flatpak_containerfile(
             "mkdir -p /out/files /out/export",
             "cp -a /flatpak/app/. /out/files/",
             *_rename_lines(card.flatpak),
+            *_appdata_lines(card.flatpak),
+            *_appstream_compose_lines(card.flatpak, app_ref),
             *_export_lines(card.flatpak),
             "cat > /out/metadata <<'LUDOS_FLATPAK_METADATA'",
             metadata.rstrip(),
@@ -684,6 +658,9 @@ def _write_flatpak_containerfile(
             "COPY --from=build /out/ /",
             f"LABEL org.flatpak.ref={json.dumps(app_ref)}",
             'LABEL org.flatpak.metadata="$LUDOS_FLATPAK_METADATA"',
+            f"LABEL org.flatpak.subject={json.dumps(f'Export {card.flatpak.app_id}')}",
+            f"LABEL org.flatpak.body={json.dumps(_flatpak_body(card.flatpak.app_id, flatpak_arch, branch))}",
+            f"LABEL org.flatpak.timestamp={json.dumps(timestamp)}",
             f"LABEL org.opencontainers.image.ref.name={json.dumps(app_ref)}",
             f"LABEL org.anatase.flatpak.branch={json.dumps(branch)}",
             f"LABEL org.anatase.flatpak.arch={json.dumps(flatpak_arch)}",
@@ -777,6 +754,101 @@ def _rename_lines(config: FlatpakConfig) -> list[str]:
     return lines
 
 
+def _appdata_lines(config: FlatpakConfig) -> list[str]:
+    app_id = shlex.quote(config.app_id)
+    return [
+        f"app_id={app_id}",
+        "appdata_source=",
+        "for candidate in \\",
+        '  "/out/files/share/appdata/$app_id.appdata.xml" \\',
+        '  "/out/files/share/appdata/$app_id.metainfo.xml" \\',
+        '  "/out/files/share/metainfo/$app_id.appdata.xml" \\',
+        '  "/out/files/share/metainfo/$app_id.metainfo.xml"; do',
+        "  if [ -f \"$candidate\" ]; then",
+        "    appdata_source=\"$candidate\"",
+        "    break",
+        "  fi",
+        "done",
+        "if [ -n \"$appdata_source\" ]; then",
+        "  mkdir -p /out/files/share/appdata",
+        '  cp -a "$appdata_source" "/out/files/share/appdata/$app_id.appdata.xml"',
+        "  APPDATA_FILE=\"/out/files/share/appdata/$app_id.appdata.xml\" APP_ID=\"$app_id\" python3 - <<'LUDOS_REWRITE_APPDATA'",
+        "import os",
+        "import xml.etree.ElementTree as ET",
+        "",
+        "path = os.environ['APPDATA_FILE']",
+        "app_id = os.environ['APP_ID']",
+        "tree = ET.parse(path)",
+        "root = tree.getroot()",
+        "component_id = root.find('id')",
+        "if component_id is not None and component_id.text and component_id.text != app_id:",
+        "    old_id = component_id.text",
+        "    component_id.text = app_id",
+        "    provides = root.find('provides')",
+        "    if provides is None:",
+        "        provides = ET.SubElement(root, 'provides')",
+        "    if not any(child.tag == 'id' and child.text == old_id for child in list(provides)):",
+        "        ET.SubElement(provides, 'id').text = old_id",
+        "    tree.write(path, encoding='UTF-8', xml_declaration=True)",
+        "LUDOS_REWRITE_APPDATA",
+        "  mkdir -p /out/files/share/metainfo",
+        '  cp -a "/out/files/share/appdata/$app_id.appdata.xml" "/out/files/share/metainfo/$app_id.appdata.xml"',
+        "fi",
+    ]
+
+
+def _appstream_compose_lines(config: FlatpakConfig, app_ref: str) -> list[str]:
+    app_id = shlex.quote(config.app_id)
+    ref = shlex.quote(app_ref)
+    return [
+        f"app_id={app_id}",
+        f"app_ref={ref}",
+        "if [ -f \"/out/files/share/appdata/$app_id.appdata.xml\" ]; then",
+        "  if ! command -v appstreamcli >/dev/null 2>&1; then",
+        "    echo 'appstreamcli is required to build flatpak app-info metadata' >&2",
+        "    exit 1",
+        "  fi",
+        "  appstreamcli compose --verbose --prefix /out/files --origin flatpak --components \"$app_id\" --data-dir /out/files/share/app-info/xmls --icons-dir /out/files/share/app-info/icons/flatpak /",
+        "  appstream_xml=\"/out/files/share/app-info/xmls/$app_id.xml.gz\"",
+        "  if [ ! -f \"$appstream_xml\" ]; then",
+        "    composed_xml=\"$(find /out/files/share/app-info/xmls -type f -name '*.xml.gz' | sort | head -n 1 || true)\"",
+        "    if [ -n \"$composed_xml\" ]; then",
+        "      cp -a \"$composed_xml\" \"$appstream_xml\"",
+        "    fi",
+        "  fi",
+        "  if [ -f \"$appstream_xml\" ] && command -v gzip >/dev/null 2>&1; then",
+        "    appstream_tmp=\"/out/appstream-$app_id.xml\"",
+        "    gzip -dc \"$appstream_xml\" > \"$appstream_tmp\"",
+        "    APPSTREAM_FILE=\"$appstream_tmp\" APP_ID=\"$app_id\" APP_REF=\"$app_ref\" python3 - <<'LUDOS_REWRITE_APPSTREAM'",
+        "import os",
+        "import xml.etree.ElementTree as ET",
+        "",
+        "path = os.environ['APPSTREAM_FILE']",
+        "app_id = os.environ['APP_ID']",
+        "app_ref = os.environ['APP_REF']",
+        "tree = ET.parse(path)",
+        "root = tree.getroot()",
+        "for component in root.iter('component'):",
+        "    component_id = component.find('id')",
+        "    if component_id is not None and component_id.text != app_id:",
+        "        continue",
+        "    bundle = None",
+        "    for candidate in component.findall('bundle'):",
+        "        if candidate.get('type') == 'flatpak':",
+        "            bundle = candidate",
+        "            break",
+        "    if bundle is None:",
+        "        bundle = ET.SubElement(component, 'bundle', {'type': 'flatpak'})",
+        "    bundle.text = app_ref",
+        "tree.write(path, encoding='UTF-8', xml_declaration=True)",
+        "LUDOS_REWRITE_APPSTREAM",
+        "    gzip -n -c \"$appstream_tmp\" > \"$appstream_xml\"",
+        "    rm -f \"$appstream_tmp\"",
+        "  fi",
+        "fi",
+    ]
+
+
 def _export_lines(config: FlatpakConfig) -> list[str]:
     app_id = shlex.quote(config.app_id)
     return [
@@ -798,13 +870,17 @@ def _export_lines(config: FlatpakConfig) -> list[str]:
         "    cp -a \"$icon\" \"$target\"",
         "  done",
         "fi",
-        "for dir in mime dbus-1 gnome-shell krunner; do",
+        "for dir in mime dbus-1 gnome-shell krunner app-info; do",
         "  if [ -d \"/out/files/share/$dir\" ]; then",
         "    mkdir -p \"/out/export/share/$dir\"",
         "    cp -a \"/out/files/share/$dir/.\" \"/out/export/share/$dir/\"",
         "  fi",
         "done",
     ]
+
+
+def _flatpak_body(app_id: str, flatpak_arch: str, branch: str) -> str:
+    return f"Name: {app_id}\nArch: {flatpak_arch}\nBranch: {branch}\nBuilt with: Ludos\n"
 
 
 def _run_flatpak_image_build(
