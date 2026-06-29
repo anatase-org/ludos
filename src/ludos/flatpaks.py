@@ -912,11 +912,9 @@ def _flatpak_image_labels(
     flatpak_arch: str,
     timestamp: str,
 ) -> tuple[tuple[str, str], ...]:
-    commit_metadata_labels = _flatpak_commit_metadata_labels(metadata, app_ref)
     return (
         ("org.flatpak.ref", app_ref),
         ("org.flatpak.metadata", metadata),
-        *commit_metadata_labels.items(),
         ("org.flatpak.subject", f"Export {config.app_id}"),
         ("org.flatpak.body", _flatpak_body(config.app_id, flatpak_arch, branch)),
         ("org.flatpak.timestamp", timestamp),
@@ -957,14 +955,20 @@ def _read_flatpak_label_file(build_dir: Path) -> tuple[tuple[str, str], ...]:
     return tuple(labels)
 
 
-def _flatpak_commit_metadata_labels(metadata: str, app_ref: str) -> dict[str, str]:
+def _flatpak_commit_metadata_labels(
+    metadata: str,
+    app_ref: str,
+    *,
+    download_size: int = 0,
+    installed_size: int = 0,
+) -> dict[str, str]:
     return {
         "org.flatpak.commit-metadata.xa.metadata": _gvariant_string_variant_b64(metadata),
         "org.flatpak.commit-metadata.xa.ref": _gvariant_string_variant_b64(app_ref),
         "org.flatpak.commit-metadata.ostree.ref-binding": _gvariant_strv_variant_b64((app_ref,)),
         "org.flatpak.commit-metadata.ostree.collection-binding": _gvariant_string_variant_b64(""),
-        "org.flatpak.commit-metadata.xa.download-size": _gvariant_uint64_variant_b64(0),
-        "org.flatpak.commit-metadata.xa.installed-size": _gvariant_uint64_variant_b64(0),
+        "org.flatpak.commit-metadata.xa.download-size": _gvariant_uint64_variant_b64(download_size),
+        "org.flatpak.commit-metadata.xa.installed-size": _gvariant_uint64_variant_b64(installed_size),
     }
 
 
@@ -973,7 +977,7 @@ def _gvariant_string_variant_b64(value: str) -> str:
 
 
 def _gvariant_uint64_variant_b64(value: int) -> str:
-    return base64.b64encode(struct.pack("<Q", value) + b"\0t").decode()
+    return base64.b64encode(struct.pack(">Q", value) + b"\0t").decode()
 
 
 def _gvariant_strv_variant_b64(values: tuple[str, ...]) -> str:
@@ -1359,8 +1363,18 @@ def _run_flatpak_image_build(
             app_id,
             files_root="/out/files",
         )
+        base_labels = _read_flatpak_label_file(build_dir)
+        labels_by_name = dict(base_labels)
+        payload_size = _flatpak_payload_size(podman, build_image_id, "/out")
+        commit_metadata_labels = _flatpak_commit_metadata_labels(
+            metadata,
+            labels_by_name["org.flatpak.ref"],
+            download_size=payload_size,
+            installed_size=payload_size,
+        )
         labels = (
-            *_read_flatpak_label_file(build_dir),
+            *base_labels,
+            *commit_metadata_labels.items(),
             *tuple(sorted(appstream_labels.items())),
         )
         _write_flatpak_final_containerfile(
@@ -1504,6 +1518,33 @@ def _flatpak_appstream_labels(
         subprocess.run([podman, "rm", "-f", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     return labels
+
+
+def _flatpak_payload_size(podman: str, image: str, path: str) -> int:
+    result = subprocess.run(
+        [
+            podman,
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/sh",
+            image,
+            "-c",
+            f"du -sb {shlex.quote(path)} | cut -f1",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    value = result.stdout.strip()
+    try:
+        size = int(value)
+    except ValueError as exc:
+        raise ConfigError(f"invalid flatpak payload size: {value}") from exc
+    if size <= 0:
+        raise ConfigError(f"invalid flatpak payload size: {size}")
+    return size
 
 
 def _compact_xml(value: str) -> str:

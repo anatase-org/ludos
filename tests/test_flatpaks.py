@@ -150,6 +150,7 @@ class FlatpakParserTests(unittest.TestCase):
                 branch="stable",
                 title="Anatase Test Runtime",
                 description="Anatase Platform runtime for tests.",
+                license="LicenseRef-Anatase-Test",
             ),
         )
 
@@ -538,6 +539,7 @@ specs:
                     "  branch: stable",
                     "  title: Anatase Test Runtime",
                     "  description: Anatase Platform runtime for tests.",
+                    "  license: LicenseRef-Anatase-Test",
                     "bootstrap: cards/bootstrap.yml",
                     "repos: []",
                     "cards:",
@@ -816,9 +818,9 @@ postprocess: |
         self.assertNotIn("FROM scratch", containerfile)
         self.assertEqual(labels["org.flatpak.ref"], "app/org.kde.kate/x86_64/f44")
         self.assertEqual(labels["org.flatpak.metadata"], "metadata-body\n")
-        self.assertIn("org.flatpak.commit-metadata.xa.metadata", labels)
-        self.assertIn("org.flatpak.commit-metadata.xa.ref", labels)
-        self.assertIn("org.flatpak.commit-metadata.ostree.ref-binding", labels)
+        self.assertNotIn("org.flatpak.commit-metadata.xa.metadata", labels)
+        self.assertNotIn("org.flatpak.commit-metadata.xa.ref", labels)
+        self.assertNotIn("org.flatpak.commit-metadata.ostree.ref-binding", labels)
         self.assertEqual(labels["org.flatpak.subject"], "Export org.kde.kate")
         self.assertIn("Name: org.kde.kate", labels["org.flatpak.body"])
         self.assertIn("org.flatpak.timestamp", labels)
@@ -827,6 +829,8 @@ postprocess: |
         labels = _flatpak_commit_metadata_labels(
             "[Application]\nname=org.kde.kate\n",
             "app/org.kde.kate/x86_64/f44",
+            download_size=123,
+            installed_size=456,
         )
 
         self.assertEqual(
@@ -844,6 +848,14 @@ postprocess: |
         self.assertEqual(
             labels["org.flatpak.commit-metadata.ostree.collection-binding"],
             "AABz",
+        )
+        self.assertEqual(
+            labels["org.flatpak.commit-metadata.xa.download-size"],
+            "AAAAAAAAAHsAdA==",
+        )
+        self.assertEqual(
+            labels["org.flatpak.commit-metadata.xa.installed-size"],
+            "AAAAAAAAAcgAdA==",
         )
 
     def test_containerfile_rewrites_desktop_icon_for_rename_icon(self) -> None:
@@ -1030,6 +1042,10 @@ specs:
                         "org.freedesktop.appstream.icon-64": "data:image/png;base64,AA==",
                     },
                 ) as appstream_labels,
+                patch(
+                    "ludos.flatpaks._flatpak_payload_size",
+                    return_value=123,
+                ) as payload_size,
             ):
                 _run_flatpak_image_build(
                     "podman",
@@ -1072,6 +1088,18 @@ specs:
                 "--label",
                 "org.flatpak.metadata=metadata-body\n",
                 "--label",
+                "org.flatpak.commit-metadata.xa.metadata=bWV0YWRhdGEtYm9keQoAAHM=",
+                "--label",
+                "org.flatpak.commit-metadata.xa.ref=YXBwL29yZy5rZGUua2F0ZS94ODZfNjQvZjQ0AABz",
+                "--label",
+                "org.flatpak.commit-metadata.ostree.ref-binding=YXBwL29yZy5rZGUua2F0ZS94ODZfNjQvZjQ0ABwAYXM=",
+                "--label",
+                "org.flatpak.commit-metadata.ostree.collection-binding=AABz",
+                "--label",
+                "org.flatpak.commit-metadata.xa.download-size=AAAAAAAAAHsAdA==",
+                "--label",
+                "org.flatpak.commit-metadata.xa.installed-size=AAAAAAAAAHsAdA==",
+                "--label",
                 "org.freedesktop.appstream.appdata=<component/>",
                 "--label",
                 "org.freedesktop.appstream.icon-64=data:image/png;base64,AA==",
@@ -1099,6 +1127,7 @@ specs:
             "org.kde.kate",
             files_root="/out/files",
         )
+        payload_size.assert_called_once_with("podman", "sha256:buildimageid", "/out")
         podman_cp.assert_not_called()
         self.assertIn("FROM scratch", final_containerfile)
         self.assertIn("COPY --from=sha256:buildimageid /out/ /", final_containerfile)
