@@ -21,6 +21,7 @@ from ludos.upload.registry import (
     prune_oci_tags,
     registry_init,
     tree_shake_oci,
+    update_flatpak_static_index,
     upload_oci,
 )
 
@@ -167,6 +168,15 @@ class UploadRegistryTests(unittest.TestCase):
         self.assertEqual(args.ref, "images/anatase")
         self.assertTrue(args.dry_run)
 
+    def test_registry_flatpak_update_parser(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "flatpak", "update", "anatase.yml"]
+        )
+
+        self.assertEqual(args.registry_action, "flatpak")
+        self.assertEqual(args.registry_flatpak_action, "update")
+        self.assertEqual(args.manifest, Path("anatase.yml"))
+
     def test_delete_oci_command_dispatches(self) -> None:
         args = build_parser().parse_args(
             [
@@ -234,6 +244,16 @@ class UploadRegistryTests(unittest.TestCase):
             self.assertEqual(args.func(args), 0)
 
         tree_shake.assert_called_once_with("images/anatase", dry_run=True)
+
+    def test_registry_flatpak_update_command_dispatches(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "flatpak", "update", "anatase.yml"]
+        )
+
+        with patch("ludos.__main__.update_flatpak_index", return_value=0) as update:
+            self.assertEqual(args.func(args), 0)
+
+        update.assert_called_once_with(Path("anatase.yml"))
 
     def test_registry_init_uploads_v2_ping_objects(self) -> None:
         client = FakeS3Client()
@@ -1007,6 +1027,125 @@ class UploadRegistryTests(unittest.TestCase):
             ],
         )
 
+    def test_update_flatpak_static_index_uploads_matching_distro_tags(self) -> None:
+        kate = _flatpak_registry_objects(
+            "flatpaks/kate",
+            "f44-x86_64",
+            "app/org.kde.kate/x86_64/stable",
+            labels={
+                "org.freedesktop.appstream.appdata": "<components><component/></components>",
+                "org.freedesktop.appstream.icon-64": "data:image/png;base64,AA==",
+            },
+            annotations={"org.opencontainers.image.title": "Kate"},
+        )
+        ark = _flatpak_registry_objects(
+            "flatpaks/ark",
+            "f44-x86_64",
+            "app/org.kde.ark/x86_64/stable",
+            architecture="amd64",
+        )
+        ignored_other_tag = _flatpak_registry_objects(
+            "flatpaks/gwenview",
+            "f43-x86_64",
+            "app/org.kde.gwenview/x86_64/stable",
+        )
+        ignored_other_prefix = _flatpak_registry_objects(
+            "images/anatase",
+            "f44-x86_64",
+            "app/org.example.Ignored/x86_64/stable",
+        )
+        client = FakeS3Client(
+            {
+                **kate.objects,
+                **ark.objects,
+                **ignored_other_tag.objects,
+                **ignored_other_prefix.objects,
+            }
+        )
+
+        self.assertEqual(
+            update_flatpak_static_index("f44-x86_64", environ=ENV, client=client),
+            0,
+        )
+
+        self.assertEqual(
+            client.lists,
+            [{"Bucket": "anatase-artifacts", "Prefix": "v2/flatpaks/"}],
+        )
+        self.assertEqual(
+            [item["Key"] for item in client.puts],
+            ["f44-x86_64/index/static"],
+        )
+        self.assertEqual(client.puts[0]["ContentType"], "application/json")
+        self.assertEqual(client.puts[0]["CacheControl"], OCI_MUTABLE_CACHE_CONTROL)
+        body = json.loads(client.puts[0]["Body"].decode("utf-8"))
+        self.assertEqual(body["Registry"], "../../../")
+        self.assertEqual(
+            [repo["Name"] for repo in body["Results"]],
+            ["flatpaks/ark", "flatpaks/kate"],
+        )
+
+        ark_image = body["Results"][0]["Images"][0]
+        self.assertEqual(ark_image["Digest"], ark.manifest_digest)
+        self.assertEqual(ark_image["MediaType"], DEFAULT_MANIFEST_MEDIA_TYPE)
+        self.assertEqual(ark_image["OS"], "linux")
+        self.assertEqual(ark_image["Architecture"], "amd64")
+        self.assertEqual(
+            ark_image["Labels"]["org.flatpak.ref"],
+            "app/org.kde.ark/x86_64/stable",
+        )
+        self.assertEqual(ark_image["Annotations"], {})
+        self.assertEqual(ark_image["Tags"], ["f44-x86_64"])
+
+        kate_image = body["Results"][1]["Images"][0]
+        self.assertEqual(
+            kate_image["Labels"]["org.freedesktop.appstream.appdata"],
+            "<components><component/></components>",
+        )
+        self.assertEqual(
+            kate_image["Annotations"]["org.opencontainers.image.title"],
+            "Kate",
+        )
+        self.assertNotIn(
+            "flatpaks/gwenview",
+            [repo["Name"] for repo in body["Results"]],
+        )
+        self.assertNotIn("images/anatase", [repo["Name"] for repo in body["Results"]])
+
+    def test_update_flatpak_static_index_rejects_missing_tags(self) -> None:
+        client = FakeS3Client()
+
+        with self.assertRaisesRegex(ConfigError, "no flatpak manifests found"):
+            update_flatpak_static_index("f44-x86_64", environ=ENV, client=client)
+
+    def test_update_flatpak_static_index_rejects_missing_flatpak_ref(self) -> None:
+        target = _flatpak_registry_objects(
+            "flatpaks/kate",
+            "f44-x86_64",
+            "app/org.kde.kate/x86_64/stable",
+            include_flatpak_ref=False,
+        )
+        client = FakeS3Client(target.objects)
+
+        with self.assertRaisesRegex(ConfigError, "missing org.flatpak.ref"):
+            update_flatpak_static_index("f44-x86_64", environ=ENV, client=client)
+
+    def test_update_flatpak_static_index_rejects_duplicate_refs(self) -> None:
+        first = _flatpak_registry_objects(
+            "flatpaks/kate",
+            "f44-x86_64",
+            "app/org.kde.kate/x86_64/stable",
+        )
+        second = _flatpak_registry_objects(
+            "flatpaks/kate-duplicate",
+            "f44-x86_64",
+            "app/org.kde.kate/x86_64/stable",
+        )
+        client = FakeS3Client({**first.objects, **second.objects})
+
+        with self.assertRaisesRegex(ConfigError, "duplicate flatpak ref"):
+            update_flatpak_static_index("f44-x86_64", environ=ENV, client=client)
+
 
 class TinyOciLayout:
     def __init__(
@@ -1027,6 +1166,18 @@ class TinyOciLayout:
         self.config_digest = f"sha256:{self.config_hex}"
         self.layer_digest = f"sha256:{self.layer_hex}"
         self.manifest_digest = f"sha256:{self.manifest_hex}"
+
+
+class TinyFlatpakRegistryObjects:
+    def __init__(
+        self,
+        *,
+        objects: dict[tuple[str, str], bytes],
+        manifest_bytes: bytes,
+    ) -> None:
+        self.objects = objects
+        self.manifest_bytes = manifest_bytes
+        self.manifest_digest = f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
 
 
 def _manifest_bytes(config_digest: str, *layer_digests: str) -> bytes:
@@ -1050,6 +1201,57 @@ def _manifest_bytes(config_digest: str, *layer_digests: str) -> bytes:
         },
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _flatpak_registry_objects(
+    repo_ref: str,
+    tag: str,
+    flatpak_ref: str,
+    *,
+    architecture: str = "amd64",
+    labels: dict[str, str] | None = None,
+    annotations: dict[str, str] | None = None,
+    include_flatpak_ref: bool = True,
+) -> TinyFlatpakRegistryObjects:
+    image_labels = {} if labels is None else dict(labels)
+    if include_flatpak_ref:
+        image_labels["org.flatpak.ref"] = flatpak_ref
+    config = {
+        "architecture": architecture,
+        "os": "linux",
+        "config": {
+            "Labels": image_labels,
+        },
+        "rootfs": {"type": "layers", "diff_ids": []},
+    }
+    config_bytes = json.dumps(config, separators=(",", ":")).encode("utf-8")
+    config_digest = f"sha256:{hashlib.sha256(config_bytes).hexdigest()}"
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": DEFAULT_MANIFEST_MEDIA_TYPE,
+        "config": {
+            "mediaType": DEFAULT_CONFIG_MEDIA_TYPE,
+            "digest": config_digest,
+            "size": len(config_bytes),
+        },
+        "layers": [],
+    }
+    if annotations:
+        manifest["annotations"] = annotations
+    manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+    return TinyFlatpakRegistryObjects(
+        objects={
+            (
+                "anatase-artifacts",
+                f"v2/{repo_ref}/manifests/{tag}",
+            ): manifest_bytes,
+            (
+                "anatase-artifacts",
+                f"v2/{repo_ref}/blobs/{config_digest}",
+            ): config_bytes,
+        },
+        manifest_bytes=manifest_bytes,
+    )
 
 
 def _create_oci_layout(root: Path, *, layer_bytes: bytes = b"tiny layer") -> TinyOciLayout:

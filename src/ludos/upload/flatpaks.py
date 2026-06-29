@@ -17,7 +17,7 @@ from ..common import (
 from ..flatpaks import build_flatpak, build_flatpaks
 from ..logging import log
 from ..model import ConfigError, ManifestValidation, validate_manifest
-from .registry import tree_shake_oci, upload_oci
+from .registry import tree_shake_oci, update_flatpak_static_index, upload_oci
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,15 @@ def tree_shake_flatpaks(
     for target in _upload_targets(context, flatpaks):
         tree_shake_oci(target.ref, dry_run=dry_run)
     return 0
+
+
+def update_flatpak_index(manifest: Path) -> int:
+    context = _resolve_flatpak_upload_context(
+        manifest,
+        cache_dir=None,
+        require_podman=False,
+    )
+    return update_flatpak_static_index(context.distro)
 
 
 def _resolve_flatpak_upload_context(

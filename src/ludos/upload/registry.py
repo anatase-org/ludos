@@ -29,6 +29,7 @@ DEFAULT_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
 OCI_IMMUTABLE_CACHE_CONTROL = REGISTRY_IMMUTABLE_CACHE_CONTROL
 OCI_MUTABLE_CACHE_CONTROL = REGISTRY_SHORT_CACHE_CONTROL
 REGISTRY_PING_BODY = b"{}"
+FLATPAK_INDEX_REGISTRY = "../../../"
 
 _REF_COMPONENT_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
 _TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
@@ -251,6 +252,54 @@ def tree_shake_oci(
         if digest in references.blob_digests:
             continue
         _delete_blob(s3, config.bucket, key, dry_run=dry_run)
+    return 0
+
+
+def update_flatpak_static_index(
+    distro: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
+) -> int:
+    tag = _validate_flatpak_index_tag(distro)
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+    bucket = config.bucket
+    manifest_keys = _flatpak_index_manifest_keys(
+        _list_object_keys(s3, bucket, "v2/flatpaks/"),
+        tag,
+    )
+    if not manifest_keys:
+        raise ConfigError(f"no flatpak manifests found for tag: {tag}")
+
+    repositories: dict[str, list[dict[str, Any]]] = {}
+    seen_refs: set[tuple[str, str]] = set()
+    for key, repo_ref in manifest_keys:
+        image = _flatpak_index_image(s3, bucket, repo_ref, key, tag)
+        flatpak_ref = image["Labels"]["org.flatpak.ref"]
+        ref_key = (image["Architecture"], flatpak_ref)
+        if ref_key in seen_refs:
+            raise ConfigError(
+                f"duplicate flatpak ref for {tag}: {flatpak_ref} "
+                f"({image['Architecture']})"
+            )
+        seen_refs.add(ref_key)
+        repositories.setdefault(repo_ref, []).append(image)
+
+    body = _flatpak_index_body(repositories)
+    key = _flatpak_static_index_key(tag)
+    log(f"Uploading flatpak index: {_display_key(key)}")
+    try:
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+            CacheControl=OCI_MUTABLE_CACHE_CONTROL,
+        )
+    except Exception as exc:
+        raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc
+    log(f"Updated flatpak index for {tag} with {len(seen_refs)} images")
     return 0
 
 
@@ -546,6 +595,144 @@ def _list_object_keys(client: Any, bucket: str, prefix: str) -> tuple[str, ...]:
         if not isinstance(token, str) or not token:
             raise ConfigError(f"S3 list failed for {prefix}: missing continuation token")
         continuation_token = token
+
+
+def _validate_flatpak_index_tag(tag: str) -> str:
+    if not _TAG_RE.match(tag):
+        raise ConfigError(f"invalid flatpak index tag: {tag}")
+    return tag
+
+
+def _flatpak_static_index_key(tag: str) -> str:
+    return f"{tag}/index/static"
+
+
+def _flatpak_index_manifest_keys(
+    keys: tuple[str, ...],
+    tag: str,
+) -> tuple[tuple[str, str], ...]:
+    suffix = f"/manifests/{tag}"
+    manifests = []
+    for key in keys:
+        if not key.startswith("v2/flatpaks/") or not key.endswith(suffix):
+            continue
+        repo_ref = key.removeprefix("v2/")[: -len(suffix)]
+        if not repo_ref:
+            continue
+        manifests.append((key, repo_ref))
+    return tuple(sorted(manifests, key=lambda item: item[1]))
+
+
+def _flatpak_index_image(
+    client: Any,
+    bucket: str,
+    repo_ref: str,
+    manifest_key: str,
+    tag: str,
+) -> dict[str, Any]:
+    manifest_bytes = _read_s3_object(client, bucket, manifest_key)
+    manifest = _loads_json(manifest_bytes, f"flatpak manifest object {manifest_key}")
+    media_type = manifest.get("mediaType", DEFAULT_MANIFEST_MEDIA_TYPE)
+    if not isinstance(media_type, str) or not media_type:
+        raise ConfigError(f"flatpak manifest object {manifest_key} has invalid mediaType")
+    descriptor = _descriptor(
+        manifest.get("config"),
+        default_media_type=DEFAULT_CONFIG_MEDIA_TYPE,
+        what=f"flatpak manifest object {manifest_key} config",
+    )
+    config_key = _blob_key(repo_ref, descriptor.digest)
+    config = _loads_json(
+        _read_s3_object(client, bucket, config_key),
+        f"flatpak config object {config_key}",
+    )
+    architecture = _required_json_string(
+        config,
+        "architecture",
+        f"flatpak config object {config_key}",
+    )
+    os_name = _required_json_string(
+        config,
+        "os",
+        f"flatpak config object {config_key}",
+    )
+    config_data = config.get("config", {})
+    if config_data is None:
+        config_data = {}
+    if not isinstance(config_data, dict):
+        raise ConfigError(f"flatpak config object {config_key} config must be an object")
+    labels = _optional_string_mapping(
+        config_data.get("Labels"),
+        f"flatpak config object {config_key} Labels",
+    )
+    annotations = _optional_string_mapping(
+        config_data.get("Annotations"),
+        f"flatpak config object {config_key} Annotations",
+    )
+    annotations.update(
+        _optional_string_mapping(
+            manifest.get("annotations"),
+            f"flatpak manifest object {manifest_key} annotations",
+        )
+    )
+    if "org.flatpak.ref" not in labels:
+        raise ConfigError(f"flatpak manifest {manifest_key} is missing org.flatpak.ref")
+    return {
+        "Digest": f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}",
+        "MediaType": media_type,
+        "OS": os_name,
+        "Architecture": architecture,
+        "Labels": labels,
+        "Annotations": annotations,
+        "Tags": [tag],
+    }
+
+
+def _flatpak_index_body(repositories: dict[str, list[dict[str, Any]]]) -> bytes:
+    results = [
+        {
+            "Name": repo_ref,
+            "Images": sorted(
+                images,
+                key=lambda image: (
+                    image["Architecture"],
+                    image["Labels"]["org.flatpak.ref"],
+                ),
+            ),
+        }
+        for repo_ref, images in sorted(repositories.items())
+    ]
+    return (
+        json.dumps(
+            {
+                "Registry": FLATPAK_INDEX_REGISTRY,
+                "Results": results,
+            },
+            sort_keys=True,
+            indent=4,
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _required_json_string(data: dict[str, Any], key: str, what: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{what} is missing {key}")
+    return value
+
+
+def _optional_string_mapping(value: object, what: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"{what} must be an object")
+    result = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, str):
+            raise ConfigError(f"{what} must contain string values")
+        result[key] = item
+    return result
 
 
 def _referenced_oci_digests(

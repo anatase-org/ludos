@@ -18,7 +18,11 @@ from .contrib.package import package_target
 from .contrib.patchwork import patch_target
 from .contrib.update import update_targets
 from .upload.file import delete_file, upload_file
-from .upload.flatpaks import tree_shake_flatpaks, upload_flatpaks
+from .upload.flatpaks import (
+    tree_shake_flatpaks,
+    update_flatpak_index,
+    upload_flatpaks,
+)
 from .upload.registry import (
     delete_oci_tags,
     list_oci_tags,
@@ -327,6 +331,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print blobs that would be deleted without deleting them.",
     )
     registry_flatpak_tree_shake.set_defaults(func=registry_command)
+    registry_flatpak_update = registry_flatpak_subcommands.add_parser(
+        "update",
+        help="Update the static flatpak index for a manifest distro.",
+    )
+    registry_flatpak_update.add_argument(
+        "manifest",
+        type=Path,
+        help="Path to a Ludos YAML manifest.",
+    )
+    registry_flatpak_update.set_defaults(func=registry_command)
 
     registry_oci = registry_subcommands.add_parser(
         "oci",
@@ -770,6 +784,8 @@ def registry_command(args: argparse.Namespace) -> int:
                 tuple(args.flatpaks or ()),
                 dry_run=args.dry_run,
             )
+        if args.registry_flatpak_action == "update":
+            return update_flatpak_index(args.manifest)
         raise ConfigError(
             f"unknown registry flatpak action: {args.registry_flatpak_action}"
         )
