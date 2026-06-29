@@ -27,6 +27,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                 "--build",
                 "--cache-dir",
                 "out/cache",
+                "--update",
             ]
         )
 
@@ -36,6 +37,7 @@ class UploadFlatpaksTests(unittest.TestCase):
         self.assertEqual(args.flatpaks, [Path("flatpaks/ark"), Path("flatpaks/kate")])
         self.assertTrue(args.build)
         self.assertEqual(args.cache_dir, Path("out/cache"))
+        self.assertTrue(args.update)
 
     def test_registry_flatpak_upload_command_dispatches(self) -> None:
         args = build_parser().parse_args(
@@ -52,7 +54,10 @@ class UploadFlatpaksTests(unittest.TestCase):
             ]
         )
 
-        with patch("ludos.__main__.upload_flatpaks", return_value=0) as upload:
+        with (
+            patch("ludos.__main__.upload_flatpaks", return_value=0) as upload,
+            patch("ludos.__main__.update_flatpak_index", return_value=0) as update,
+        ):
             self.assertEqual(args.func(args), 0)
 
         upload.assert_called_once_with(
@@ -61,6 +66,53 @@ class UploadFlatpaksTests(unittest.TestCase):
             build=True,
             cache_dir=Path("out/cache"),
         )
+        update.assert_not_called()
+
+    def test_registry_flatpak_upload_update_command_dispatches(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "flatpak",
+                "upload",
+                "anatase.yml",
+                "--flatpak",
+                "flatpaks/ark",
+                "--update",
+            ]
+        )
+
+        with (
+            patch("ludos.__main__.upload_flatpaks", return_value=0) as upload,
+            patch("ludos.__main__.update_flatpak_index", return_value=0) as update,
+        ):
+            self.assertEqual(args.func(args), 0)
+
+        upload.assert_called_once_with(
+            Path("anatase.yml"),
+            (Path("flatpaks/ark"),),
+            build=False,
+            cache_dir=None,
+        )
+        update.assert_called_once_with(Path("anatase.yml"))
+
+    def test_registry_flatpak_upload_update_skips_after_failed_upload(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "flatpak", "upload", "anatase.yml", "--update"]
+        )
+
+        with (
+            patch("ludos.__main__.upload_flatpaks", return_value=17) as upload,
+            patch("ludos.__main__.update_flatpak_index", return_value=0) as update,
+        ):
+            self.assertEqual(args.func(args), 17)
+
+        upload.assert_called_once_with(
+            Path("anatase.yml"),
+            tuple(),
+            build=False,
+            cache_dir=None,
+        )
+        update.assert_not_called()
 
     def test_registry_flatpak_tree_shake_parser(self) -> None:
         args = build_parser().parse_args(

@@ -307,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory for flatpak export caches. Defaults to ./cache next to the manifest.",
     )
+    registry_flatpak_upload.add_argument(
+        "--update",
+        action="store_true",
+        help="Update the static flatpak index after uploading.",
+    )
     registry_flatpak_upload.set_defaults(func=registry_command)
     registry_flatpak_tree_shake = registry_flatpak_subcommands.add_parser(
         "tree-shake",
@@ -772,12 +777,17 @@ def registry_command(args: argparse.Namespace) -> int:
         raise ConfigError(f"unknown registry file action: {args.registry_file_action}")
     if args.registry_action == "flatpak":
         if args.registry_flatpak_action == "upload":
-            return upload_flatpaks(
+            result = upload_flatpaks(
                 args.manifest,
                 tuple(args.flatpaks or ()),
                 build=args.build,
                 cache_dir=args.cache_dir,
             )
+            if result != 0:
+                return result
+            if args.update:
+                return update_flatpak_index(args.manifest)
+            return result
         if args.registry_flatpak_action == "tree-shake":
             return tree_shake_flatpaks(
                 args.manifest,
