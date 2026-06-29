@@ -339,8 +339,8 @@ def _write_dummy_runtime_oci_layout(
         flatpak_arch=flatpak_arch,
         metadata=metadata,
         timestamp=DUMMY_RUNTIME_TIMESTAMP,
-        download_size=0,
-        installed_size=0,
+        download_size=1,
+        installed_size=1,
         author=author,
     )
     config = {

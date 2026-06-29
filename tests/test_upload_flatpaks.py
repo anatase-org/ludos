@@ -429,16 +429,16 @@ class UploadFlatpaksTests(unittest.TestCase):
                     _uint64_variant_label(
                         labels["org.flatpak.commit-metadata.xa.download-size"]
                     ),
-                    0,
+                    1,
                 )
-                self.assertEqual(labels["org.flatpak.download-size"], "0")
+                self.assertEqual(labels["org.flatpak.download-size"], "1")
                 self.assertEqual(
                     _uint64_variant_label(
                         labels["org.flatpak.commit-metadata.xa.installed-size"]
                     ),
-                    0,
+                    1,
                 )
-                self.assertEqual(labels["org.flatpak.installed-size"], "0")
+                self.assertEqual(labels["org.flatpak.installed-size"], "1")
                 self.assertEqual(labels["org.flatpak.subject"], title)
                 self.assertEqual(labels["org.flatpak.body"], description)
                 self.assertEqual(
