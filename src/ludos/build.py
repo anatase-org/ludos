@@ -3185,6 +3185,8 @@ def _render_specs_build_output_containerfile(
     stage_names = _spec_build_stage_names(staged_specs)
     lines: list[str] = []
     for stage_name, staged in zip(stage_names, staged_specs):
+        if lines:
+            lines.append("")
         build_script = _ccache_build_prelude(ccache_dir) + _specs_build_script(
             (staged,),
             workspace_dir,

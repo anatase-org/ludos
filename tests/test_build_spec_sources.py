@@ -572,7 +572,10 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         self.assertIn("FROM localhost/builders:f44 AS spec_scx_tools_0", containerfile)
         self.assertIn("FROM localhost/builders:f44 AS spec_scx_scheds_1", containerfile)
         self.assertIn("#\n# Build: spec_scx_tools_0\n#\n", containerfile)
-        self.assertIn("#\n# Build: spec_scx_scheds_1\n#\n", containerfile)
+        self.assertIn(
+            "LUDOS_SPEC_BUILD_spec_scx_tools_0\n\n#\n# Build: spec_scx_scheds_1\n#\n",
+            containerfile,
+        )
         self.assertIn(
             'COPY "spec-workspaces/spec_scx_tools_0/" "/workspace/tools/"',
             containerfile,
