@@ -18,6 +18,7 @@ from .contrib.package import package_target
 from .contrib.patchwork import patch_target
 from .contrib.update import update_targets
 from .upload.file import delete_file, upload_file
+from .upload.flatpaks import upload_flatpaks
 from .upload.registry import (
     delete_oci_tags,
     list_oci_tags,
@@ -265,6 +266,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="S3 object path to delete.",
     )
     registry_file_delete.set_defaults(func=registry_command)
+
+    registry_flatpak = registry_subcommands.add_parser(
+        "flatpak",
+        help="Work with registry-hosted flatpaks.",
+    )
+    registry_flatpak_subcommands = registry_flatpak.add_subparsers(
+        dest="registry_flatpak_action",
+        required=True,
+    )
+    registry_flatpak_upload = registry_flatpak_subcommands.add_parser(
+        "upload",
+        help="Export and upload flatpak OCI images to S3.",
+    )
+    registry_flatpak_upload.add_argument(
+        "manifest",
+        type=Path,
+        help="Path to a Ludos YAML manifest.",
+    )
+    registry_flatpak_upload.add_argument(
+        "--flatpak",
+        action="append",
+        type=Path,
+        default=None,
+        dest="flatpaks",
+        help="Flatpak directory or card YAML to upload. May be specified more than once.",
+    )
+    registry_flatpak_upload.add_argument(
+        "--build",
+        action="store_true",
+        help="Build selected flatpaks before uploading.",
+    )
+    registry_flatpak_upload.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Directory for flatpak export caches. Defaults to ./cache next to the manifest.",
+    )
+    registry_flatpak_upload.set_defaults(func=registry_command)
 
     registry_oci = registry_subcommands.add_parser(
         "oci",
@@ -694,6 +733,17 @@ def registry_command(args: argparse.Namespace) -> int:
         if args.registry_file_action == "delete":
             return delete_file(args.output_path)
         raise ConfigError(f"unknown registry file action: {args.registry_file_action}")
+    if args.registry_action == "flatpak":
+        if args.registry_flatpak_action == "upload":
+            return upload_flatpaks(
+                args.manifest,
+                tuple(args.flatpaks or ()),
+                build=args.build,
+                cache_dir=args.cache_dir,
+            )
+        raise ConfigError(
+            f"unknown registry flatpak action: {args.registry_flatpak_action}"
+        )
     if args.registry_action == "oci":
         if args.registry_oci_action == "upload":
             return upload_oci(args.local_oci_path, args.ref, tuple(args.tags))
