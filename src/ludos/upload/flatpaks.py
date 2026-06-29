@@ -9,6 +9,7 @@ import shutil
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 from ..common import (
     _cache_name,
@@ -327,6 +328,7 @@ def _write_dummy_runtime_oci_layout(
     )
 
     metadata = _dummy_runtime_metadata(runtime, flatpak_arch)
+    installed_size = _dummy_runtime_installed_size(metadata)
     uncompressed_layer = _dummy_runtime_layer(metadata)
     compressed_layer = _gzip(uncompressed_layer)
     layer = _write_oci_blob(blobs_dir, compressed_layer)
@@ -337,6 +339,8 @@ def _write_dummy_runtime_oci_layout(
         flatpak_arch=flatpak_arch,
         metadata=metadata,
         timestamp=DUMMY_RUNTIME_TIMESTAMP,
+        download_size=len(compressed_layer),
+        installed_size=installed_size,
     )
     config = {
         "architecture": oci_arch,
@@ -410,11 +414,18 @@ def _dummy_runtime_labels(
     flatpak_arch: str,
     metadata: str,
     timestamp: str,
+    download_size: int,
+    installed_size: int,
 ) -> dict[str, str]:
     labels = {
         "org.flatpak.ref": runtime_ref,
         "org.flatpak.metadata": metadata,
-        **_flatpak_commit_metadata_labels(metadata, runtime_ref),
+        **_flatpak_commit_metadata_labels(
+            metadata,
+            runtime_ref,
+            download_size=download_size,
+            installed_size=installed_size,
+        ),
         "org.flatpak.timestamp": timestamp,
         "org.opencontainers.image.ref.name": runtime_ref,
         "org.anatase.flatpak.branch": runtime.branch,
@@ -426,7 +437,39 @@ def _dummy_runtime_labels(
     if runtime.description:
         labels["org.flatpak.body"] = runtime.description
         labels["org.opencontainers.image.description"] = runtime.description
+    if runtime.license:
+        labels["org.opencontainers.image.licenses"] = runtime.license
+        labels["org.freedesktop.appstream.appdata"] = _dummy_runtime_appstream(
+            runtime,
+            runtime_ref,
+        )
     return labels
+
+
+def _dummy_runtime_installed_size(metadata: str) -> int:
+    return len(metadata.encode("utf-8"))
+
+
+def _dummy_runtime_appstream(runtime: ManifestRuntime, runtime_ref: str) -> str:
+    name = runtime.title or runtime.id
+    summary = runtime.description or name
+    return _compact_xml(
+        "<?xml version='1.0' encoding='UTF-8'?>\n"
+        "<components version=\"1.0\">\n"
+        "  <component type=\"runtime\">\n"
+        f"    <id>{escape(runtime.id)}</id>\n"
+        f"    <bundle type=\"flatpak\">{escape(runtime_ref)}</bundle>\n"
+        f"    <name>{escape(name)}</name>\n"
+        f"    <summary>{escape(summary)}</summary>\n"
+        "    <metadata_license>CC0-1.0</metadata_license>\n"
+        f"    <project_license>{escape(runtime.license)}</project_license>\n"
+        "  </component>\n"
+        "</components>\n"
+    )
+
+
+def _compact_xml(value: str) -> str:
+    return " ".join(line.strip() for line in value.splitlines())
 
 
 def _dummy_runtime_layer(metadata: str) -> bytes:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 from contextlib import ExitStack
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -406,6 +408,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                 labels = config["config"]["Labels"]
                 title = "Anatase Test Runtime"
                 description = "Anatase Platform runtime for tests."
+                license = "LicenseRef-Anatase-Test"
                 self.assertEqual(config["architecture"], "amd64")
                 self.assertEqual(
                     labels["org.flatpak.ref"],
@@ -417,6 +420,18 @@ class UploadFlatpaksTests(unittest.TestCase):
                     labels["org.flatpak.metadata"],
                 )
                 self.assertEqual(labels["org.flatpak.timestamp"], "0")
+                self.assertGreater(
+                    _uint64_variant_label(
+                        labels["org.flatpak.commit-metadata.xa.download-size"]
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    _uint64_variant_label(
+                        labels["org.flatpak.commit-metadata.xa.installed-size"]
+                    ),
+                    len(labels["org.flatpak.metadata"].encode("utf-8")),
+                )
                 self.assertEqual(labels["org.flatpak.subject"], title)
                 self.assertEqual(labels["org.flatpak.body"], description)
                 self.assertEqual(
@@ -426,6 +441,22 @@ class UploadFlatpaksTests(unittest.TestCase):
                 self.assertEqual(
                     labels["org.opencontainers.image.description"],
                     description,
+                )
+                self.assertEqual(labels["org.opencontainers.image.licenses"], license)
+                appdata = labels["org.freedesktop.appstream.appdata"]
+                self.assertIn('<component type="runtime">', appdata)
+                self.assertIn("<id>org.anatase.Platform</id>", appdata)
+                self.assertIn(
+                    "<bundle type=\"flatpak\">"
+                    "runtime/org.anatase.Platform/x86_64/stable"
+                    "</bundle>",
+                    appdata,
+                )
+                self.assertIn("<name>Anatase Test Runtime</name>", appdata)
+                self.assertIn("<metadata_license>CC0-1.0</metadata_license>", appdata)
+                self.assertIn(
+                    "<project_license>LicenseRef-Anatase-Test</project_license>",
+                    appdata,
                 )
                 return 0
 
@@ -467,7 +498,8 @@ class UploadFlatpaksTests(unittest.TestCase):
             manifest.write_text(
                 manifest.read_text(encoding="utf-8")
                 .replace("  title: Anatase Test Runtime\n", "")
-                .replace("  description: Anatase Platform runtime for tests.\n", ""),
+                .replace("  description: Anatase Platform runtime for tests.\n", "")
+                .replace("  license: LicenseRef-Anatase-Test\n", ""),
                 encoding="utf-8",
             )
 
@@ -496,6 +528,8 @@ class UploadFlatpaksTests(unittest.TestCase):
                 self.assertNotIn("org.flatpak.body", labels)
                 self.assertNotIn("org.opencontainers.image.title", labels)
                 self.assertNotIn("org.opencontainers.image.description", labels)
+                self.assertNotIn("org.opencontainers.image.licenses", labels)
+                self.assertNotIn("org.freedesktop.appstream.appdata", labels)
                 return 0
 
             with (
@@ -518,7 +552,8 @@ class UploadFlatpaksTests(unittest.TestCase):
                     "  repo: runtime\n"
                     "  branch: stable\n"
                     "  title: Anatase Test Runtime\n"
-                    "  description: Anatase Platform runtime for tests.\n",
+                    "  description: Anatase Platform runtime for tests.\n"
+                    "  license: LicenseRef-Anatase-Test\n",
                     "",
                 ),
                 encoding="utf-8",
@@ -552,6 +587,7 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
                 "  branch: stable",
                 "  title: Anatase Test Runtime",
                 "  description: Anatase Platform runtime for tests.",
+                "  license: LicenseRef-Anatase-Test",
                 "bootstrap: cards/bootstrap.yml",
                 "repos: []",
                 "cards:",
@@ -564,6 +600,10 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
         encoding="utf-8",
     )
     return manifest
+
+
+def _uint64_variant_label(value: str) -> int:
+    return struct.unpack(">Q", base64.b64decode(value)[:8])[0]
 
 
 class _MockUploadDeps:
