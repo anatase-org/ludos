@@ -861,6 +861,8 @@ postprocess: |
             labels["org.flatpak.commit-metadata.xa.installed-size"],
             "AAAAAAAAAcgAdA==",
         )
+        self.assertEqual(labels["org.flatpak.download-size"], "123")
+        self.assertEqual(labels["org.flatpak.installed-size"], "456")
 
     def test_containerfile_rewrites_desktop_icon_for_rename_icon(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1114,6 +1116,24 @@ specs:
                     "config",
                     "--label",
                     "org.flatpak.metadata=metadata-body\n",
+                    "flatpak-label-container",
+                ],
+                {
+                    "check": False,
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.PIPE,
+                    "text": True,
+                },
+            ),
+            runs,
+        )
+        self.assertIn(
+            (
+                [
+                    "buildah",
+                    "config",
+                    "--label",
+                    "org.flatpak.download-size=123",
                     "flatpak-label-container",
                 ],
                 {

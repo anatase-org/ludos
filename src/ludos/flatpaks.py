@@ -970,6 +970,8 @@ def _flatpak_commit_metadata_labels(
         "org.flatpak.commit-metadata.ostree.collection-binding": _gvariant_string_variant_b64(""),
         "org.flatpak.commit-metadata.xa.download-size": _gvariant_uint64_variant_b64(download_size),
         "org.flatpak.commit-metadata.xa.installed-size": _gvariant_uint64_variant_b64(installed_size),
+        "org.flatpak.download-size": str(download_size),
+        "org.flatpak.installed-size": str(installed_size),
     }
 
 
