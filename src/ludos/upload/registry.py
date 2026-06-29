@@ -10,7 +10,13 @@ from typing import Any, Mapping
 
 from ..logging import log, piter, warning
 from ..model import ConfigError
-from .common import _client_error_code, _create_s3_client, _s3_config_from_env
+from .common import (
+    REGISTRY_IMMUTABLE_CACHE_CONTROL,
+    REGISTRY_SHORT_CACHE_CONTROL,
+    _client_error_code,
+    _create_s3_client,
+    _s3_config_from_env,
+)
 
 
 DEFAULT_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
@@ -20,8 +26,8 @@ DOCKER_MANIFEST_LIST_MEDIA_TYPE = (
 )
 DEFAULT_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
 DEFAULT_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
-OCI_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
-OCI_MUTABLE_CACHE_CONTROL = "no-cache, max-age=0, must-revalidate"
+OCI_IMMUTABLE_CACHE_CONTROL = REGISTRY_IMMUTABLE_CACHE_CONTROL
+OCI_MUTABLE_CACHE_CONTROL = REGISTRY_SHORT_CACHE_CONTROL
 REGISTRY_PING_BODY = b"{}"
 
 _REF_COMPONENT_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
@@ -57,7 +63,7 @@ def registry_init(
                 Key=key,
                 Body=REGISTRY_PING_BODY,
                 ContentType="application/json",
-                CacheControl=OCI_MUTABLE_CACHE_CONTROL,
+                CacheControl=OCI_IMMUTABLE_CACHE_CONTROL,
             )
         except Exception as exc:
             raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc
@@ -634,7 +640,7 @@ def _upload_blob_if_needed(
     overall_progress: Any,
     object_type: str,
 ) -> bool:
-    if _object_matches_size(client, bucket, key, size):
+    if _object_matches(client, bucket, key, size, OCI_IMMUTABLE_CACHE_CONTROL):
         log(f"Skipping {object_type}: {_display_key(key)}")
         overall_progress.update(size)
         return False
@@ -691,7 +697,7 @@ def _put_object_if_needed(
     overall_progress: Any,
     object_type: str,
 ) -> None:
-    if _object_matches_size(client, bucket, key, len(body)):
+    if _object_matches(client, bucket, key, len(body), OCI_IMMUTABLE_CACHE_CONTROL):
         log(f"Skipping {object_type}: {_display_key(key)}")
         overall_progress.update(len(body))
         return
@@ -709,11 +715,12 @@ def _put_object_if_needed(
     overall_progress.update(len(body))
 
 
-def _object_matches_size(
+def _object_matches(
     client: Any,
     bucket: str,
     key: str,
     size: int,
+    cache_control: str,
 ) -> bool:
     try:
         response = client.head_object(Bucket=bucket, Key=key)
@@ -721,4 +728,7 @@ def _object_matches_size(
         if _client_error_code(exc) in ("404", "NoSuchKey", "NotFound"):
             return False
         raise ConfigError(f"S3 stat failed for {key}: {exc}") from exc
-    return response.get("ContentLength") == size
+    return (
+        response.get("ContentLength") == size
+        and response.get("CacheControl") == cache_control
+    )

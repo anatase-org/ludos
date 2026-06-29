@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from ..logging import log, piter
 from ..model import ConfigError
 from .common import (
+    REGISTRY_SHORT_CACHE_CONTROL,
     S3Config,
     _client_error_code,
     _create_s3_client,
@@ -57,6 +58,7 @@ def upload_file(
     extra_args = {}
     if download_name is not None:
         extra_args["ContentDisposition"] = _content_disposition(download_name)
+    extra_args["CacheControl"] = REGISTRY_SHORT_CACHE_CONTROL
     size_bytes = source.stat().st_size
 
     log(f"Uploading file: {source} -> {target.key}")
@@ -164,6 +166,7 @@ def _write_sha256sums(
             Key=target.checksum_key,
             Body=text.encode("utf-8"),
             ContentType="text/plain; charset=utf-8",
+            CacheControl=REGISTRY_SHORT_CACHE_CONTROL,
         )
     except Exception as exc:
         raise ConfigError(f"S3 upload failed for {target.checksum_key}: {exc}") from exc

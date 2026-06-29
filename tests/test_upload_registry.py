@@ -248,14 +248,14 @@ class UploadRegistryTests(unittest.TestCase):
                     "Key": "v2/",
                     "Body": b"{}",
                     "ContentType": "application/json",
-                    "CacheControl": OCI_MUTABLE_CACHE_CONTROL,
+                    "CacheControl": OCI_IMMUTABLE_CACHE_CONTROL,
                 },
                 {
                     "Bucket": "anatase-artifacts",
                     "Key": "v2",
                     "Body": b"{}",
                     "ContentType": "application/json",
-                    "CacheControl": OCI_MUTABLE_CACHE_CONTROL,
+                    "CacheControl": OCI_IMMUTABLE_CACHE_CONTROL,
                 },
             ],
         )
@@ -332,21 +332,25 @@ class UploadRegistryTests(unittest.TestCase):
     def test_upload_oci_skips_existing_matching_objects(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             layout = _create_oci_layout(Path(temp))
+            objects = {
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{layout.layer_digest}",
+                ): layout.layer_bytes,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{layout.config_digest}",
+                ): layout.config_bytes,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/manifests/{layout.manifest_digest}",
+                ): layout.manifest_bytes,
+            }
             client = FakeS3Client(
-                {
-                    (
-                        "anatase-artifacts",
-                        f"v2/images/anatase/blobs/{layout.layer_digest}",
-                    ): layout.layer_bytes,
-                    (
-                        "anatase-artifacts",
-                        f"v2/images/anatase/blobs/{layout.config_digest}",
-                    ): layout.config_bytes,
-                    (
-                        "anatase-artifacts",
-                        f"v2/images/anatase/manifests/{layout.manifest_digest}",
-                    ): layout.manifest_bytes,
-                }
+                objects,
+                cache_controls={
+                    key: OCI_IMMUTABLE_CACHE_CONTROL for key in objects
+                },
             )
 
             upload_oci(
@@ -361,6 +365,65 @@ class UploadRegistryTests(unittest.TestCase):
         self.assertEqual(
             [item["Key"] for item in client.puts],
             ["v2/images/anatase/manifests/latest"],
+        )
+
+    def test_upload_oci_reuploads_existing_objects_with_stale_cache_control(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            layout = _create_oci_layout(Path(temp))
+            client = FakeS3Client(
+                {
+                    (
+                        "anatase-artifacts",
+                        f"v2/images/anatase/blobs/{layout.layer_digest}",
+                    ): layout.layer_bytes,
+                    (
+                        "anatase-artifacts",
+                        f"v2/images/anatase/blobs/{layout.config_digest}",
+                    ): layout.config_bytes,
+                    (
+                        "anatase-artifacts",
+                        f"v2/images/anatase/manifests/{layout.manifest_digest}",
+                    ): layout.manifest_bytes,
+                },
+                cache_controls={
+                    (
+                        "anatase-artifacts",
+                        f"v2/images/anatase/blobs/{layout.layer_digest}",
+                    ): OCI_MUTABLE_CACHE_CONTROL,
+                    (
+                        "anatase-artifacts",
+                        f"v2/images/anatase/blobs/{layout.config_digest}",
+                    ): OCI_MUTABLE_CACHE_CONTROL,
+                    (
+                        "anatase-artifacts",
+                        f"v2/images/anatase/manifests/{layout.manifest_digest}",
+                    ): OCI_MUTABLE_CACHE_CONTROL,
+                },
+            )
+
+            upload_oci(
+                layout.root,
+                "images/anatase",
+                ("latest",),
+                environ=ENV,
+                client=client,
+            )
+
+        self.assertEqual(
+            [item["Key"] for item in client.uploads],
+            [
+                f"v2/images/anatase/blobs/{layout.layer_digest}",
+                f"v2/images/anatase/blobs/{layout.config_digest}",
+            ],
+        )
+        self.assertEqual(
+            [item["Key"] for item in client.puts],
+            [
+                f"v2/images/anatase/manifests/{layout.manifest_digest}",
+                "v2/images/anatase/manifests/latest",
+            ],
         )
 
     def test_upload_oci_reuploads_existing_mismatched_objects(self) -> None:
@@ -412,17 +475,21 @@ class UploadRegistryTests(unittest.TestCase):
                 Path(temp),
                 layer_bytes=b"x" * (2 * 1024 * 1024),
             )
+            objects = {
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{layout.config_digest}",
+                ): layout.config_bytes,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/manifests/{layout.manifest_digest}",
+                ): layout.manifest_bytes,
+            }
             client = FakeS3Client(
-                {
-                    (
-                        "anatase-artifacts",
-                        f"v2/images/anatase/blobs/{layout.config_digest}",
-                    ): layout.config_bytes,
-                    (
-                        "anatase-artifacts",
-                        f"v2/images/anatase/manifests/{layout.manifest_digest}",
-                    ): layout.manifest_bytes,
-                }
+                objects,
+                cache_controls={
+                    key: OCI_IMMUTABLE_CACHE_CONTROL for key in objects
+                },
             )
 
             with patch("ludos.upload.registry.log") as log:
@@ -460,21 +527,25 @@ class UploadRegistryTests(unittest.TestCase):
                 Path(temp),
                 layer_bytes=b"x" * (2 * 1024 * 1024),
             )
+            objects = {
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{layout.layer_digest}",
+                ): layout.layer_bytes,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{layout.config_digest}",
+                ): layout.config_bytes,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/manifests/{layout.manifest_digest}",
+                ): layout.manifest_bytes,
+            }
             client = FakeS3Client(
-                {
-                    (
-                        "anatase-artifacts",
-                        f"v2/images/anatase/blobs/{layout.layer_digest}",
-                    ): layout.layer_bytes,
-                    (
-                        "anatase-artifacts",
-                        f"v2/images/anatase/blobs/{layout.config_digest}",
-                    ): layout.config_bytes,
-                    (
-                        "anatase-artifacts",
-                        f"v2/images/anatase/manifests/{layout.manifest_digest}",
-                    ): layout.manifest_bytes,
-                }
+                objects,
+                cache_controls={
+                    key: OCI_IMMUTABLE_CACHE_CONTROL for key in objects
+                },
             )
 
             with patch("ludos.upload.registry.log") as log:

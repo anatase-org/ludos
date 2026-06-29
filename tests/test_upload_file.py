@@ -8,7 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ludos.__main__ import build_parser
-from ludos.upload.common import S3Config, _s3_config_from_env
+from ludos.upload.common import (
+    REGISTRY_SHORT_CACHE_CONTROL,
+    S3Config,
+    _s3_config_from_env,
+)
 from ludos.upload.file import (
     delete_file,
     upload_file,
@@ -29,8 +33,14 @@ class FakeClientError(Exception):
 
 
 class FakeS3Client:
-    def __init__(self, objects: dict[tuple[str, str], bytes] | None = None) -> None:
+    def __init__(
+        self,
+        objects: dict[tuple[str, str], bytes] | None = None,
+        *,
+        cache_controls: dict[tuple[str, str], str] | None = None,
+    ) -> None:
         self.objects = {} if objects is None else dict(objects)
+        self.cache_controls = {} if cache_controls is None else dict(cache_controls)
         self.uploads: list[dict[str, object]] = []
         self.puts: list[dict[str, object]] = []
         self.deletes: list[dict[str, object]] = []
@@ -63,6 +73,7 @@ class FakeS3Client:
         if Callback is not None:
             Callback(len(data))  # type: ignore[operator]
         self.objects[(bucket, key)] = data
+        self.cache_controls[(bucket, key)] = ExtraArgs.get("CacheControl")
 
     def get_object(self, *, Bucket: str, Key: str) -> dict[str, BytesIO]:
         self.gets.append({"Bucket": Bucket, "Key": Key})
@@ -73,14 +84,18 @@ class FakeS3Client:
             raise FakeClientError("NoSuchKey") from exc
         return {"Body": BytesIO(body)}
 
-    def head_object(self, *, Bucket: str, Key: str) -> dict[str, int]:
+    def head_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
         self.heads.append({"Bucket": Bucket, "Key": Key})
         self.calls.append(("head_object", Key))
         try:
             body = self.objects[(Bucket, Key)]
         except KeyError as exc:
             raise FakeClientError("NoSuchKey") from exc
-        return {"ContentLength": len(body)}
+        response: dict[str, object] = {"ContentLength": len(body)}
+        cache_control = self.cache_controls.get((Bucket, Key))
+        if cache_control is not None:
+            response["CacheControl"] = cache_control
+        return response
 
     def put_object(
         self,
@@ -102,6 +117,7 @@ class FakeS3Client:
         self.puts.append(put)
         self.calls.append(("put_object", Key))
         self.objects[(Bucket, Key)] = Body
+        self.cache_controls[(Bucket, Key)] = CacheControl
 
     def delete_object(self, *, Bucket: str, Key: str) -> None:
         self.deletes.append({"Bucket": Bucket, "Key": Key})
@@ -109,6 +125,7 @@ class FakeS3Client:
         if (Bucket, Key) in self.delete_errors:
             raise FakeClientError(self.delete_errors[(Bucket, Key)])
         self.objects.pop((Bucket, Key), None)
+        self.cache_controls.pop((Bucket, Key), None)
 
     def list_objects_v2(
         self,
@@ -258,6 +275,7 @@ class UploadFileTests(unittest.TestCase):
             client.uploads[0]["ExtraArgs"],
             {
                 "ContentDisposition": 'attachment; filename="anatase-44.20260627.iso"',
+                "CacheControl": REGISTRY_SHORT_CACHE_CONTROL,
             },
         )
         self.assertIsNotNone(client.uploads[0]["Callback"])
@@ -285,9 +303,13 @@ class UploadFileTests(unittest.TestCase):
 
         self.assertEqual(client.uploads[0]["Bucket"], "anatase-artifacts")
         self.assertEqual(client.uploads[0]["Key"], "isos/anatase.iso")
-        self.assertEqual(client.uploads[0]["ExtraArgs"], {})
+        self.assertEqual(
+            client.uploads[0]["ExtraArgs"],
+            {"CacheControl": REGISTRY_SHORT_CACHE_CONTROL},
+        )
         self.assertIsNotNone(client.uploads[0]["Callback"])
         self.assertEqual(client.gets[0]["Key"], "isos/SHA256SUMS")
+        self.assertEqual(client.puts[0]["CacheControl"], REGISTRY_SHORT_CACHE_CONTROL)
         self.assertEqual(
             client.objects[("anatase-artifacts", "isos/SHA256SUMS")].decode("utf-8"),
             f"{digest} anatase.iso\n",

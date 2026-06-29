@@ -8,6 +8,10 @@ from urllib.parse import urlparse, urlunparse
 from ..model import ConfigError
 
 
+REGISTRY_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+REGISTRY_SHORT_CACHE_CONTROL = "public, max-age=60"
+
+
 @dataclass(frozen=True)
 class S3Config:
     endpoint_url: str
