@@ -13,6 +13,7 @@ from ludos.flatpaks import (
     _flatpak_build_env,
     _flatpak_commit_metadata_labels,
     _flatpak_metadata,
+    _prepare_flatpak_build_plan,
     _flatpak_rpmbuild_defines,
     _stage_flatpak_files,
     _substitute_specs,
@@ -86,9 +87,9 @@ class FlatpakParserTests(unittest.TestCase):
             ]
         )
         result = SimpleNamespace(
-            ref="app/org.kde.kate/x86_64/f44",
-            image="localhost/org.kde.kate:f44",
-            latest_image="localhost/org.kde.kate:latest",
+            ref="app/org.anatase.TextEditor/x86_64/stable",
+            image="localhost/flatpaks:f44-x86_64-kate",
+            latest_image="localhost/flatpaks:f44-x86_64-kate",
         )
 
         with (
@@ -108,9 +109,10 @@ class FlatpakParserTests(unittest.TestCase):
             ccache=False,
         )
         self.assertIn(
-            "Built flatpak app/org.kde.kate/x86_64/f44",
+            "Built flatpak app/org.anatase.TextEditor/x86_64/stable",
             log.call_args.args[0],
         )
+        self.assertNotIn("latest:", log.call_args.args[0])
 
     def test_manifest_parser_accepts_flatpaks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -263,6 +265,78 @@ class FlatpakParserTests(unittest.TestCase):
 
         build.assert_not_called()
 
+    def test_prepare_flatpak_build_plan_uses_card_name_image_and_stable_branch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            card_path = self._write_flatpak_card(
+                root,
+                "kate",
+                app_id="org.anatase.TextEditor",
+                command="kate",
+            )
+            context = self._flatpak_context(root)
+
+            with self._mock_plan_dependencies():
+                plan = _prepare_flatpak_build_plan(
+                    context,
+                    card_path.parent,
+                    cache_only=False,
+                )
+
+        self.assertEqual(plan.app_name, "kate")
+        self.assertEqual(plan.branch, "stable")
+        self.assertEqual(plan.app_ref, "app/org.anatase.TextEditor/x86_64/stable")
+        self.assertEqual(plan.output_image, "localhost/flatpaks:f44-x86_64-kate")
+        self.assertEqual(plan.latest_image, plan.output_image)
+
+    def test_prepare_flatpak_build_plan_names_multiple_apps_from_cards(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            kate_card = self._write_flatpak_card(
+                root,
+                "kate",
+                app_id="org.anatase.TextEditor",
+                command="kate",
+            )
+            ark_card = self._write_flatpak_card(
+                root,
+                "ark",
+                app_id="org.anatase.ArchiveManager",
+                command="ark",
+            )
+            context = self._flatpak_context(root)
+
+            with self._mock_plan_dependencies():
+                plans = (
+                    _prepare_flatpak_build_plan(
+                        context,
+                        kate_card.parent,
+                        cache_only=False,
+                    ),
+                    _prepare_flatpak_build_plan(
+                        context,
+                        ark_card.parent,
+                        cache_only=False,
+                    ),
+                )
+
+        self.assertEqual(
+            tuple(plan.output_image for plan in plans),
+            (
+                "localhost/flatpaks:f44-x86_64-kate",
+                "localhost/flatpaks:f44-x86_64-ark",
+            ),
+        )
+        self.assertEqual(tuple(plan.branch for plan in plans), ("stable", "stable"))
+        self.assertTrue(
+            all(
+                plan.output_image.startswith("localhost/flatpaks:")
+                for plan in plans
+            )
+        )
+
     def test_card_parser_accepts_metadata_hooks_and_specs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             card_path = Path(temp) / "card.yaml"
@@ -403,6 +477,64 @@ specs:
             encoding="utf-8",
         )
         return manifest_path
+
+    def _write_flatpak_card(
+        self,
+        root: Path,
+        name: str,
+        *,
+        app_id: str,
+        command: str,
+    ) -> Path:
+        flatpak_dir = root / "flatpaks" / name
+        flatpak_dir.mkdir(parents=True)
+        card_path = flatpak_dir / "card.yaml"
+        card_path.write_text(
+            f"""
+version: 1
+flatpak:
+  id: {app_id}
+  command: {command}
+build-deps:
+  - rpm-build
+specs:
+  - spec: {command}.spec
+    packages: [{command}]
+""",
+            encoding="utf-8",
+        )
+        return card_path
+
+    def _flatpak_context(self, root: Path) -> SimpleNamespace:
+        return SimpleNamespace(
+            arch="x86_64",
+            build_artifact_cache_dir=root / "build-artifacts",
+            distro="f44-x86_64",
+            distro_cache_dir=root / "cache" / "f44-x86_64",
+            dnf_cache_dir=root / "dnf" / "cache",
+            dnf_log_dir=root / "dnf" / "log",
+            dnf_persist_dir=root / "dnf" / "persist",
+            dnf_resolve_dir=root / "dnf" / "resolves",
+            local_prefix="",
+            manifest_env={"releasever": "44", "arch": "x86_64"},
+            orchestrator="localhost/orchestrator:f44",
+            package_dir=root / "packages",
+            podman="podman",
+            releasever="44",
+            repo_dir=root / "repos",
+            repo_images=tuple(),
+            root_dir=root,
+            spec_source_cache_dir=root / "spec-sources",
+        )
+
+    def _mock_plan_dependencies(self):
+        return patch.multiple(
+            "ludos.flatpaks",
+            _card_specs_hash=lambda *args, **kwargs: ("spechash", {}),
+            _stage_card_specs=lambda *args, **kwargs: tuple(),
+            _resolve_staged_spec_builder_packages=lambda *args, **kwargs: tuple(),
+            _resolve_packages=lambda *args, **kwargs: ("rpm-build",),
+        )
 
 
 class FlatpakAssemblyTests(unittest.TestCase):

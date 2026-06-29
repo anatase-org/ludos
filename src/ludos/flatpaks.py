@@ -234,12 +234,15 @@ def _prepare_flatpak_build_plan(
     flatpak_dir = card_path.parent
     app_name = _flatpak_name(flatpak_dir)
     block = f"flatpak-{app_name}"
-    branch = _substitute_variables("f$releasever", context.manifest_env)
+    branch = "stable"
     flatpak_arch = _flatpak_arch(context.arch)
     app_ref = f"app/{card.flatpak.app_id}/{flatpak_arch}/{branch}"
-    image_name = card.flatpak.app_id.lower()
-    output_image = f"localhost/{image_name}:{branch}"
-    latest_image = f"localhost/{image_name}:latest"
+    output_image = _local_image(
+        context.local_prefix,
+        "flatpaks",
+        f"{context.distro}-{app_name}",
+    )
+    latest_image = output_image
 
     log(f"Building flatpak {card.flatpak.app_id} for {context.distro}")
     substitution_env = dict(context.manifest_env)
@@ -477,10 +480,6 @@ def _ensure_flatpak_images(
                 plan.metadata,
                 plan.card.flatpak.app_id,
             )
-        subprocess.run(
-            [context.podman, "tag", plan.output_image, plan.latest_image],
-            check=True,
-        )
         results.append(
             FlatpakBuildResult(
                 app_id=plan.card.flatpak.app_id,

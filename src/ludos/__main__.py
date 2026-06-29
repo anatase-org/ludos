@@ -575,10 +575,7 @@ def build_command(args: argparse.Namespace) -> int:
             cache_only=args.cache,
             ccache=not args.no_ccache,
         )
-        log(
-            f"Built flatpak {result.ref}: {result.image} "
-            f"(latest: {result.latest_image})"
-        )
+        _log_flatpak_result(result)
         return 0
 
     if args.flatpaks:
@@ -591,10 +588,7 @@ def build_command(args: argparse.Namespace) -> int:
             ccache=not args.no_ccache,
         )
         for result in results:
-            log(
-                f"Built flatpak {result.ref}: {result.image} "
-                f"(latest: {result.latest_image})"
-            )
+            _log_flatpak_result(result)
         return 0
 
     result = build_manifest(
@@ -624,6 +618,16 @@ def build_command(args: argparse.Namespace) -> int:
     )
     log(f"Package blocks: {blocks}")
     return 0
+
+
+def _log_flatpak_result(result: object) -> None:
+    latest_image = getattr(result, "latest_image", "")
+    suffix = (
+        f" (latest: {latest_image})"
+        if latest_image and latest_image != result.image
+        else ""
+    )
+    log(f"Built flatpak {result.ref}: {result.image}{suffix}")
 
 
 def _package_block_summary(
