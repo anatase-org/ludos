@@ -29,7 +29,11 @@ from .build import (
     _substitute_variables,
     _unique_packages,
 )
-from .common import ResolvedManifestContext, resolve_manifest_context
+from .common import (
+    ResolvedManifestContext,
+    resolve_manifest_context,
+    _run_streamed_command,
+)
 from .logging import log
 from .model import (
     ConfigError,
@@ -474,7 +478,6 @@ def _ensure_flatpak_images(
         else:
             _run_flatpak_image_build(
                 context.podman,
-                _require_buildah(context.buildah),
                 plan.final_build_dir,
                 plan.output_image,
                 plan.metadata,
@@ -817,7 +820,6 @@ def _write_flatpak_containerfile(
     staged_file_count = _stage_flatpak_files(card, flatpak_dir, files_dir)
     containerfile = final_build_dir / "Containerfile"
     timestamp = str(int(time.time()))
-    commit_metadata_labels = _flatpak_commit_metadata_labels(metadata, app_ref)
     lines = [
         f"FROM {build_image} AS rpms",
         f"FROM {orchestrator} AS build",
@@ -870,25 +872,75 @@ def _write_flatpak_containerfile(
             metadata.rstrip(),
             "LUDOS_FLATPAK_METADATA",
             "LUDOS_PRETTIFY_FLATPAK",
-            "FROM scratch",
-            "ARG LUDOS_FLATPAK_METADATA",
-            "COPY --from=build /out/ /",
-            f"LABEL org.flatpak.ref={json.dumps(app_ref)}",
-            'LABEL org.flatpak.metadata="$LUDOS_FLATPAK_METADATA"',
-            *(
-                f"LABEL {key}={json.dumps(value)}"
-                for key, value in commit_metadata_labels.items()
-            ),
-            f"LABEL org.flatpak.subject={json.dumps(f'Export {card.flatpak.app_id}')}",
-            f"LABEL org.flatpak.body={json.dumps(_flatpak_body(card.flatpak.app_id, flatpak_arch, branch))}",
-            f"LABEL org.flatpak.timestamp={json.dumps(timestamp)}",
-            f"LABEL org.opencontainers.image.ref.name={json.dumps(app_ref)}",
-            f"LABEL org.anatase.flatpak.branch={json.dumps(branch)}",
-            f"LABEL org.anatase.flatpak.arch={json.dumps(flatpak_arch)}",
         ]
     )
     containerfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _write_flatpak_label_file(
+        final_build_dir,
+        _flatpak_image_labels(
+            card.flatpak,
+            metadata=metadata,
+            app_ref=app_ref,
+            branch=branch,
+            flatpak_arch=flatpak_arch,
+            timestamp=timestamp,
+        ),
+    )
     log(f"Wrote flatpak Containerfile: {containerfile}")
+
+
+def _flatpak_image_labels(
+    config: FlatpakConfig,
+    *,
+    metadata: str,
+    app_ref: str,
+    branch: str,
+    flatpak_arch: str,
+    timestamp: str,
+) -> tuple[tuple[str, str], ...]:
+    commit_metadata_labels = _flatpak_commit_metadata_labels(metadata, app_ref)
+    return (
+        ("org.flatpak.ref", app_ref),
+        ("org.flatpak.metadata", metadata),
+        *commit_metadata_labels.items(),
+        ("org.flatpak.subject", f"Export {config.app_id}"),
+        ("org.flatpak.body", _flatpak_body(config.app_id, flatpak_arch, branch)),
+        ("org.flatpak.timestamp", timestamp),
+        ("org.opencontainers.image.ref.name", app_ref),
+        ("org.anatase.flatpak.branch", branch),
+        ("org.anatase.flatpak.arch", flatpak_arch),
+    )
+
+
+def _write_flatpak_label_file(
+    build_dir: Path,
+    labels: tuple[tuple[str, str], ...],
+) -> None:
+    (build_dir / "labels.json").write_text(
+        json.dumps(labels, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _read_flatpak_label_file(build_dir: Path) -> tuple[tuple[str, str], ...]:
+    path = build_dir / "labels.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ConfigError(f"invalid flatpak labels: {exc}") from exc
+    if not isinstance(data, list):
+        raise ConfigError("flatpak labels must be a list")
+    labels = []
+    for item in data:
+        if (
+            not isinstance(item, list)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or not isinstance(item[1], str)
+        ):
+            raise ConfigError("flatpak labels must contain string pairs")
+        labels.append((item[0], item[1]))
+    return tuple(labels)
 
 
 def _flatpak_commit_metadata_labels(metadata: str, app_ref: str) -> dict[str, str]:
@@ -1256,49 +1308,141 @@ def _flatpak_body(app_id: str, flatpak_arch: str, branch: str) -> str:
 
 def _run_flatpak_image_build(
     podman: str,
-    buildah: str,
     build_dir: Path,
     image: str,
     metadata: str,
     app_id: str,
 ) -> None:
     containerfile = build_dir / "Containerfile"
-    command = [
+    final_containerfile = build_dir / "Containerfile.final"
+    build_iidfile = build_dir / "build-image.id"
+    build_stage_image = f"{image}-build-stage"
+    build_image_id = ""
+    try:
+        build_iidfile.unlink(missing_ok=True)
+        command = _flatpak_build_stage_command(
+            podman,
+            containerfile,
+            build_dir,
+            build_stage_image,
+            build_iidfile,
+        )
+        returncode, _output = _run_streamed_command(
+            command,
+            line_rewriter=_flatpak_build_stage_line,
+        )
+        if returncode != 0:
+            raise ConfigError(
+                f"flatpak appstream label build failed with exit status {returncode}"
+            )
+        build_image_id = build_iidfile.read_text(encoding="utf-8").strip()
+        if not build_image_id:
+            raise ConfigError("flatpak appstream label build did not write an image ID")
+        appstream_labels = _flatpak_appstream_labels(
+            podman,
+            build_dir,
+            build_image_id,
+            app_id,
+            files_root="/out/files",
+        )
+        labels = (
+            *_read_flatpak_label_file(build_dir),
+            *tuple(sorted(appstream_labels.items())),
+        )
+        _write_flatpak_final_containerfile(
+            final_containerfile,
+            build_image_id=build_image_id,
+            labels=labels,
+        )
+
+        command = _flatpak_final_image_build_command(
+            podman,
+            final_containerfile,
+            build_dir,
+            image,
+        )
+        returncode, _output = _run_streamed_command(command)
+        if returncode != 0:
+            raise ConfigError(f"flatpak image build failed with exit status {returncode}")
+    finally:
+        if build_image_id:
+            subprocess.run(
+                [podman, "rmi", build_stage_image, build_image_id],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+
+def _flatpak_build_stage_command(
+    podman: str,
+    containerfile: Path,
+    build_dir: Path,
+    image: str,
+    iidfile: Path,
+) -> list[str]:
+    return [
         podman,
         "build",
         "--pull=false",
-        "--build-arg",
-        f"LUDOS_FLATPAK_METADATA={metadata}",
+        "--tag",
+        image,
+        "--iidfile",
+        str(iidfile),
+        "--file",
+        str(containerfile),
+        "--target",
+        "build",
+        str(build_dir),
+    ]
+
+
+def _flatpak_build_stage_line(line: str) -> str:
+    stripped = line.strip()
+    if _is_sha256_value(stripped) or (
+        stripped.startswith("sha256:")
+        and _is_sha256_value(stripped.removeprefix("sha256:"))
+    ):
+        return "Built flatpak build stage\n"
+    return line
+
+
+def _is_sha256_value(value: str) -> bool:
+    return len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _flatpak_final_image_build_command(
+    podman: str,
+    containerfile: Path,
+    build_dir: Path,
+    image: str,
+) -> list[str]:
+    return [
+        podman,
+        "build",
+        "--pull=false",
         "--tag",
         image,
         "--file",
         str(containerfile),
         str(build_dir),
     ]
-    returncode = subprocess.run(command, check=False).returncode
-    if returncode != 0:
-        raise ConfigError(f"flatpak image build failed with exit status {returncode}")
-    appstream_labels = _flatpak_appstream_labels(podman, build_dir, image, app_id)
-    if not appstream_labels:
-        return
 
-    container = subprocess.run(
-        [buildah, "from", "--quiet", image],
-        check=True,
-        stdout=subprocess.PIPE,
-        text=True,
-    ).stdout.strip()
-    try:
-        command = [buildah, "config"]
-        for key, value in appstream_labels.items():
-            command.extend(["--label", f"{key}={value}"])
-        command.append(container)
-        subprocess.run(command, check=True)
-        subprocess.run([buildah, "commit", "--rm", "--quiet", "--format", "oci", container, image], check=True)
-        container = ""
-    finally:
-        if container:
-            subprocess.run([buildah, "rm", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def _write_flatpak_final_containerfile(
+    containerfile: Path,
+    *,
+    build_image_id: str,
+    labels: tuple[tuple[str, str], ...],
+) -> None:
+    lines = [
+        "FROM scratch",
+        f"COPY --from={build_image_id} /out/ /",
+        *(f"LABEL {key}={json.dumps(value)}" for key, value in labels),
+    ]
+    containerfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _flatpak_appstream_labels(
@@ -1306,11 +1450,14 @@ def _flatpak_appstream_labels(
     build_dir: Path,
     image: str,
     app_id: str,
+    *,
+    files_root: str = "/files",
 ) -> dict[str, str]:
     label_dir = build_dir / "appstream-labels"
     _remove_tree(label_dir)
     label_dir.mkdir(parents=True, exist_ok=True)
     labels = {}
+    files_root = files_root.rstrip("/")
 
     container = subprocess.run(
         [podman, "create", image],
@@ -1320,15 +1467,15 @@ def _flatpak_appstream_labels(
     ).stdout.strip()
     try:
         appstream_gz = label_dir / f"{app_id}.xml.gz"
-        if _podman_cp(podman, container, f"/files/share/app-info/xmls/{app_id}.xml.gz", appstream_gz):
+        if _podman_cp(podman, container, f"{files_root}/share/app-info/xmls/{app_id}.xml.gz", appstream_gz):
             appstream_xml = gzip.decompress(appstream_gz.read_bytes()).decode("utf-8")
             labels["org.freedesktop.appstream.appdata"] = _compact_xml(appstream_xml)
 
         for size in ("64", "128"):
             icon = label_dir / f"{app_id}-{size}.png"
             for source in (
-                f"/files/share/app-info/icons/flatpak/{size}x{size}/{app_id}.png",
-                f"/files/share/icons/hicolor/{size}x{size}/apps/{app_id}.png",
+                f"{files_root}/share/app-info/icons/flatpak/{size}x{size}/{app_id}.png",
+                f"{files_root}/share/icons/hicolor/{size}x{size}/apps/{app_id}.png",
             ):
                 if _podman_cp(podman, container, source, icon):
                     data = base64.b64encode(icon.read_bytes()).decode()

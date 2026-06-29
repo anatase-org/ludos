@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from ludos.flatpaks import (
     _flatpak_metadata,
     _prepare_flatpak_build_plan,
     _flatpak_rpmbuild_defines,
+    _run_flatpak_image_build,
     _stage_flatpak_files,
     _substitute_specs,
     _write_flatpak_containerfile,
@@ -702,6 +704,9 @@ postprocess: |
             )
 
             containerfile = (build_dir / "Containerfile").read_text(encoding="utf-8")
+            labels = dict(
+                json.loads((build_dir / "labels.json").read_text(encoding="utf-8"))
+            )
 
         self.assertIn("FROM localhost/orchestrator:f44 AS build", containerfile)
         self.assertIn("COPY --from=rpms /rpms /rpms", containerfile)
@@ -720,14 +725,15 @@ postprocess: |
         self.assertIn("bundle.text = app_ref", containerfile)
         self.assertIn("find /out/files/share/mime/packages -maxdepth 1 -type f -name \"$app_id*.xml\"", containerfile)
         self.assertIn("for dir in dbus-1 gnome-shell krunner; do", containerfile)
-        self.assertIn("FROM scratch", containerfile)
-        self.assertIn("LABEL org.flatpak.ref=", containerfile)
-        self.assertIn("LABEL org.flatpak.commit-metadata.xa.metadata=", containerfile)
-        self.assertIn("LABEL org.flatpak.commit-metadata.xa.ref=", containerfile)
-        self.assertIn("LABEL org.flatpak.commit-metadata.ostree.ref-binding=", containerfile)
-        self.assertIn("LABEL org.flatpak.subject=", containerfile)
-        self.assertIn("LABEL org.flatpak.body=", containerfile)
-        self.assertIn("LABEL org.flatpak.timestamp=", containerfile)
+        self.assertNotIn("FROM scratch", containerfile)
+        self.assertEqual(labels["org.flatpak.ref"], "app/org.kde.kate/x86_64/f44")
+        self.assertEqual(labels["org.flatpak.metadata"], "metadata-body\n")
+        self.assertIn("org.flatpak.commit-metadata.xa.metadata", labels)
+        self.assertIn("org.flatpak.commit-metadata.xa.ref", labels)
+        self.assertIn("org.flatpak.commit-metadata.ostree.ref-binding", labels)
+        self.assertEqual(labels["org.flatpak.subject"], "Export org.kde.kate")
+        self.assertIn("Name: org.kde.kate", labels["org.flatpak.body"])
+        self.assertIn("org.flatpak.timestamp", labels)
 
     def test_commit_metadata_labels_match_flatpak_oci_shape(self) -> None:
         labels = _flatpak_commit_metadata_labels(
@@ -889,6 +895,132 @@ specs:
         self.assertIn("find /out/files/share/icons -type f -name \"$app_id.*\"", containerfile)
         self.assertIn("find /out/files/share/mime/packages -maxdepth 1 -type f -name \"$app_id*.xml\"", containerfile)
         self.assertNotIn("for dir in mime dbus-1", containerfile)
+
+    def test_flatpak_image_build_bakes_appstream_labels_without_buildah_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_dir = Path(temp)
+            containerfile = build_dir / "Containerfile"
+            containerfile.write_text(
+                "FROM localhost/builds:f44-flatpak-kate AS build\n"
+                "RUN mkdir -p /out/files\n",
+                encoding="utf-8",
+            )
+            (build_dir / "labels.json").write_text(
+                json.dumps(
+                    [
+                        ["org.flatpak.ref", "app/org.kde.kate/x86_64/f44"],
+                        ["org.flatpak.metadata", "metadata-body\n"],
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            streamed = []
+            runs = []
+
+            def run_streamed(command, **_kwargs):
+                streamed.append(command)
+                if "--iidfile" in command:
+                    iidfile = Path(command[command.index("--iidfile") + 1])
+                    iidfile.write_text("sha256:buildimageid\n", encoding="utf-8")
+                return 0, ""
+
+            def run(command, **kwargs):
+                runs.append((command, kwargs))
+                return SimpleNamespace(returncode=0, stdout="")
+
+            with (
+                patch("ludos.flatpaks._run_streamed_command", side_effect=run_streamed),
+                patch("ludos.flatpaks.subprocess.run", side_effect=run),
+                patch("ludos.flatpaks._podman_cp", return_value=False) as podman_cp,
+                patch(
+                    "ludos.flatpaks._flatpak_appstream_labels",
+                    return_value={
+                        "org.freedesktop.appstream.appdata": "<component/>",
+                        "org.freedesktop.appstream.icon-64": "data:image/png;base64,AA==",
+                    },
+                ) as appstream_labels,
+            ):
+                _run_flatpak_image_build(
+                    "podman",
+                    build_dir,
+                    "localhost/flatpaks:f44-x86_64-kate",
+                    "metadata-body\n",
+                    "org.kde.kate",
+                )
+            final_containerfile = (build_dir / "Containerfile.final").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(
+            streamed[0],
+            [
+                "podman",
+                "build",
+                "--pull=false",
+                "--tag",
+                "localhost/flatpaks:f44-x86_64-kate-build-stage",
+                "--iidfile",
+                str(build_dir / "build-image.id"),
+                "--file",
+                str(containerfile),
+                "--target",
+                "build",
+                str(build_dir),
+            ],
+        )
+        self.assertEqual(
+            streamed[1],
+            [
+                "podman",
+                "build",
+                "--pull=false",
+                "--tag",
+                "localhost/flatpaks:f44-x86_64-kate",
+                "--file",
+                str(build_dir / "Containerfile.final"),
+                str(build_dir),
+            ],
+        )
+        self.assertEqual(
+            runs[0][0],
+            [
+                "podman",
+                "rmi",
+                "localhost/flatpaks:f44-x86_64-kate-build-stage",
+                "sha256:buildimageid",
+            ],
+        )
+        self.assertTrue(all("buildah" not in command for command in streamed))
+        self.assertTrue(all("buildah" not in command for command, _kwargs in runs))
+        appstream_labels.assert_called_once_with(
+            "podman",
+            build_dir,
+            "sha256:buildimageid",
+            "org.kde.kate",
+            files_root="/out/files",
+        )
+        podman_cp.assert_not_called()
+        self.assertIn("FROM scratch", final_containerfile)
+        self.assertIn("COPY --from=sha256:buildimageid /out/ /", final_containerfile)
+        self.assertIn(
+            'LABEL org.flatpak.ref="app/org.kde.kate/x86_64/f44"',
+            final_containerfile,
+        )
+        self.assertIn(
+            'LABEL org.flatpak.metadata="metadata-body\\n"',
+            final_containerfile,
+        )
+        self.assertIn(
+            'LABEL org.freedesktop.appstream.appdata="<component/>"',
+            final_containerfile,
+        )
+        self.assertIn(
+            'LABEL org.freedesktop.appstream.icon-64="data:image/png;base64,AA=="',
+            final_containerfile,
+        )
 
     def test_stage_flatpak_files_copies_local_files_after_build(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
