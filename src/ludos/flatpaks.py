@@ -447,18 +447,26 @@ def _flatpak_arch(arch: str) -> str:
 
 
 def _flatpak_rpmbuild_defines() -> tuple[str, ...]:
+    # Ported from fedora flatpak macros
     return (
         "flatpak 1",
+        "distcore .fc%{fedora}app",
+        "dist %{!?distprefix0:%{?distprefix}}%{expand:%{lua:for i=0,9999 do print(\"%{?distprefix\" .. i ..\"}\") end}}%{distcore}%{?with_bootstrap:%{__bootstrap}}",
         "_prefix /app",
-        "_exec_prefix /app",
-        "_bindir /app/bin",
-        "_sbindir /app/sbin",
-        "_libexecdir /app/libexec",
-        "_datadir /app/share",
-        "_sysconfdir /app/etc",
-        "_includedir /app/include",
-        "_mandir /app/share/man",
-        "_infodir /app/share/info",
+        "_sysconfdir %{_prefix}/etc",
+        "_localstatedir %{_prefix}/var",
+        "build_ldflags -Wl,-z,relro %{_ld_as_needed_flags} %{_ld_symbols_flags} %{_hardened_ldflags} %{_annotation_ldflags} %[ \"%{toolchain}\" == \"clang\" ? \"%{?_clang_extra_ldflags}\" : \"\" ] %{_build_id_flags} %{?_package_note_flags} -L%{_prefix}/lib64",
+        "__brp_compress %{_usr}/lib/rpm/brp-compress /app",
+        "__git %{_bindir}/git",
+        "__perl %{_usr}/bin/perl",
+        "_fontbasedir %{_datadir}/fonts",
+        "java_home %{_prefix}/lib/jvm/jre-openjdk",
+        "__font_provides %{_rpmconfigdir}/fontconfig-flatpak.prov",
+        "__maven_path ^/usr/share/maven-metadata/.*",
+        "jpb_env JAVACONFDIRS=%{_sysconfdir}/java",
+        "__brp_check_rpaths %{nil}",
+        "java_remove_imports /usr/bin/jurand -i",
+        "java_remove_annotations /usr/bin/jurand -i -a",
     )
 
 

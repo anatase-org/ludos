@@ -142,11 +142,24 @@ specs:
 
 
 class FlatpakAssemblyTests(unittest.TestCase):
-    def test_flatpak_rpmbuild_defines_do_not_force_libdir(self) -> None:
+    def test_flatpak_rpmbuild_defines_match_fedora_flatpak_macros(self) -> None:
         defines = _flatpak_rpmbuild_defines()
 
+        self.assertIn("flatpak 1", defines)
+        self.assertIn("distcore .fc%{fedora}app", defines)
         self.assertIn("_prefix /app", defines)
-        self.assertNotIn("_libdir /app/lib64", defines)
+        self.assertIn("_sysconfdir %{_prefix}/etc", defines)
+        self.assertIn("_localstatedir %{_prefix}/var", defines)
+        self.assertTrue(
+            any(
+                define.startswith("build_ldflags ")
+                and "-L%{_prefix}/lib64" in define
+                for define in defines
+            )
+        )
+        self.assertIn("__brp_check_rpaths %{nil}", defines)
+        self.assertNotIn("_lib lib", defines)
+        self.assertNotIn("_libdir /app/lib", defines)
 
     def test_metadata_translates_finish_args(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
