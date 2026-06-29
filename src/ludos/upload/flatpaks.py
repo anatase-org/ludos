@@ -132,6 +132,7 @@ def upload_dummy_runtime(
         runtime_ref=runtime_ref,
         flatpak_arch=flatpak_arch,
         oci_arch=_oci_arch(context.arch),
+        author=_dummy_runtime_author(runtime),
     )
     upload_oci(layout_dir, f"flatpaks/{runtime.repo}", (context.distro,))
     return update_flatpak_static_index(context.distro)
@@ -318,6 +319,7 @@ def _write_dummy_runtime_oci_layout(
     runtime_ref: str,
     flatpak_arch: str,
     oci_arch: str,
+    author: str,
 ) -> None:
     _remove_export_dir(layout_dir)
     blobs_dir = layout_dir / "blobs" / "sha256"
@@ -341,6 +343,7 @@ def _write_dummy_runtime_oci_layout(
         timestamp=DUMMY_RUNTIME_TIMESTAMP,
         download_size=len(compressed_layer),
         installed_size=installed_size,
+        author=author,
     )
     config = {
         "architecture": oci_arch,
@@ -416,6 +419,7 @@ def _dummy_runtime_labels(
     timestamp: str,
     download_size: int,
     installed_size: int,
+    author: str,
 ) -> dict[str, str]:
     labels = {
         "org.flatpak.ref": runtime_ref,
@@ -442,17 +446,30 @@ def _dummy_runtime_labels(
         labels["org.freedesktop.appstream.appdata"] = _dummy_runtime_appstream(
             runtime,
             runtime_ref,
+            author,
         )
+    if author:
+        labels["org.opencontainers.image.authors"] = author
+        labels["org.opencontainers.image.vendor"] = author
     return labels
+
+
+def _dummy_runtime_author(runtime: ManifestRuntime) -> str:
+    return runtime.author or runtime.title or runtime.id
 
 
 def _dummy_runtime_installed_size(metadata: str) -> int:
     return len(metadata.encode("utf-8"))
 
 
-def _dummy_runtime_appstream(runtime: ManifestRuntime, runtime_ref: str) -> str:
+def _dummy_runtime_appstream(
+    runtime: ManifestRuntime,
+    runtime_ref: str,
+    author: str,
+) -> str:
     name = runtime.title or runtime.id
     summary = runtime.description or name
+    escaped_author = escape(author)
     return _compact_xml(
         "<?xml version='1.0' encoding='UTF-8'?>\n"
         "<components version=\"1.0\">\n"
@@ -461,6 +478,11 @@ def _dummy_runtime_appstream(runtime: ManifestRuntime, runtime_ref: str) -> str:
         f"    <bundle type=\"flatpak\">{escape(runtime_ref)}</bundle>\n"
         f"    <name>{escape(name)}</name>\n"
         f"    <summary>{escape(summary)}</summary>\n"
+        f"    <project_group>{escaped_author}</project_group>\n"
+        "    <developer>\n"
+        f"      <name>{escaped_author}</name>\n"
+        "    </developer>\n"
+        f"    <developer_name>{escaped_author}</developer_name>\n"
         "    <metadata_license>CC0-1.0</metadata_license>\n"
         f"    <project_license>{escape(runtime.license)}</project_license>\n"
         "  </component>\n"

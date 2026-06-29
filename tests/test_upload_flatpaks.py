@@ -409,6 +409,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                 title = "Anatase Test Runtime"
                 description = "Anatase Platform runtime for tests."
                 license = "LicenseRef-Anatase-Test"
+                author = "Anatase Test Authors"
                 self.assertEqual(config["architecture"], "amd64")
                 self.assertEqual(
                     labels["org.flatpak.ref"],
@@ -443,6 +444,8 @@ class UploadFlatpaksTests(unittest.TestCase):
                     description,
                 )
                 self.assertEqual(labels["org.opencontainers.image.licenses"], license)
+                self.assertEqual(labels["org.opencontainers.image.authors"], author)
+                self.assertEqual(labels["org.opencontainers.image.vendor"], author)
                 appdata = labels["org.freedesktop.appstream.appdata"]
                 self.assertIn('<component type="runtime">', appdata)
                 self.assertIn("<id>org.anatase.Platform</id>", appdata)
@@ -453,6 +456,18 @@ class UploadFlatpaksTests(unittest.TestCase):
                     appdata,
                 )
                 self.assertIn("<name>Anatase Test Runtime</name>", appdata)
+                self.assertIn(
+                    "<project_group>Anatase Test Authors</project_group>",
+                    appdata,
+                )
+                self.assertIn(
+                    "<developer> <name>Anatase Test Authors</name> </developer>",
+                    appdata,
+                )
+                self.assertIn(
+                    "<developer_name>Anatase Test Authors</developer_name>",
+                    appdata,
+                )
                 self.assertIn("<metadata_license>CC0-1.0</metadata_license>", appdata)
                 self.assertIn(
                     "<project_license>LicenseRef-Anatase-Test</project_license>",
@@ -552,6 +567,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                     "  repo: runtime\n"
                     "  branch: stable\n"
                     "  title: Anatase Test Runtime\n"
+                    "  author: Anatase Test Authors\n"
                     "  description: Anatase Platform runtime for tests.\n"
                     "  license: LicenseRef-Anatase-Test\n",
                     "",
@@ -576,6 +592,7 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
         "\n".join(
             [
                 "version: 1",
+                "name: Anatase Test",
                 "env:",
                 "  arch: x86_64",
                 "releasever: '44'",
@@ -586,6 +603,7 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
                 "  repo: runtime",
                 "  branch: stable",
                 "  title: Anatase Test Runtime",
+                "  author: Anatase Test Authors",
                 "  description: Anatase Platform runtime for tests.",
                 "  license: LicenseRef-Anatase-Test",
                 "bootstrap: cards/bootstrap.yml",

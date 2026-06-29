@@ -150,6 +150,7 @@ class FlatpakParserTests(unittest.TestCase):
                 repo="runtime",
                 branch="stable",
                 title="Anatase Test Runtime",
+                author="Anatase Test Authors",
                 description="Anatase Platform runtime for tests.",
                 license="LicenseRef-Anatase-Test",
             ),
@@ -531,6 +532,7 @@ specs:
             "\n".join(
                 [
                     "version: 1",
+                    "name: Anatase Test",
                     "releasever: '44'",
                     "distro: f$releasever-$arch",
                     "orchestrator: quay.io/fedora/fedora:$releasever",
@@ -539,6 +541,7 @@ specs:
                     "  repo: runtime",
                     "  branch: stable",
                     "  title: Anatase Test Runtime",
+                    "  author: Anatase Test Authors",
                     "  description: Anatase Platform runtime for tests.",
                     "  license: LicenseRef-Anatase-Test",
                     "bootstrap: cards/bootstrap.yml",
