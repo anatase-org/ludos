@@ -404,6 +404,8 @@ class UploadFlatpaksTests(unittest.TestCase):
                     ).read_text(encoding="utf-8")
                 )
                 labels = config["config"]["Labels"]
+                title = "Anatase Test Runtime"
+                description = "Anatase Platform runtime for tests."
                 self.assertEqual(config["architecture"], "amd64")
                 self.assertEqual(
                     labels["org.flatpak.ref"],
@@ -415,6 +417,16 @@ class UploadFlatpaksTests(unittest.TestCase):
                     labels["org.flatpak.metadata"],
                 )
                 self.assertEqual(labels["org.flatpak.timestamp"], "0")
+                self.assertEqual(labels["org.flatpak.subject"], title)
+                self.assertEqual(labels["org.flatpak.body"], description)
+                self.assertEqual(
+                    labels["org.opencontainers.image.title"],
+                    title,
+                )
+                self.assertEqual(
+                    labels["org.opencontainers.image.description"],
+                    description,
+                )
                 return 0
 
             def update(distro: str) -> int:
@@ -448,6 +460,53 @@ class UploadFlatpaksTests(unittest.TestCase):
         )
         self.assertEqual(len(set(manifest_digests)), 1)
 
+    def test_upload_dummy_runtime_omits_optional_display_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, tuple())
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8")
+                .replace("  title: Anatase Test Runtime\n", "")
+                .replace("  description: Anatase Platform runtime for tests.\n", ""),
+                encoding="utf-8",
+            )
+
+            def upload(path: Path, _ref: str, _tags: tuple[str, ...]) -> int:
+                index = json.loads((path / "index.json").read_text(encoding="utf-8"))
+                manifest_desc = index["manifests"][0]
+                manifest_blob = json.loads(
+                    (
+                        path
+                        / "blobs"
+                        / "sha256"
+                        / manifest_desc["digest"].removeprefix("sha256:")
+                    ).read_text(encoding="utf-8")
+                )
+                config_desc = manifest_blob["config"]
+                config = json.loads(
+                    (
+                        path
+                        / "blobs"
+                        / "sha256"
+                        / config_desc["digest"].removeprefix("sha256:")
+                    ).read_text(encoding="utf-8")
+                )
+                labels = config["config"]["Labels"]
+                self.assertNotIn("org.flatpak.subject", labels)
+                self.assertNotIn("org.flatpak.body", labels)
+                self.assertNotIn("org.opencontainers.image.title", labels)
+                self.assertNotIn("org.opencontainers.image.description", labels)
+                return 0
+
+            with (
+                patch("ludos.upload.flatpaks.upload_oci", side_effect=upload),
+                patch("ludos.upload.flatpaks.update_flatpak_static_index", return_value=0),
+            ):
+                self.assertEqual(
+                    upload_dummy_runtime(manifest, cache_dir=root / "cache"),
+                    0,
+                )
+
     def test_upload_dummy_runtime_rejects_missing_runtime_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -457,7 +516,9 @@ class UploadFlatpaksTests(unittest.TestCase):
                     "runtime:\n"
                     "  id: org.anatase.Platform\n"
                     "  repo: runtime\n"
-                    "  branch: stable\n",
+                    "  branch: stable\n"
+                    "  title: Anatase Test Runtime\n"
+                    "  description: Anatase Platform runtime for tests.\n",
                     "",
                 ),
                 encoding="utf-8",
@@ -489,6 +550,8 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
                 "  id: org.anatase.Platform",
                 "  repo: runtime",
                 "  branch: stable",
+                "  title: Anatase Test Runtime",
+                "  description: Anatase Platform runtime for tests.",
                 "bootstrap: cards/bootstrap.yml",
                 "repos: []",
                 "cards:",

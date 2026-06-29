@@ -148,6 +148,8 @@ class FlatpakParserTests(unittest.TestCase):
                 id="org.anatase.Platform",
                 repo="runtime",
                 branch="stable",
+                title="Anatase Test Runtime",
+                description="Anatase Platform runtime for tests.",
             ),
         )
 
@@ -534,6 +536,8 @@ specs:
                     "  id: org.anatase.Platform",
                     "  repo: runtime",
                     "  branch: stable",
+                    "  title: Anatase Test Runtime",
+                    "  description: Anatase Platform runtime for tests.",
                     "bootstrap: cards/bootstrap.yml",
                     "repos: []",
                     "cards:",

@@ -411,26 +411,22 @@ def _dummy_runtime_labels(
     metadata: str,
     timestamp: str,
 ) -> dict[str, str]:
-    return {
+    labels = {
         "org.flatpak.ref": runtime_ref,
         "org.flatpak.metadata": metadata,
         **_flatpak_commit_metadata_labels(metadata, runtime_ref),
-        "org.flatpak.subject": f"Export {runtime.id}",
-        "org.flatpak.body": _dummy_runtime_body(runtime, flatpak_arch),
         "org.flatpak.timestamp": timestamp,
         "org.opencontainers.image.ref.name": runtime_ref,
         "org.anatase.flatpak.branch": runtime.branch,
         "org.anatase.flatpak.arch": flatpak_arch,
     }
-
-
-def _dummy_runtime_body(runtime: ManifestRuntime, flatpak_arch: str) -> str:
-    return (
-        f"Name: {runtime.id}\n"
-        f"Arch: {flatpak_arch}\n"
-        f"Branch: {runtime.branch}\n"
-        "Built with: Ludos\n"
-    )
+    if runtime.title:
+        labels["org.flatpak.subject"] = runtime.title
+        labels["org.opencontainers.image.title"] = runtime.title
+    if runtime.description:
+        labels["org.flatpak.body"] = runtime.description
+        labels["org.opencontainers.image.description"] = runtime.description
+    return labels
 
 
 def _dummy_runtime_layer(metadata: str) -> bytes:
