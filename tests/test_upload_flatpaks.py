@@ -396,6 +396,10 @@ class UploadFlatpaksTests(unittest.TestCase):
                         / manifest_desc["digest"].removeprefix("sha256:")
                     ).read_text(encoding="utf-8")
                 )
+                self.assertEqual(
+                    manifest_blob["layers"][0]["mediaType"],
+                    "application/vnd.oci.image.layer.v1.tar",
+                )
                 config_desc = manifest_blob["config"]
                 config = json.loads(
                     (
@@ -421,23 +425,20 @@ class UploadFlatpaksTests(unittest.TestCase):
                     labels["org.flatpak.metadata"],
                 )
                 self.assertEqual(labels["org.flatpak.timestamp"], "0")
-                self.assertGreater(
+                self.assertEqual(
                     _uint64_variant_label(
                         labels["org.flatpak.commit-metadata.xa.download-size"]
                     ),
                     0,
                 )
-                self.assertGreater(int(labels["org.flatpak.download-size"]), 0)
+                self.assertEqual(labels["org.flatpak.download-size"], "0")
                 self.assertEqual(
                     _uint64_variant_label(
                         labels["org.flatpak.commit-metadata.xa.installed-size"]
                     ),
-                    len(labels["org.flatpak.metadata"].encode("utf-8")),
+                    0,
                 )
-                self.assertEqual(
-                    int(labels["org.flatpak.installed-size"]),
-                    len(labels["org.flatpak.metadata"].encode("utf-8")),
-                )
+                self.assertEqual(labels["org.flatpak.installed-size"], "0")
                 self.assertEqual(labels["org.flatpak.subject"], title)
                 self.assertEqual(labels["org.flatpak.body"], description)
                 self.assertEqual(

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import base64
 import datetime as _datetime
-import gzip
 import hashlib
 import io
 import json
 import shutil
+import struct
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +26,6 @@ from ..flatpaks import (
     build_flatpak,
     build_flatpaks,
     _flatpak_arch,
-    _flatpak_commit_metadata_labels,
 )
 from ..logging import log
 from ..model import ConfigError, ManifestRuntime, ManifestValidation, validate_manifest
@@ -38,7 +38,7 @@ OCI_ARCHES = {
 }
 DEFAULT_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 DEFAULT_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
-DEFAULT_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
+DEFAULT_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar"
 DUMMY_RUNTIME_TIMESTAMP = "0"
 
 
@@ -330,19 +330,17 @@ def _write_dummy_runtime_oci_layout(
     )
 
     metadata = _dummy_runtime_metadata(runtime, flatpak_arch)
-    installed_size = _dummy_runtime_installed_size(metadata)
-    uncompressed_layer = _dummy_runtime_layer(metadata)
-    compressed_layer = _gzip(uncompressed_layer)
-    layer = _write_oci_blob(blobs_dir, compressed_layer)
-    diff_id = f"sha256:{hashlib.sha256(uncompressed_layer).hexdigest()}"
+    layer_bytes = _dummy_runtime_layer(metadata)
+    layer = _write_oci_blob(blobs_dir, layer_bytes)
+    diff_id = layer["digest"]
     labels = _dummy_runtime_labels(
         runtime=runtime,
         runtime_ref=runtime_ref,
         flatpak_arch=flatpak_arch,
         metadata=metadata,
         timestamp=DUMMY_RUNTIME_TIMESTAMP,
-        download_size=len(compressed_layer),
-        installed_size=installed_size,
+        download_size=0,
+        installed_size=0,
         author=author,
     )
     config = {
@@ -421,15 +419,32 @@ def _dummy_runtime_labels(
     installed_size: int,
     author: str,
 ) -> dict[str, str]:
+    metadata_variant = base64.b64encode(metadata.encode() + b"\0\0s").decode()
+    runtime_ref_variant = base64.b64encode(runtime_ref.encode() + b"\0\0s").decode()
+    ref_binding = bytearray(runtime_ref.encode() + b"\0")
+    if len(ref_binding) > 255:
+        raise ConfigError("flatpak runtime ref is too large for commit metadata")
+    ref_binding.append(len(ref_binding))
+    ref_binding.extend(b"\0as")
+    ref_binding_variant = base64.b64encode(bytes(ref_binding)).decode()
+    collection_binding_variant = base64.b64encode(b"\0\0s").decode()
+    download_size_variant = base64.b64encode(
+        struct.pack(">Q", download_size) + b"\0t"
+    ).decode()
+    installed_size_variant = base64.b64encode(
+        struct.pack(">Q", installed_size) + b"\0t"
+    ).decode()
     labels = {
         "org.flatpak.ref": runtime_ref,
         "org.flatpak.metadata": metadata,
-        **_flatpak_commit_metadata_labels(
-            metadata,
-            runtime_ref,
-            download_size=download_size,
-            installed_size=installed_size,
-        ),
+        "org.flatpak.commit-metadata.xa.metadata": metadata_variant,
+        "org.flatpak.commit-metadata.xa.ref": runtime_ref_variant,
+        "org.flatpak.commit-metadata.ostree.ref-binding": ref_binding_variant,
+        "org.flatpak.commit-metadata.ostree.collection-binding": collection_binding_variant,
+        "org.flatpak.commit-metadata.xa.download-size": download_size_variant,
+        "org.flatpak.commit-metadata.xa.installed-size": installed_size_variant,
+        "org.flatpak.download-size": str(download_size),
+        "org.flatpak.installed-size": str(installed_size),
         "org.flatpak.timestamp": timestamp,
         "org.opencontainers.image.ref.name": runtime_ref,
         "org.anatase.flatpak.branch": runtime.branch,
@@ -456,10 +471,6 @@ def _dummy_runtime_labels(
 
 def _dummy_runtime_author(runtime: ManifestRuntime) -> str:
     return runtime.author or runtime.title or runtime.id
-
-
-def _dummy_runtime_installed_size(metadata: str) -> int:
-    return len(metadata.encode("utf-8"))
 
 
 def _dummy_runtime_appstream(
@@ -517,14 +528,6 @@ def _stabilize_tar_info(info: tarfile.TarInfo) -> None:
     info.gid = 0
     info.uname = ""
     info.gname = ""
-
-
-def _gzip(data: bytes) -> bytes:
-    stream = io.BytesIO()
-    with gzip.GzipFile(fileobj=stream, mode="wb", mtime=0) as gzip_file:
-        gzip_file.write(data)
-    return stream.getvalue()
-
 
 def _json_bytes(data: object) -> bytes:
     return (json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n").encode(
