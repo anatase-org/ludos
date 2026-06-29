@@ -152,6 +152,7 @@ def upload_oci(
                 raise ConfigError(f"S3 upload failed for {tag_key}: {exc}") from exc
             overall.update(len(layout.manifest_bytes))
 
+    _upload_tags_list(s3, bucket, repo_ref, _list_oci_tags(s3, bucket, repo_ref))
     log(f"Uploaded {_format_mb(uploaded_layer_bytes)}.")
     log(f"Uploaded OCI repository {repo_ref} with tags: {', '.join(tag_list)}")
     return 0
@@ -171,6 +172,13 @@ def delete_oci_tags(
     s3 = client if client is not None else _create_s3_client(config, environ)
     for tag in tag_list:
         _delete_tag(s3, config.bucket, repo_ref, tag, dry_run=dry_run)
+    if not dry_run:
+        _upload_tags_list(
+            s3,
+            config.bucket,
+            repo_ref,
+            _list_oci_tags(s3, config.bucket, repo_ref),
+        )
     return 0
 
 
@@ -211,6 +219,13 @@ def prune_oci_tags(
     tags = _sort_prune_tags(tags, rule)
     for tag in tags[number:]:
         _delete_tag(s3, config.bucket, repo_ref, tag, dry_run=dry_run)
+    if not dry_run:
+        _upload_tags_list(
+            s3,
+            config.bucket,
+            repo_ref,
+            _list_oci_tags(s3, config.bucket, repo_ref),
+        )
     return 0
 
 
@@ -433,6 +448,17 @@ def _tag_key(ref: str, tag: str) -> str:
     return f"v2/{ref}/manifests/{tag}"
 
 
+def _tags_list_key(ref: str) -> str:
+    return f"v2/{ref}/tags/list"
+
+
+def _tags_list_body(ref: str, tags: tuple[str, ...]) -> bytes:
+    return json.dumps(
+        {"name": ref, "tags": sorted(tags)},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def _validate_prune_args(pattern: str, rule: str, number: int) -> None:
     if not pattern:
         raise ConfigError("registry oci prune requires a non-empty --pattern")
@@ -628,6 +654,26 @@ def _delete_tag(
             warning(f"OCI tag is already missing: {ref}:{tag}")
             return
         raise ConfigError(f"S3 delete failed for {key}: {exc}") from exc
+
+
+def _upload_tags_list(
+    client: Any,
+    bucket: str,
+    ref: str,
+    tags: tuple[str, ...],
+) -> None:
+    key = _tags_list_key(ref)
+    log(f"Uploading tag list: {_display_key(key)}")
+    try:
+        client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=_tags_list_body(ref, tags),
+            ContentType="application/json",
+            CacheControl=OCI_MUTABLE_CACHE_CONTROL,
+        )
+    except Exception as exc:
+        raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc
 
 
 def _upload_blob_if_needed(

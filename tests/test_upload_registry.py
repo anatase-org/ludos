@@ -296,6 +296,7 @@ class UploadRegistryTests(unittest.TestCase):
                 ),
                 ("put_object", "v2/images/anatase/manifests/latest"),
                 ("put_object", "v2/images/anatase/manifests/f44"),
+                ("put_object", "v2/images/anatase/tags/list"),
             ],
         )
         self.assertEqual(
@@ -312,16 +313,23 @@ class UploadRegistryTests(unittest.TestCase):
                 DEFAULT_MANIFEST_MEDIA_TYPE,
                 DEFAULT_MANIFEST_MEDIA_TYPE,
                 DEFAULT_MANIFEST_MEDIA_TYPE,
+                "application/json",
             ],
         )
         self.assertEqual(
             [item["Body"] for item in client.puts],
-            [layout.manifest_bytes, layout.manifest_bytes, layout.manifest_bytes],
+            [
+                layout.manifest_bytes,
+                layout.manifest_bytes,
+                layout.manifest_bytes,
+                b'{"name":"images/anatase","tags":["f44","latest"]}',
+            ],
         )
         self.assertEqual(
             [item["CacheControl"] for item in client.puts],
             [
                 OCI_IMMUTABLE_CACHE_CONTROL,
+                OCI_MUTABLE_CACHE_CONTROL,
                 OCI_MUTABLE_CACHE_CONTROL,
                 OCI_MUTABLE_CACHE_CONTROL,
             ],
@@ -364,7 +372,7 @@ class UploadRegistryTests(unittest.TestCase):
         self.assertEqual(client.uploads, [])
         self.assertEqual(
             [item["Key"] for item in client.puts],
-            ["v2/images/anatase/manifests/latest"],
+            ["v2/images/anatase/manifests/latest", "v2/images/anatase/tags/list"],
         )
 
     def test_upload_oci_reuploads_existing_objects_with_stale_cache_control(
@@ -423,6 +431,7 @@ class UploadRegistryTests(unittest.TestCase):
             [
                 f"v2/images/anatase/manifests/{layout.manifest_digest}",
                 "v2/images/anatase/manifests/latest",
+                "v2/images/anatase/tags/list",
             ],
         )
 
@@ -466,6 +475,7 @@ class UploadRegistryTests(unittest.TestCase):
             [
                 f"v2/images/anatase/manifests/{layout.manifest_digest}",
                 "v2/images/anatase/manifests/latest",
+                "v2/images/anatase/tags/list",
             ],
         )
 
@@ -684,7 +694,19 @@ class UploadRegistryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(client.heads, [])
-        self.assertEqual(client.lists, [])
+        self.assertEqual(
+            client.lists,
+            [
+                {
+                    "Bucket": "anatase-artifacts",
+                    "Prefix": "v2/images/anatase/manifests/",
+                }
+            ],
+        )
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "v2/images/anatase/tags/list")],
+            b'{"name":"images/anatase","tags":[]}',
+        )
         self.assertIn(
             ("anatase-artifacts", "v2/images/anatase/blobs/sha256:abc"),
             client.objects,
@@ -712,6 +734,10 @@ class UploadRegistryTests(unittest.TestCase):
         self.assertEqual(
             [item["Key"] for item in client.deletes],
             [missing_key, "v2/images/anatase/manifests/latest"],
+        )
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "v2/images/anatase/tags/list")],
+            b'{"name":"images/anatase","tags":[]}',
         )
 
     def test_delete_oci_tags_dry_run_does_not_delete(self) -> None:
@@ -802,12 +828,20 @@ class UploadRegistryTests(unittest.TestCase):
                 {
                     "Bucket": "anatase-artifacts",
                     "Prefix": "v2/images/anatase/manifests/",
+                },
+                {
+                    "Bucket": "anatase-artifacts",
+                    "Prefix": "v2/images/anatase/manifests/",
                 }
             ],
         )
         self.assertEqual(
             [item["Key"] for item in client.deletes],
             ["v2/images/anatase/manifests/f41"],
+        )
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "v2/images/anatase/tags/list")],
+            b'{"name":"images/anatase","tags":["f42","f43","f44","latest"]}',
         )
         self.assertIn(
             ("anatase-artifacts", "v2/images/anatase/blobs/sha256:abc"),
