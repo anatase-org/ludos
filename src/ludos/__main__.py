@@ -309,9 +309,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for flatpak export caches. Defaults to ./cache next to the manifest.",
     )
     registry_flatpak_upload.add_argument(
-        "--update",
+        "--refresh",
         action="store_true",
-        help="Update the static flatpak index after uploading.",
+        help="Refresh the static flatpak index after uploading.",
     )
     registry_flatpak_upload.set_defaults(func=registry_command)
     registry_flatpak_tree_shake = registry_flatpak_subcommands.add_parser(
@@ -337,19 +337,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print blobs that would be deleted without deleting them.",
     )
     registry_flatpak_tree_shake.set_defaults(func=registry_command)
-    registry_flatpak_update = registry_flatpak_subcommands.add_parser(
-        "update",
-        help="Update the static flatpak index for a manifest distro.",
+    registry_flatpak_refresh = registry_flatpak_subcommands.add_parser(
+        "refresh",
+        help="Refresh the static flatpak index for a manifest distro.",
     )
-    registry_flatpak_update.add_argument(
+    registry_flatpak_refresh.add_argument(
         "manifest",
         type=Path,
         help="Path to a Ludos YAML manifest.",
     )
-    registry_flatpak_update.set_defaults(func=registry_command)
+    registry_flatpak_refresh.set_defaults(func=registry_command)
     registry_flatpak_dummy_runtime = registry_flatpak_subcommands.add_parser(
-        "upload-dummy-runtime",
-        help="Upload a dummy flatpak runtime OCI image and update the static index.",
+        "init-dummy-runtime",
+        help="Initialize a dummy flatpak runtime OCI image and refresh the static index.",
     )
     registry_flatpak_dummy_runtime.add_argument(
         "manifest",
@@ -796,7 +796,7 @@ def registry_command(args: argparse.Namespace) -> int:
             )
             if result != 0:
                 return result
-            if args.update:
+            if args.refresh:
                 return update_flatpak_index(args.manifest)
             return result
         if args.registry_flatpak_action == "tree-shake":
@@ -805,9 +805,9 @@ def registry_command(args: argparse.Namespace) -> int:
                 tuple(args.flatpaks or ()),
                 dry_run=args.dry_run,
             )
-        if args.registry_flatpak_action == "update":
+        if args.registry_flatpak_action == "refresh":
             return update_flatpak_index(args.manifest)
-        if args.registry_flatpak_action == "upload-dummy-runtime":
+        if args.registry_flatpak_action == "init-dummy-runtime":
             return upload_dummy_runtime(args.manifest)
         raise ConfigError(
             f"unknown registry flatpak action: {args.registry_flatpak_action}"

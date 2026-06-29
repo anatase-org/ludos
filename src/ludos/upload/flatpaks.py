@@ -356,7 +356,7 @@ def _write_dummy_runtime_oci_layout(
         },
         "history": [
             {
-                "created_by": "ludos registry flatpak upload-dummy-runtime",
+                "created_by": "ludos registry flatpak init-dummy-runtime",
                 "comment": runtime_ref,
             }
         ],

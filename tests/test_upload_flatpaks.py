@@ -34,7 +34,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                 "--build",
                 "--cache-dir",
                 "out/cache",
-                "--update",
+                "--refresh",
             ]
         )
 
@@ -44,7 +44,7 @@ class UploadFlatpaksTests(unittest.TestCase):
         self.assertEqual(args.flatpaks, [Path("flatpaks/ark"), Path("flatpaks/kate")])
         self.assertTrue(args.build)
         self.assertEqual(args.cache_dir, Path("out/cache"))
-        self.assertTrue(args.update)
+        self.assertTrue(args.refresh)
 
     def test_registry_flatpak_upload_command_dispatches(self) -> None:
         args = build_parser().parse_args(
@@ -75,7 +75,7 @@ class UploadFlatpaksTests(unittest.TestCase):
         )
         update.assert_not_called()
 
-    def test_registry_flatpak_upload_update_command_dispatches(self) -> None:
+    def test_registry_flatpak_upload_refresh_command_dispatches(self) -> None:
         args = build_parser().parse_args(
             [
                 "registry",
@@ -84,7 +84,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                 "anatase.yml",
                 "--flatpak",
                 "flatpaks/ark",
-                "--update",
+                "--refresh",
             ]
         )
 
@@ -102,9 +102,9 @@ class UploadFlatpaksTests(unittest.TestCase):
         )
         update.assert_called_once_with(Path("anatase.yml"))
 
-    def test_registry_flatpak_upload_update_skips_after_failed_upload(self) -> None:
+    def test_registry_flatpak_upload_refresh_skips_after_failed_upload(self) -> None:
         args = build_parser().parse_args(
-            ["registry", "flatpak", "upload", "anatase.yml", "--update"]
+            ["registry", "flatpak", "upload", "anatase.yml", "--refresh"]
         )
 
         with (
@@ -121,24 +121,38 @@ class UploadFlatpaksTests(unittest.TestCase):
         )
         update.assert_not_called()
 
-    def test_registry_flatpak_upload_dummy_runtime_parser(self) -> None:
+    def test_registry_flatpak_init_dummy_runtime_parser(self) -> None:
         args = build_parser().parse_args(
-            ["registry", "flatpak", "upload-dummy-runtime", "anatase.yml"]
+            ["registry", "flatpak", "init-dummy-runtime", "anatase.yml"]
         )
 
         self.assertEqual(args.registry_action, "flatpak")
-        self.assertEqual(args.registry_flatpak_action, "upload-dummy-runtime")
+        self.assertEqual(args.registry_flatpak_action, "init-dummy-runtime")
         self.assertEqual(args.manifest, Path("anatase.yml"))
 
-    def test_registry_flatpak_upload_dummy_runtime_command_dispatches(self) -> None:
+    def test_registry_flatpak_init_dummy_runtime_command_dispatches(self) -> None:
         args = build_parser().parse_args(
-            ["registry", "flatpak", "upload-dummy-runtime", "anatase.yml"]
+            ["registry", "flatpak", "init-dummy-runtime", "anatase.yml"]
         )
 
         with patch("ludos.__main__.upload_dummy_runtime", return_value=0) as upload:
             self.assertEqual(args.func(args), 0)
 
         upload.assert_called_once_with(Path("anatase.yml"))
+
+    def test_registry_flatpak_rejects_old_update_spellings(self) -> None:
+        parser = build_parser()
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                ["registry", "flatpak", "upload", "anatase.yml", "--update"]
+            )
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["registry", "flatpak", "update", "anatase.yml"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                ["registry", "flatpak", "upload-dummy-runtime", "anatase.yml"]
+            )
 
     def test_registry_flatpak_tree_shake_parser(self) -> None:
         args = build_parser().parse_args(

@@ -168,13 +168,13 @@ class UploadRegistryTests(unittest.TestCase):
         self.assertEqual(args.ref, "images/anatase")
         self.assertTrue(args.dry_run)
 
-    def test_registry_flatpak_update_parser(self) -> None:
+    def test_registry_flatpak_refresh_parser(self) -> None:
         args = build_parser().parse_args(
-            ["registry", "flatpak", "update", "anatase.yml"]
+            ["registry", "flatpak", "refresh", "anatase.yml"]
         )
 
         self.assertEqual(args.registry_action, "flatpak")
-        self.assertEqual(args.registry_flatpak_action, "update")
+        self.assertEqual(args.registry_flatpak_action, "refresh")
         self.assertEqual(args.manifest, Path("anatase.yml"))
 
     def test_delete_oci_command_dispatches(self) -> None:
@@ -245,9 +245,9 @@ class UploadRegistryTests(unittest.TestCase):
 
         tree_shake.assert_called_once_with("images/anatase", dry_run=True)
 
-    def test_registry_flatpak_update_command_dispatches(self) -> None:
+    def test_registry_flatpak_refresh_command_dispatches(self) -> None:
         args = build_parser().parse_args(
-            ["registry", "flatpak", "update", "anatase.yml"]
+            ["registry", "flatpak", "refresh", "anatase.yml"]
         )
 
         with patch("ludos.__main__.update_flatpak_index", return_value=0) as update:
