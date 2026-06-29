@@ -7,7 +7,6 @@ import io
 import json
 import shutil
 import tarfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +38,7 @@ OCI_ARCHES = {
 DEFAULT_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 DEFAULT_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
 DEFAULT_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
+DUMMY_RUNTIME_TIMESTAMP = "0"
 
 
 @dataclass(frozen=True)
@@ -331,13 +331,12 @@ def _write_dummy_runtime_oci_layout(
     compressed_layer = _gzip(uncompressed_layer)
     layer = _write_oci_blob(blobs_dir, compressed_layer)
     diff_id = f"sha256:{hashlib.sha256(uncompressed_layer).hexdigest()}"
-    timestamp = str(int(time.time()))
     labels = _dummy_runtime_labels(
         runtime=runtime,
         runtime_ref=runtime_ref,
         flatpak_arch=flatpak_arch,
         metadata=metadata,
-        timestamp=timestamp,
+        timestamp=DUMMY_RUNTIME_TIMESTAMP,
     )
     config = {
         "architecture": oci_arch,
@@ -440,13 +439,23 @@ def _dummy_runtime_layer(metadata: str) -> bytes:
         files_info = tarfile.TarInfo("files")
         files_info.type = tarfile.DIRTYPE
         files_info.mode = 0o755
+        _stabilize_tar_info(files_info)
         tar.addfile(files_info)
         metadata_bytes = metadata.encode("utf-8")
         metadata_info = tarfile.TarInfo("metadata")
         metadata_info.size = len(metadata_bytes)
         metadata_info.mode = 0o644
+        _stabilize_tar_info(metadata_info)
         tar.addfile(metadata_info, io.BytesIO(metadata_bytes))
     return stream.getvalue()
+
+
+def _stabilize_tar_info(info: tarfile.TarInfo) -> None:
+    info.mtime = 0
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
 
 
 def _gzip(data: bytes) -> bytes:

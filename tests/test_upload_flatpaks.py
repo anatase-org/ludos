@@ -379,11 +379,13 @@ class UploadFlatpaksTests(unittest.TestCase):
             root = Path(temp)
             manifest = _write_manifest(root, tuple())
             events = []
+            manifest_digests = []
 
             def upload(path: Path, ref: str, tags: tuple[str, ...]) -> int:
                 events.append(("upload", ref, tags))
                 index = json.loads((path / "index.json").read_text(encoding="utf-8"))
                 manifest_desc = index["manifests"][0]
+                manifest_digests.append(manifest_desc["digest"])
                 manifest_blob = json.loads(
                     (
                         path
@@ -412,6 +414,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                     "sdk=org.anatase.ludos.Sdk/x86_64/stable",
                     labels["org.flatpak.metadata"],
                 )
+                self.assertEqual(labels["org.flatpak.timestamp"], "0")
                 return 0
 
             def update(distro: str) -> int:
@@ -429,14 +432,21 @@ class UploadFlatpaksTests(unittest.TestCase):
                     upload_dummy_runtime(manifest, cache_dir=root / "cache"),
                     0,
                 )
+                self.assertEqual(
+                    upload_dummy_runtime(manifest, cache_dir=root / "other-cache"),
+                    0,
+                )
 
         self.assertEqual(
             events,
             [
                 ("upload", "flatpaks/runtime", ("f44-x86_64",)),
                 ("update", "f44-x86_64"),
+                ("upload", "flatpaks/runtime", ("f44-x86_64",)),
+                ("update", "f44-x86_64"),
             ],
         )
+        self.assertEqual(len(set(manifest_digests)), 1)
 
     def test_upload_dummy_runtime_rejects_missing_runtime_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
