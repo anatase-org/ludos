@@ -9,6 +9,7 @@ from ludos.flatpaks import (
     FlatpakCard,
     _flatpak_commit_metadata_labels,
     _flatpak_metadata,
+    _flatpak_rpmbuild_defines,
     _stage_flatpak_files,
     _substitute_specs,
     _write_flatpak_containerfile,
@@ -141,6 +142,12 @@ specs:
 
 
 class FlatpakAssemblyTests(unittest.TestCase):
+    def test_flatpak_rpmbuild_defines_do_not_force_libdir(self) -> None:
+        defines = _flatpak_rpmbuild_defines()
+
+        self.assertIn("_prefix /app", defines)
+        self.assertNotIn("_libdir /app/lib64", defines)
+
     def test_metadata_translates_finish_args(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             card_path = Path(temp) / "card.yaml"

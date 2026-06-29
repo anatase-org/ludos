@@ -456,7 +456,6 @@ def _flatpak_rpmbuild_defines() -> tuple[str, ...]:
         "_libexecdir /app/libexec",
         "_datadir /app/share",
         "_sysconfdir /app/etc",
-        "_libdir /app/lib64",
         "_includedir /app/include",
         "_mandir /app/share/man",
         "_infodir /app/share/info",
