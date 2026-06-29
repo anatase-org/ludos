@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import datetime as _datetime
+import gzip
+import hashlib
+import io
+import json
 import shutil
+import tarfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,10 +20,25 @@ from ..common import (
     _run_streamed_command,
     _substitute_variables,
 )
-from ..flatpaks import build_flatpak, build_flatpaks
+from ..flatpaks import (
+    DEFAULT_FLATPAK_SDK,
+    build_flatpak,
+    build_flatpaks,
+    _flatpak_arch,
+    _flatpak_commit_metadata_labels,
+)
 from ..logging import log
-from ..model import ConfigError, ManifestValidation, validate_manifest
+from ..model import ConfigError, ManifestRuntime, ManifestValidation, validate_manifest
 from .registry import tree_shake_oci, update_flatpak_static_index, upload_oci
+
+
+OCI_ARCHES = {
+    "x86_64": "amd64",
+    "aarch64": "arm64",
+}
+DEFAULT_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
+DEFAULT_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
+DEFAULT_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
 
 
 @dataclass(frozen=True)
@@ -25,6 +46,7 @@ class FlatpakUploadContext:
     validation: ManifestValidation
     root_dir: Path
     distro: str
+    arch: str
     local_prefix: str
     cache_dir: Path
     podman: str
@@ -89,11 +111,37 @@ def update_flatpak_index(manifest: Path) -> int:
     return update_flatpak_static_index(context.distro)
 
 
+def upload_dummy_runtime(
+    manifest: Path,
+    cache_dir: Path | None = None,
+) -> int:
+    context = _resolve_flatpak_upload_context(
+        manifest,
+        cache_dir=cache_dir,
+        require_podman=False,
+        require_flatpaks=False,
+    )
+    runtime = _require_runtime_config(context.validation.manifest.runtime, manifest)
+    flatpak_arch = _flatpak_arch(context.arch)
+    runtime_ref = f"runtime/{runtime.id}/{flatpak_arch}/{runtime.branch}"
+    layout_dir = context.cache_dir / "flatpaks" / f"{runtime.repo}-{context.distro}"
+    _write_dummy_runtime_oci_layout(
+        layout_dir,
+        runtime=runtime,
+        runtime_ref=runtime_ref,
+        flatpak_arch=flatpak_arch,
+        oci_arch=_oci_arch(context.arch),
+    )
+    upload_oci(layout_dir, f"flatpaks/{runtime.repo}", (context.distro,))
+    return update_flatpak_static_index(context.distro)
+
+
 def _resolve_flatpak_upload_context(
     manifest: Path,
     *,
     cache_dir: Path | None,
     require_podman: bool = True,
+    require_flatpaks: bool = True,
 ) -> FlatpakUploadContext:
     manifest_path = manifest.expanduser().resolve()
     log(f"Validating manifest: {manifest}")
@@ -108,7 +156,7 @@ def _resolve_flatpak_upload_context(
     if validation.missing_cards:
         missing = ", ".join(validation.missing_cards)
         raise ConfigError(f"{manifest}: missing card definitions: {missing}")
-    if validation.missing_flatpaks:
+    if require_flatpaks and validation.missing_flatpaks:
         missing = ", ".join(validation.missing_flatpaks)
         raise ConfigError(f"{manifest}: missing flatpak definitions: {missing}")
 
@@ -150,6 +198,7 @@ def _resolve_flatpak_upload_context(
         validation=validation,
         root_dir=root_dir,
         distro=distro,
+        arch=arch,
         local_prefix=local_prefix,
         cache_dir=resolved_cache_dir,
         podman=podman,
@@ -243,6 +292,180 @@ def _remove_export_dir(path: Path) -> None:
         path.unlink()
     elif path.exists():
         shutil.rmtree(path)
+
+
+def _require_runtime_config(
+    runtime: ManifestRuntime | None,
+    manifest: Path,
+) -> ManifestRuntime:
+    if runtime is None:
+        raise ConfigError(f"{manifest}: 'runtime' is required to upload dummy runtime")
+    return runtime
+
+
+def _oci_arch(arch: str) -> str:
+    try:
+        return OCI_ARCHES[arch]
+    except KeyError as exc:
+        raise ConfigError(f"flatpak runtime upload does not support architecture: {arch}") from exc
+
+
+def _write_dummy_runtime_oci_layout(
+    layout_dir: Path,
+    *,
+    runtime: ManifestRuntime,
+    runtime_ref: str,
+    flatpak_arch: str,
+    oci_arch: str,
+) -> None:
+    _remove_export_dir(layout_dir)
+    blobs_dir = layout_dir / "blobs" / "sha256"
+    blobs_dir.mkdir(parents=True, exist_ok=True)
+    (layout_dir / "oci-layout").write_text(
+        json.dumps({"imageLayoutVersion": "1.0.0"}) + "\n",
+        encoding="utf-8",
+    )
+
+    metadata = _dummy_runtime_metadata(runtime, flatpak_arch)
+    uncompressed_layer = _dummy_runtime_layer(metadata)
+    compressed_layer = _gzip(uncompressed_layer)
+    layer = _write_oci_blob(blobs_dir, compressed_layer)
+    diff_id = f"sha256:{hashlib.sha256(uncompressed_layer).hexdigest()}"
+    timestamp = str(int(time.time()))
+    labels = _dummy_runtime_labels(
+        runtime=runtime,
+        runtime_ref=runtime_ref,
+        flatpak_arch=flatpak_arch,
+        metadata=metadata,
+        timestamp=timestamp,
+    )
+    config = {
+        "architecture": oci_arch,
+        "os": "linux",
+        "config": {
+            "Labels": labels,
+            "Annotations": {},
+        },
+        "rootfs": {
+            "type": "layers",
+            "diff_ids": [diff_id],
+        },
+        "history": [
+            {
+                "created_by": "ludos registry flatpak upload-dummy-runtime",
+                "comment": runtime_ref,
+            }
+        ],
+    }
+    config_blob = _write_oci_blob(blobs_dir, _json_bytes(config))
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": DEFAULT_MANIFEST_MEDIA_TYPE,
+        "config": {
+            "mediaType": DEFAULT_CONFIG_MEDIA_TYPE,
+            "digest": config_blob["digest"],
+            "size": config_blob["size"],
+        },
+        "layers": [
+            {
+                "mediaType": DEFAULT_LAYER_MEDIA_TYPE,
+                "digest": layer["digest"],
+                "size": layer["size"],
+            }
+        ],
+        "annotations": {
+            "org.opencontainers.image.ref.name": runtime_ref,
+        },
+    }
+    manifest_blob = _write_oci_blob(blobs_dir, _json_bytes(manifest))
+    index = {
+        "schemaVersion": 2,
+        "manifests": [
+            {
+                "mediaType": DEFAULT_MANIFEST_MEDIA_TYPE,
+                "digest": manifest_blob["digest"],
+                "size": manifest_blob["size"],
+                "annotations": {
+                    "org.opencontainers.image.ref.name": runtime_ref,
+                },
+            }
+        ],
+    }
+    (layout_dir / "index.json").write_bytes(_json_bytes(index))
+    log(f"Wrote dummy flatpak runtime OCI layout: {layout_dir}")
+
+
+def _dummy_runtime_metadata(runtime: ManifestRuntime, flatpak_arch: str) -> str:
+    return (
+        "[Runtime]\n"
+        f"name={runtime.id}\n"
+        f"runtime={runtime.id}/{flatpak_arch}/{runtime.branch}\n"
+        f"sdk={DEFAULT_FLATPAK_SDK}/{flatpak_arch}/{runtime.branch}\n"
+    )
+
+
+def _dummy_runtime_labels(
+    *,
+    runtime: ManifestRuntime,
+    runtime_ref: str,
+    flatpak_arch: str,
+    metadata: str,
+    timestamp: str,
+) -> dict[str, str]:
+    return {
+        "org.flatpak.ref": runtime_ref,
+        "org.flatpak.metadata": metadata,
+        **_flatpak_commit_metadata_labels(metadata, runtime_ref),
+        "org.flatpak.subject": f"Export {runtime.id}",
+        "org.flatpak.body": _dummy_runtime_body(runtime, flatpak_arch),
+        "org.flatpak.timestamp": timestamp,
+        "org.opencontainers.image.ref.name": runtime_ref,
+        "org.anatase.flatpak.branch": runtime.branch,
+        "org.anatase.flatpak.arch": flatpak_arch,
+    }
+
+
+def _dummy_runtime_body(runtime: ManifestRuntime, flatpak_arch: str) -> str:
+    return (
+        f"Name: {runtime.id}\n"
+        f"Arch: {flatpak_arch}\n"
+        f"Branch: {runtime.branch}\n"
+        "Built with: Ludos\n"
+    )
+
+
+def _dummy_runtime_layer(metadata: str) -> bytes:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        files_info = tarfile.TarInfo("files")
+        files_info.type = tarfile.DIRTYPE
+        files_info.mode = 0o755
+        tar.addfile(files_info)
+        metadata_bytes = metadata.encode("utf-8")
+        metadata_info = tarfile.TarInfo("metadata")
+        metadata_info.size = len(metadata_bytes)
+        metadata_info.mode = 0o644
+        tar.addfile(metadata_info, io.BytesIO(metadata_bytes))
+    return stream.getvalue()
+
+
+def _gzip(data: bytes) -> bytes:
+    stream = io.BytesIO()
+    with gzip.GzipFile(fileobj=stream, mode="wb", mtime=0) as gzip_file:
+        gzip_file.write(data)
+    return stream.getvalue()
+
+
+def _json_bytes(data: object) -> bytes:
+    return (json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _write_oci_blob(blobs_dir: Path, data: bytes) -> dict[str, object]:
+    digest = hashlib.sha256(data).hexdigest()
+    (blobs_dir / digest).write_bytes(data)
+    return {"digest": f"sha256:{digest}", "size": len(data)}
 
 
 def _manifest_flatpak_path(flatpak: Path, root_dir: Path) -> Path:

@@ -21,7 +21,13 @@ from ludos.flatpaks import (
     _substitute_specs,
     _write_flatpak_containerfile,
 )
-from ludos.model import ConfigError, Manifest, SpecBuild, validate_manifest
+from ludos.model import (
+    ConfigError,
+    Manifest,
+    ManifestRuntime,
+    SpecBuild,
+    validate_manifest,
+)
 
 
 class FlatpakParserTests(unittest.TestCase):
@@ -126,6 +132,42 @@ class FlatpakParserTests(unittest.TestCase):
             manifest = Manifest.from_file(manifest_path)
 
         self.assertEqual(manifest.flatpaks, ("flatpaks/kate",))
+
+    def test_manifest_parser_accepts_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            manifest_path = self._write_manifest(
+                Path(temp),
+                flatpaks=("flatpaks/kate",),
+            )
+
+            manifest = Manifest.from_file(manifest_path)
+
+        self.assertEqual(
+            manifest.runtime,
+            ManifestRuntime(
+                id="org.anatase.Platform",
+                repo="runtime",
+                branch="stable",
+            ),
+        )
+
+    def test_manifest_parser_requires_runtime_fields_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_path = self._write_manifest(
+                root,
+                flatpaks=("flatpaks/kate",),
+            )
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace(
+                    "  repo: runtime\n",
+                    "",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "repo"):
+                Manifest.from_file(manifest_path)
 
     def test_validate_manifest_reports_missing_flatpaks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -267,7 +309,7 @@ class FlatpakParserTests(unittest.TestCase):
 
         build.assert_not_called()
 
-    def test_prepare_flatpak_build_plan_uses_card_name_image_and_stable_branch(
+    def test_prepare_flatpak_build_plan_uses_manifest_runtime_branch(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -278,7 +320,7 @@ class FlatpakParserTests(unittest.TestCase):
                 app_id="org.anatase.TextEditor",
                 command="kate",
             )
-            context = self._flatpak_context(root)
+            context = self._flatpak_context(root, runtime_branch="beta")
 
             with self._mock_plan_dependencies():
                 plan = _prepare_flatpak_build_plan(
@@ -288,8 +330,10 @@ class FlatpakParserTests(unittest.TestCase):
                 )
 
         self.assertEqual(plan.app_name, "kate")
-        self.assertEqual(plan.branch, "stable")
-        self.assertEqual(plan.app_ref, "app/org.anatase.TextEditor/x86_64/stable")
+        self.assertEqual(plan.branch, "beta")
+        self.assertEqual(plan.app_ref, "app/org.anatase.TextEditor/x86_64/beta")
+        self.assertIn("runtime=org.anatase.Platform/x86_64/beta", plan.metadata)
+        self.assertIn("sdk=org.anatase.ludos.Sdk/x86_64/beta", plan.metadata)
         self.assertEqual(plan.output_image, "localhost/flatpaks:f44-x86_64-kate")
         self.assertEqual(plan.latest_image, plan.output_image)
 
@@ -338,6 +382,25 @@ class FlatpakParserTests(unittest.TestCase):
                 for plan in plans
             )
         )
+
+    def test_prepare_flatpak_build_plan_rejects_missing_manifest_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            card_path = self._write_flatpak_card(
+                root,
+                "kate",
+                app_id="org.anatase.TextEditor",
+                command="kate",
+            )
+            context = self._flatpak_context(root)
+            context.validation.manifest.runtime = None
+
+            with self.assertRaisesRegex(ConfigError, "runtime"):
+                _prepare_flatpak_build_plan(
+                    context,
+                    card_path.parent,
+                    cache_only=False,
+                )
 
     def test_card_parser_accepts_metadata_hooks_and_specs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -467,6 +530,10 @@ specs:
                     "releasever: '44'",
                     "distro: f$releasever-$arch",
                     "orchestrator: quay.io/fedora/fedora:$releasever",
+                    "runtime:",
+                    "  id: org.anatase.Platform",
+                    "  repo: runtime",
+                    "  branch: stable",
                     "bootstrap: cards/bootstrap.yml",
                     "repos: []",
                     "cards:",
@@ -507,7 +574,12 @@ specs:
         )
         return card_path
 
-    def _flatpak_context(self, root: Path) -> SimpleNamespace:
+    def _flatpak_context(
+        self,
+        root: Path,
+        *,
+        runtime_branch: str = "stable",
+    ) -> SimpleNamespace:
         return SimpleNamespace(
             arch="x86_64",
             build_artifact_cache_dir=root / "build-artifacts",
@@ -527,6 +599,16 @@ specs:
             repo_images=tuple(),
             root_dir=root,
             spec_source_cache_dir=root / "spec-sources",
+            validation=SimpleNamespace(
+                manifest=SimpleNamespace(
+                    runtime=ManifestRuntime(
+                        id="org.anatase.Platform",
+                        repo="runtime",
+                        branch=runtime_branch,
+                    ),
+                    source=root / "anatase.yml",
+                )
+            ),
         )
 
     def _mock_plan_dependencies(self):
@@ -622,10 +704,11 @@ specs:
             card.flatpak,
             branch="f44",
             flatpak_arch="x86_64",
+            runtime_id="org.anatase.Platform",
         )
 
         self.assertIn("runtime=org.anatase.Platform/x86_64/f44", metadata)
-        self.assertIn("sdk=org.anatase.Sdk/x86_64/f44", metadata)
+        self.assertIn("sdk=org.anatase.ludos.Sdk/x86_64/f44", metadata)
         self.assertIn("command=kate", metadata)
         self.assertIn("devices=dri;", metadata)
         self.assertIn("filesystems=host;", metadata)
@@ -658,6 +741,7 @@ specs:
             card.flatpak,
             branch="f44",
             flatpak_arch="x86_64",
+            runtime_id="org.anatase.Platform",
         )
 
         self.assertIn("name=org.anatase.TextEditor", metadata)

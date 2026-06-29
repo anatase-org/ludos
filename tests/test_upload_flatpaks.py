@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,11 @@ from unittest.mock import call, patch
 
 from ludos.__main__ import build_parser
 from ludos.model import ConfigError
-from ludos.upload.flatpaks import tree_shake_flatpaks, upload_flatpaks
+from ludos.upload.flatpaks import (
+    tree_shake_flatpaks,
+    upload_dummy_runtime,
+    upload_flatpaks,
+)
 
 
 class UploadFlatpaksTests(unittest.TestCase):
@@ -113,6 +118,25 @@ class UploadFlatpaksTests(unittest.TestCase):
             cache_dir=None,
         )
         update.assert_not_called()
+
+    def test_registry_flatpak_upload_dummy_runtime_parser(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "flatpak", "upload-dummy-runtime", "anatase.yml"]
+        )
+
+        self.assertEqual(args.registry_action, "flatpak")
+        self.assertEqual(args.registry_flatpak_action, "upload-dummy-runtime")
+        self.assertEqual(args.manifest, Path("anatase.yml"))
+
+    def test_registry_flatpak_upload_dummy_runtime_command_dispatches(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "flatpak", "upload-dummy-runtime", "anatase.yml"]
+        )
+
+        with patch("ludos.__main__.upload_dummy_runtime", return_value=0) as upload:
+            self.assertEqual(args.func(args), 0)
+
+        upload.assert_called_once_with(Path("anatase.yml"))
 
     def test_registry_flatpak_tree_shake_parser(self) -> None:
         args = build_parser().parse_args(
@@ -350,6 +374,88 @@ class UploadFlatpaksTests(unittest.TestCase):
 
         shake.assert_called_once_with("flatpaks/ark", dry_run=True)
 
+    def test_upload_dummy_runtime_writes_runtime_oci_and_updates_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, tuple())
+            events = []
+
+            def upload(path: Path, ref: str, tags: tuple[str, ...]) -> int:
+                events.append(("upload", ref, tags))
+                index = json.loads((path / "index.json").read_text(encoding="utf-8"))
+                manifest_desc = index["manifests"][0]
+                manifest_blob = json.loads(
+                    (
+                        path
+                        / "blobs"
+                        / "sha256"
+                        / manifest_desc["digest"].removeprefix("sha256:")
+                    ).read_text(encoding="utf-8")
+                )
+                config_desc = manifest_blob["config"]
+                config = json.loads(
+                    (
+                        path
+                        / "blobs"
+                        / "sha256"
+                        / config_desc["digest"].removeprefix("sha256:")
+                    ).read_text(encoding="utf-8")
+                )
+                labels = config["config"]["Labels"]
+                self.assertEqual(config["architecture"], "amd64")
+                self.assertEqual(
+                    labels["org.flatpak.ref"],
+                    "runtime/org.anatase.Platform/x86_64/stable",
+                )
+                self.assertIn("[Runtime]", labels["org.flatpak.metadata"])
+                self.assertIn(
+                    "sdk=org.anatase.ludos.Sdk/x86_64/stable",
+                    labels["org.flatpak.metadata"],
+                )
+                return 0
+
+            def update(distro: str) -> int:
+                events.append(("update", distro))
+                return 0
+
+            with (
+                patch("ludos.upload.flatpaks.upload_oci", side_effect=upload),
+                patch(
+                    "ludos.upload.flatpaks.update_flatpak_static_index",
+                    side_effect=update,
+                ),
+            ):
+                self.assertEqual(
+                    upload_dummy_runtime(manifest, cache_dir=root / "cache"),
+                    0,
+                )
+
+        self.assertEqual(
+            events,
+            [
+                ("upload", "flatpaks/runtime", ("f44-x86_64",)),
+                ("update", "f44-x86_64"),
+            ],
+        )
+
+    def test_upload_dummy_runtime_rejects_missing_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, tuple())
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "runtime:\n"
+                    "  id: org.anatase.Platform\n"
+                    "  repo: runtime\n"
+                    "  branch: stable\n",
+                    "",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "runtime"):
+                upload_dummy_runtime(manifest, cache_dir=root / "cache")
+
 
 def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
     (root / "cards").mkdir()
@@ -369,6 +475,10 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
                 "releasever: '44'",
                 "distro: f$releasever-$arch",
                 "orchestrator: quay.io/fedora/fedora:$releasever",
+                "runtime:",
+                "  id: org.anatase.Platform",
+                "  repo: runtime",
+                "  branch: stable",
                 "bootstrap: cards/bootstrap.yml",
                 "repos: []",
                 "cards:",

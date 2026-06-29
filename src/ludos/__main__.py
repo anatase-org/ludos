@@ -21,6 +21,7 @@ from .upload.file import delete_file, upload_file
 from .upload.flatpaks import (
     tree_shake_flatpaks,
     update_flatpak_index,
+    upload_dummy_runtime,
     upload_flatpaks,
 )
 from .upload.registry import (
@@ -346,6 +347,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a Ludos YAML manifest.",
     )
     registry_flatpak_update.set_defaults(func=registry_command)
+    registry_flatpak_dummy_runtime = registry_flatpak_subcommands.add_parser(
+        "upload-dummy-runtime",
+        help="Upload a dummy flatpak runtime OCI image and update the static index.",
+    )
+    registry_flatpak_dummy_runtime.add_argument(
+        "manifest",
+        type=Path,
+        help="Path to a Ludos YAML manifest.",
+    )
+    registry_flatpak_dummy_runtime.set_defaults(func=registry_command)
 
     registry_oci = registry_subcommands.add_parser(
         "oci",
@@ -796,6 +807,8 @@ def registry_command(args: argparse.Namespace) -> int:
             )
         if args.registry_flatpak_action == "update":
             return update_flatpak_index(args.manifest)
+        if args.registry_flatpak_action == "upload-dummy-runtime":
+            return upload_dummy_runtime(args.manifest)
         raise ConfigError(
             f"unknown registry flatpak action: {args.registry_flatpak_action}"
         )

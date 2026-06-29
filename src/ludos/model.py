@@ -130,6 +130,13 @@ class InstallerConfig:
 
 
 @dataclass(frozen=True)
+class ManifestRuntime:
+    id: str
+    repo: str
+    branch: str
+
+
+@dataclass(frozen=True)
 class ResolvedRepo:
     ref: RepoRef
     source: Path
@@ -151,6 +158,7 @@ class Manifest:
     local_prefix: str = ""
     labels: dict[str, str] = field(default_factory=dict)
     installer: InstallerConfig = InstallerConfig()
+    runtime: ManifestRuntime | None = None
     source: Path | None = None
 
     @classmethod
@@ -171,6 +179,7 @@ class Manifest:
             local_prefix=_optional_string(data, "local_prefix", path),
             labels=_string_dict(data, "labels", path),
             installer=_installer_config(data, path),
+            runtime=_manifest_runtime(data, path),
             source=path,
         )
 
@@ -422,6 +431,23 @@ def _installer_config(data: dict[str, Any], path: Path) -> InstallerConfig:
         files=_string_tuple(value, "files", path),
         build=_optional_string(value, "build", path),
         ostree=_optional_bool(value, "ostree", path, "installer"),
+    )
+
+
+def _manifest_runtime(data: dict[str, Any], path: Path) -> ManifestRuntime | None:
+    value = data.get("runtime")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path}: 'runtime' must be a mapping")
+    allowed = {"id", "repo", "branch"}
+    for key in value:
+        if key not in allowed:
+            raise ConfigError(f"{path}: 'runtime.{key}' is not supported")
+    return ManifestRuntime(
+        id=_required_string(value, "id", path).strip(),
+        repo=_required_string(value, "repo", path).strip(),
+        branch=_required_string(value, "branch", path).strip(),
     )
 
 

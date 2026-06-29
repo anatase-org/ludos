@@ -37,6 +37,7 @@ from .common import (
 from .logging import log
 from .model import (
     ConfigError,
+    ManifestRuntime,
     SpecBuild,
     _env_dict,
     _load_mapping,
@@ -53,6 +54,7 @@ FLATPAK_ARCHES = {
     "x86_64": "x86_64",
     "aarch64": "aarch64",
 }
+DEFAULT_FLATPAK_SDK = "org.anatase.ludos.Sdk"
 
 
 @dataclass(frozen=True)
@@ -238,7 +240,8 @@ def _prepare_flatpak_build_plan(
     flatpak_dir = card_path.parent
     app_name = _flatpak_name(flatpak_dir)
     block = f"flatpak-{app_name}"
-    branch = "stable"
+    runtime = _require_manifest_runtime(context)
+    branch = runtime.branch
     flatpak_arch = _flatpak_arch(context.arch)
     app_ref = f"app/{card.flatpak.app_id}/{flatpak_arch}/{branch}"
     output_image = _local_image(
@@ -329,6 +332,7 @@ def _prepare_flatpak_build_plan(
         card.flatpak,
         branch=branch,
         flatpak_arch=flatpak_arch,
+        runtime_id=runtime.id,
     )
 
     return FlatpakBuildPlan(
@@ -653,6 +657,14 @@ def _flatpak_arch(arch: str) -> str:
         raise ConfigError(f"flatpak builds do not support architecture: {arch}") from exc
 
 
+def _require_manifest_runtime(context: ResolvedManifestContext) -> ManifestRuntime:
+    runtime = context.validation.manifest.runtime
+    if runtime is None:
+        source = context.validation.manifest.source or context.root_dir
+        raise ConfigError(f"{source}: 'runtime' is required to build flatpaks")
+    return runtime
+
+
 def _flatpak_rpmbuild_defines() -> tuple[str, ...]:
     # Ported from fedora flatpak macros
     return (
@@ -683,11 +695,13 @@ def _flatpak_metadata(
     *,
     branch: str,
     flatpak_arch: str,
+    runtime_id: str,
+    sdk_id: str = DEFAULT_FLATPAK_SDK,
 ) -> str:
     editor = _MetadataEditor()
     editor.set("Application", "name", config.app_id)
-    editor.set("Application", "runtime", f"org.anatase.Platform/{flatpak_arch}/{branch}")
-    editor.set("Application", "sdk", f"org.anatase.Sdk/{flatpak_arch}/{branch}")
+    editor.set("Application", "runtime", f"{runtime_id}/{flatpak_arch}/{branch}")
+    editor.set("Application", "sdk", f"{sdk_id}/{flatpak_arch}/{branch}")
     finish_args = ["--command", _flatpak_command(config)]
     if config.finish_args.strip():
         finish_args.extend(shlex.split(config.finish_args, comments=True))
