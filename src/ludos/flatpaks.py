@@ -666,6 +666,7 @@ def _flatpak_rpmbuild_defines() -> tuple[str, ...]:
         "__maven_path ^/usr/share/maven-metadata/.*",
         "jpb_env JAVACONFDIRS=%{_sysconfdir}/java",
         "__brp_check_rpaths %{nil}",
+        "debug_package %{nil}",
         "java_remove_imports /usr/bin/jurand -i",
         "java_remove_annotations /usr/bin/jurand -i -a",
     )

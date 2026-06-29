@@ -453,6 +453,7 @@ class FlatpakAssemblyTests(unittest.TestCase):
             )
         )
         self.assertIn("__brp_check_rpaths %{nil}", defines)
+        self.assertIn("debug_package %{nil}", defines)
         self.assertNotIn("_lib lib", defines)
         self.assertNotIn("_libdir /app/lib", defines)
 
