@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -996,7 +997,7 @@ specs:
         self.assertIn("find /out/files/share/mime/packages -maxdepth 1 -type f -name \"$app_id*.xml\"", containerfile)
         self.assertNotIn("for dir in mime dbus-1", containerfile)
 
-    def test_flatpak_image_build_bakes_appstream_labels_without_buildah_commit(
+    def test_flatpak_image_build_labels_with_buildah_squash_commit(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1029,6 +1030,11 @@ specs:
 
             def run(command, **kwargs):
                 runs.append((command, kwargs))
+                if command[:3] == ["buildah", "from", "--quiet"]:
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout="flatpak-label-container\n",
+                    )
                 return SimpleNamespace(returncode=0, stdout="")
 
             with (
@@ -1049,6 +1055,7 @@ specs:
             ):
                 _run_flatpak_image_build(
                     "podman",
+                    "buildah",
                     build_dir,
                     "localhost/flatpaks:f44-x86_64-kate",
                     "metadata-body\n",
@@ -1082,27 +1089,7 @@ specs:
                 "build",
                 "--pull=false",
                 "--tag",
-                "localhost/flatpaks:f44-x86_64-kate",
-                "--label",
-                "org.flatpak.ref=app/org.kde.kate/x86_64/f44",
-                "--label",
-                "org.flatpak.metadata=metadata-body\n",
-                "--label",
-                "org.flatpak.commit-metadata.xa.metadata=bWV0YWRhdGEtYm9keQoAAHM=",
-                "--label",
-                "org.flatpak.commit-metadata.xa.ref=YXBwL29yZy5rZGUua2F0ZS94ODZfNjQvZjQ0AABz",
-                "--label",
-                "org.flatpak.commit-metadata.ostree.ref-binding=YXBwL29yZy5rZGUua2F0ZS94ODZfNjQvZjQ0ABwAYXM=",
-                "--label",
-                "org.flatpak.commit-metadata.ostree.collection-binding=AABz",
-                "--label",
-                "org.flatpak.commit-metadata.xa.download-size=AAAAAAAAAHsAdA==",
-                "--label",
-                "org.flatpak.commit-metadata.xa.installed-size=AAAAAAAAAHsAdA==",
-                "--label",
-                "org.freedesktop.appstream.appdata=<component/>",
-                "--label",
-                "org.freedesktop.appstream.icon-64=data:image/png;base64,AA==",
+                "localhost/flatpaks:f44-x86_64-kate-unlabeled",
                 "--file",
                 str(build_dir / "Containerfile.final"),
                 str(build_dir),
@@ -1111,15 +1098,101 @@ specs:
         self.assertEqual(
             runs[0][0],
             [
+                "buildah",
+                "from",
+                "--quiet",
+                "localhost/flatpaks:f44-x86_64-kate-unlabeled",
+            ],
+        )
+        self.assertIn(
+            (
+                [
+                    "buildah",
+                    "config",
+                    "--label",
+                    "org.flatpak.metadata=metadata-body\n",
+                    "flatpak-label-container",
+                ],
+                {
+                    "check": False,
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.PIPE,
+                    "text": True,
+                },
+            ),
+            runs,
+        )
+        self.assertIn(
+            (
+                [
+                    "buildah",
+                    "config",
+                    "--label",
+                    "org.flatpak.commit-metadata.xa.metadata=bWV0YWRhdGEtYm9keQoAAHM=",
+                    "flatpak-label-container",
+                ],
+                {
+                    "check": False,
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.PIPE,
+                    "text": True,
+                },
+            ),
+            runs,
+        )
+        self.assertIn(
+            (
+                [
+                    "buildah",
+                    "config",
+                    "--label",
+                    "org.flatpak.commit-metadata.xa.download-size=AAAAAAAAAHsAdA==",
+                    "flatpak-label-container",
+                ],
+                {
+                    "check": False,
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.PIPE,
+                    "text": True,
+                },
+            ),
+            runs,
+        )
+        self.assertIn(
+            (
+                [
+                    "buildah",
+                    "commit",
+                    "--squash",
+                    "--format",
+                    "oci",
+                    "flatpak-label-container",
+                    "localhost/flatpaks:f44-x86_64-kate",
+                ],
+                {
+                    "check": False,
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.PIPE,
+                    "text": True,
+                },
+            ),
+            runs,
+        )
+        self.assertEqual(
+            runs[-2][0],
+            ["buildah", "rm", "flatpak-label-container"],
+        )
+        self.assertEqual(
+            runs[-1][0],
+            [
                 "podman",
                 "rmi",
                 "localhost/flatpaks:f44-x86_64-kate-build-stage",
                 "sha256:buildimageid",
+                "localhost/flatpaks:f44-x86_64-kate-unlabeled",
             ],
         )
-        self.assertTrue(all("buildah" not in command for command in streamed))
-        self.assertTrue(all("buildah" not in command for command, _kwargs in runs))
-        self.assertIn("org.flatpak.metadata=metadata-body\n", streamed[1])
+        self.assertTrue(all("--label" not in command for command in streamed))
         appstream_labels.assert_called_once_with(
             "podman",
             build_dir,

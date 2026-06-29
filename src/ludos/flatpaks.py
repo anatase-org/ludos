@@ -482,6 +482,7 @@ def _ensure_flatpak_images(
         else:
             _run_flatpak_image_build(
                 context.podman,
+                _require_buildah(context.buildah),
                 plan.final_build_dir,
                 plan.output_image,
                 plan.metadata,
@@ -1326,6 +1327,7 @@ def _flatpak_body(app_id: str, flatpak_arch: str, branch: str) -> str:
 
 def _run_flatpak_image_build(
     podman: str,
+    buildah: str,
     build_dir: Path,
     image: str,
     metadata: str,
@@ -1335,6 +1337,7 @@ def _run_flatpak_image_build(
     final_containerfile = build_dir / "Containerfile.final"
     build_iidfile = build_dir / "build-image.id"
     build_stage_image = f"{image}-build-stage"
+    unlabeled_image = f"{image}-unlabeled"
     build_image_id = ""
     try:
         build_iidfile.unlink(missing_ok=True)
@@ -1386,16 +1389,21 @@ def _run_flatpak_image_build(
             podman,
             final_containerfile,
             build_dir,
-            image,
-            labels,
+            unlabeled_image,
         )
         returncode, _output = _run_streamed_command(command)
         if returncode != 0:
             raise ConfigError(f"flatpak image build failed with exit status {returncode}")
+        _label_flatpak_image(
+            buildah,
+            source_image=unlabeled_image,
+            image=image,
+            labels=labels,
+        )
     finally:
         if build_image_id:
             subprocess.run(
-                [podman, "rmi", build_stage_image, build_image_id],
+                [podman, "rmi", build_stage_image, build_image_id, unlabeled_image],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1446,24 +1454,82 @@ def _flatpak_final_image_build_command(
     containerfile: Path,
     build_dir: Path,
     image: str,
-    labels: tuple[tuple[str, str], ...],
 ) -> list[str]:
-    label_args = [
-        argument
-        for key, value in labels
-        for argument in ("--label", f"{key}={value}")
-    ]
     return [
         podman,
         "build",
         "--pull=false",
         "--tag",
         image,
-        *label_args,
         "--file",
         str(containerfile),
         str(build_dir),
     ]
+
+
+def _label_flatpak_image(
+    buildah: str,
+    *,
+    source_image: str,
+    image: str,
+    labels: tuple[tuple[str, str], ...],
+) -> None:
+    container = ""
+    try:
+        result = _run_buildah_flatpak_command(
+            [buildah, "from", "--quiet", source_image],
+            action="create label container",
+            capture_stdout=True,
+        )
+        container = result.stdout.strip()
+        if not container:
+            raise ConfigError("flatpak image label container was not created")
+        for key, value in labels:
+            _run_buildah_flatpak_command(
+                [buildah, "config", "--label", f"{key}={value}", container],
+                action=f"set label {key}",
+            )
+        _run_buildah_flatpak_command(
+            [
+                buildah,
+                "commit",
+                "--squash",
+                "--format",
+                "oci",
+                container,
+                image,
+            ],
+            action="commit labeled image",
+        )
+    finally:
+        if container:
+            subprocess.run(
+                [buildah, "rm", container],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+
+def _run_buildah_flatpak_command(
+    command: list[str],
+    *,
+    action: str,
+    capture_stdout: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ConfigError(
+            f"flatpak image buildah {action} failed with exit status "
+            f"{result.returncode}"
+        )
+    return result
 
 
 def _write_flatpak_final_containerfile(
