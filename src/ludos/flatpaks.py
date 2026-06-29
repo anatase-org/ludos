@@ -69,6 +69,7 @@ class FlatpakConfig:
     app_id: str
     command: str
     finish_args: str = ""
+    rename: str = ""
     rename_icon: str = ""
     rename_desktop_file: str = ""
     rename_appdata_file: str = ""
@@ -236,8 +237,9 @@ def _prepare_flatpak_build_plan(
     branch = _substitute_variables("f$releasever", context.manifest_env)
     flatpak_arch = _flatpak_arch(context.arch)
     app_ref = f"app/{card.flatpak.app_id}/{flatpak_arch}/{branch}"
-    output_image = f"localhost/{card.flatpak.app_id}:{branch}"
-    latest_image = f"localhost/{card.flatpak.app_id}:latest"
+    image_name = card.flatpak.app_id.lower()
+    output_image = f"localhost/{image_name}:{branch}"
+    latest_image = f"localhost/{image_name}:latest"
 
     log(f"Building flatpak {card.flatpak.app_id} for {context.distro}")
     substitution_env = dict(context.manifest_env)
@@ -510,6 +512,7 @@ def _flatpak_config(data: dict[str, Any], path: Path) -> FlatpakConfig:
         "id",
         "command",
         "finish-args",
+        "rename",
         "rename-icon",
         "rename-desktop-file",
         "rename-appdata-file",
@@ -523,6 +526,7 @@ def _flatpak_config(data: dict[str, Any], path: Path) -> FlatpakConfig:
         app_id=app_id,
         command=command,
         finish_args=finish_args,
+        rename=_optional_string(value, "rename", path),
         rename_icon=_optional_string(value, "rename-icon", path),
         rename_desktop_file=_optional_string(value, "rename-desktop-file", path),
         rename_appdata_file=_optional_string(value, "rename-appdata-file", path),
@@ -682,7 +686,7 @@ def _flatpak_metadata(
     editor.set("Application", "name", config.app_id)
     editor.set("Application", "runtime", f"org.anatase.Platform/{flatpak_arch}/{branch}")
     editor.set("Application", "sdk", f"org.anatase.Sdk/{flatpak_arch}/{branch}")
-    finish_args = ["--command", config.command]
+    finish_args = ["--command", _flatpak_command(config)]
     if config.finish_args.strip():
         finish_args.extend(shlex.split(config.finish_args, comments=True))
     _apply_finish_args(editor, finish_args)
@@ -858,6 +862,8 @@ def _write_flatpak_containerfile(
             "mkdir -p /out/files /out/export",
             "cp -a /flatpak/app/. /out/files/",
             *_rename_lines(card.flatpak),
+            *_rename_display_lines(card.flatpak),
+            *_command_wrapper_lines(card.flatpak),
             *_appdata_lines(card.flatpak),
             *_appstream_compose_lines(card.flatpak, app_ref),
             *_export_lines(card.flatpak),
@@ -978,8 +984,7 @@ def _rename_lines(config: FlatpakConfig) -> list[str]:
     if config.rename_icon:
         icon_glob = shlex.quote(f"{config.rename_icon}.*")
         new = shlex.quote(config.app_id)
-        old_icon_name = Path(config.rename_icon).stem
-        old_icon = shlex.quote(old_icon_name)
+        old_icon = shlex.quote(config.rename_icon)
         lines.extend(
             [
                 "if [ -d /out/files/share/icons ]; then",
@@ -1003,10 +1008,84 @@ def _rename_lines(config: FlatpakConfig) -> list[str]:
     return lines
 
 
-def _appdata_lines(config: FlatpakConfig) -> list[str]:
+def _flatpak_command(config: FlatpakConfig) -> str:
+    if not config.rename:
+        return config.command
+    return f"{Path(config.command).name}-anatase"
+
+
+def _rename_display_lines(config: FlatpakConfig) -> list[str]:
+    if not config.rename:
+        return []
     app_id = shlex.quote(config.app_id)
+    display_name = shlex.quote(config.rename)
+    command = shlex.quote(config.command)
+    flatpak_command = shlex.quote(_flatpak_command(config))
     return [
         f"app_id={app_id}",
+        f"display_name={display_name}",
+        f"original_command={command}",
+        f"flatpak_command={flatpak_command}",
+        "desktop_file=\"/out/files/share/applications/$app_id.desktop\"",
+        "if [ -f \"$desktop_file\" ]; then",
+        "  DISPLAY_NAME=\"$display_name\" ORIGINAL_COMMAND=\"$original_command\" FLATPAK_COMMAND=\"$flatpak_command\" DESKTOP_FILE=\"$desktop_file\" python3 - <<'LUDOS_RENAME_DESKTOP'",
+        "import os",
+        "",
+        "path = os.environ['DESKTOP_FILE']",
+        "display_name = os.environ['DISPLAY_NAME']",
+        "original_command = os.environ['ORIGINAL_COMMAND']",
+        "flatpak_command = os.environ['FLATPAK_COMMAND']",
+        "lines = []",
+        "with open(path, encoding='utf-8') as desktop:",
+        "    for line in desktop:",
+        "        if line.startswith('Name='):",
+        "            line = f'Name={display_name}\\n'",
+        "        elif line.startswith('Exec='):",
+        "            value = line.removeprefix('Exec=').rstrip('\\n')",
+        "            if value == original_command:",
+        "                value = flatpak_command",
+        "            elif value.startswith(original_command + ' '):",
+        "                value = flatpak_command + value[len(original_command):]",
+        "            line = f'Exec={value}\\n'",
+        "        lines.append(line)",
+        "with open(path, 'w', encoding='utf-8') as desktop:",
+        "    desktop.writelines(lines)",
+        "LUDOS_RENAME_DESKTOP",
+        "fi",
+    ]
+
+
+def _command_wrapper_lines(config: FlatpakConfig) -> list[str]:
+    if not config.rename:
+        return []
+    command = Path(config.command).name
+    wrapper = _flatpak_command(config)
+    wrapper_path = shlex.quote(f"/out/files/bin/{wrapper}")
+    original_path = shlex.quote(f"/app/bin/{command}")
+    display_name = shlex.quote(config.rename)
+    return [
+        "mkdir -p /out/files/bin",
+        f"cat > {wrapper_path} <<'LUDOS_COMMAND_WRAPPER'",
+        "#!/bin/sh",
+        f"command={original_path}",
+        f"title={display_name}",
+        "if command -v ldd >/dev/null 2>&1 && ldd \"$command\" 2>/dev/null | grep -Eq 'lib(Qt[56]|KF[56])'; then",
+        "  exec \"$command\" -qwindowtitle \"$title\" \"$@\"",
+        "fi",
+        "exec \"$command\" \"$@\"",
+        "LUDOS_COMMAND_WRAPPER",
+        f"chmod +x {wrapper_path}",
+    ]
+
+
+def _appdata_lines(config: FlatpakConfig) -> list[str]:
+    app_id = shlex.quote(config.app_id)
+    display_name = shlex.quote(config.rename)
+    app_icon = shlex.quote(config.app_id if config.rename_icon else "")
+    return [
+        f"app_id={app_id}",
+        f"display_name={display_name}",
+        f"app_icon={app_icon}",
         "appdata_source=",
         "for candidate in \\",
         '  "/out/files/share/appdata/$app_id.appdata.xml" \\',
@@ -1021,12 +1100,14 @@ def _appdata_lines(config: FlatpakConfig) -> list[str]:
         "if [ -n \"$appdata_source\" ]; then",
         "  mkdir -p /out/files/share/appdata",
         '  cp -a "$appdata_source" "/out/files/share/appdata/$app_id.appdata.xml"',
-        "  APPDATA_FILE=\"/out/files/share/appdata/$app_id.appdata.xml\" APP_ID=\"$app_id\" python3 - <<'LUDOS_REWRITE_APPDATA'",
+        "  APPDATA_FILE=\"/out/files/share/appdata/$app_id.appdata.xml\" APP_ID=\"$app_id\" DISPLAY_NAME=\"$display_name\" APP_ICON=\"$app_icon\" python3 - <<'LUDOS_REWRITE_APPDATA'",
         "import os",
         "import xml.etree.ElementTree as ET",
         "",
         "path = os.environ['APPDATA_FILE']",
         "app_id = os.environ['APP_ID']",
+        "display_name = os.environ['DISPLAY_NAME']",
+        "app_icon = os.environ['APP_ICON']",
         "tree = ET.parse(path)",
         "root = tree.getroot()",
         "component_id = root.find('id')",
@@ -1038,7 +1119,23 @@ def _appdata_lines(config: FlatpakConfig) -> list[str]:
         "        provides = ET.SubElement(root, 'provides')",
         "    if not any(child.tag == 'id' and child.text == old_id for child in list(provides)):",
         "        ET.SubElement(provides, 'id').text = old_id",
-        "    tree.write(path, encoding='UTF-8', xml_declaration=True)",
+        "if display_name:",
+        "    name = root.find('name')",
+        "    if name is None:",
+        "        name = ET.SubElement(root, 'name')",
+        "    name.text = display_name",
+        "for launchable in root.findall('launchable'):",
+        "    if launchable.get('type') == 'desktop-id':",
+        "        launchable.text = f'{app_id}.desktop'",
+        "if app_icon:",
+        "    icons = list(root.findall('icon'))",
+        "    if not icons:",
+        "        icons = [ET.SubElement(root, 'icon', {'type': 'stock'})]",
+        "    for icon in root.findall('icon'):",
+        "        icon_type = icon.get('type')",
+        "        if icon_type in (None, '', 'stock', 'cached', 'local') and (not icon.text or '://' not in icon.text):",
+        "            icon.text = app_icon",
+        "tree.write(path, encoding='UTF-8', xml_declaration=True)",
         "LUDOS_REWRITE_APPDATA",
         "  mkdir -p /out/files/share/metainfo",
         '  cp -a "/out/files/share/appdata/$app_id.appdata.xml" "/out/files/share/metainfo/$app_id.appdata.xml"',
@@ -1049,9 +1146,13 @@ def _appdata_lines(config: FlatpakConfig) -> list[str]:
 def _appstream_compose_lines(config: FlatpakConfig, app_ref: str) -> list[str]:
     app_id = shlex.quote(config.app_id)
     ref = shlex.quote(app_ref)
+    display_name = shlex.quote(config.rename)
+    app_icon = shlex.quote(config.app_id if config.rename_icon else "")
     return [
         f"app_id={app_id}",
         f"app_ref={ref}",
+        f"display_name={display_name}",
+        f"app_icon={app_icon}",
         "if [ -f \"/out/files/share/appdata/$app_id.appdata.xml\" ]; then",
         "  if ! command -v appstreamcli >/dev/null 2>&1; then",
         "    echo 'appstreamcli is required to build flatpak app-info metadata' >&2",
@@ -1068,13 +1169,15 @@ def _appstream_compose_lines(config: FlatpakConfig, app_ref: str) -> list[str]:
         "  if [ -f \"$appstream_xml\" ] && command -v gzip >/dev/null 2>&1; then",
         "    appstream_tmp=\"/out/appstream-$app_id.xml\"",
         "    gzip -dc \"$appstream_xml\" > \"$appstream_tmp\"",
-        "    APPSTREAM_FILE=\"$appstream_tmp\" APP_ID=\"$app_id\" APP_REF=\"$app_ref\" python3 - <<'LUDOS_REWRITE_APPSTREAM'",
+        "    APPSTREAM_FILE=\"$appstream_tmp\" APP_ID=\"$app_id\" APP_REF=\"$app_ref\" DISPLAY_NAME=\"$display_name\" APP_ICON=\"$app_icon\" python3 - <<'LUDOS_REWRITE_APPSTREAM'",
         "import os",
         "import xml.etree.ElementTree as ET",
         "",
         "path = os.environ['APPSTREAM_FILE']",
         "app_id = os.environ['APP_ID']",
         "app_ref = os.environ['APP_REF']",
+        "display_name = os.environ['DISPLAY_NAME']",
+        "app_icon = os.environ['APP_ICON']",
         "tree = ET.parse(path)",
         "root = tree.getroot()",
         "for component in root.iter('component'):",
@@ -1089,6 +1192,22 @@ def _appstream_compose_lines(config: FlatpakConfig, app_ref: str) -> list[str]:
         "    if bundle is None:",
         "        bundle = ET.SubElement(component, 'bundle', {'type': 'flatpak'})",
         "    bundle.text = app_ref",
+        "    if display_name:",
+        "        name = component.find('name')",
+        "        if name is None:",
+        "            name = ET.SubElement(component, 'name')",
+        "        name.text = display_name",
+        "    for launchable in component.findall('launchable'):",
+        "        if launchable.get('type') == 'desktop-id':",
+        "            launchable.text = f'{app_id}.desktop'",
+        "    if app_icon:",
+        "        icons = list(component.findall('icon'))",
+        "        if not icons:",
+        "            icons = [ET.SubElement(component, 'icon', {'type': 'stock'})]",
+        "        for icon in component.findall('icon'):",
+        "            icon_type = icon.get('type')",
+        "            if icon_type in (None, '', 'stock', 'cached', 'local') and (not icon.text or '://' not in icon.text):",
+        "                icon.text = app_icon",
         "tree.write(path, encoding='UTF-8', xml_declaration=True)",
         "LUDOS_REWRITE_APPSTREAM",
         "    gzip -n -c \"$appstream_tmp\" > \"$appstream_xml\"",

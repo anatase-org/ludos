@@ -272,6 +272,7 @@ version: 1
 flatpak:
   id: org.kde.kate
   command: kate
+  rename: Text Editor (Kate)
   finish-args: |-
     --device=dri
   rename-icon: kate
@@ -296,6 +297,7 @@ postprocess: |
 
         self.assertEqual(card.flatpak.app_id, "org.kde.kate")
         self.assertEqual(card.flatpak.command, "kate")
+        self.assertEqual(card.flatpak.rename, "Text Editor (Kate)")
         self.assertEqual(card.flatpak.rename_icon, "kate")
         self.assertEqual(card.env, {"EXTRA_VERSION": "$releasever-app"})
         self.assertEqual(card.build_deps, ("rpm-build", "flatpak-rpm-macros"))
@@ -498,6 +500,35 @@ specs:
         self.assertIn("[Session Bus Policy]", metadata)
         self.assertIn("org.kde.KGlobalSettings=talk", metadata)
 
+    def test_metadata_uses_wrapper_command_for_renamed_app(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            card_path = Path(temp) / "card.yaml"
+            card_path.write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.TextEditor
+  command: kate
+  rename: Text Editor (Kate)
+build-deps:
+  - rpm-build
+specs:
+  - spec: kate.spec
+    packages: [kate]
+""",
+                encoding="utf-8",
+            )
+            card = FlatpakCard.from_file(card_path)
+
+        metadata = _flatpak_metadata(
+            card.flatpak,
+            branch="f44",
+            flatpak_arch="x86_64",
+        )
+
+        self.assertIn("name=org.anatase.TextEditor", metadata)
+        self.assertIn("command=kate-anatase", metadata)
+
     def test_containerfile_uses_orchestrator_and_applies_final_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -601,7 +632,7 @@ version: 1
 flatpak:
   id: org.kde.kate
   command: kate
-  rename-icon: kate
+  rename-icon: org.kde.kate
 build-deps:
   - rpm-build
 specs:
@@ -627,9 +658,61 @@ specs:
 
             containerfile = (build_dir / "Containerfile").read_text(encoding="utf-8")
 
-        self.assertIn("old_icon=kate", containerfile)
+        self.assertIn("old_icon=org.kde.kate", containerfile)
         self.assertIn("new_icon=org.kde.kate", containerfile)
+        self.assertIn("-name 'org.kde.kate.*'", containerfile)
         self.assertIn("s/^Icon=${old_icon}$/Icon=${new_icon}/", containerfile)
+
+    def test_containerfile_renames_desktop_appdata_and_wraps_qt_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            flatpak_dir = root / "kate"
+            flatpak_dir.mkdir()
+            card_path = flatpak_dir / "card.yaml"
+            card_path.write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.TextEditor
+  command: kate
+  rename: Text Editor (Kate)
+  rename-desktop-file: org.kde.kate.desktop
+  rename-appdata-file: org.kde.kate.appdata.xml
+build-deps:
+  - rpm-build
+specs:
+  - spec: kate.spec
+    packages: [kate]
+""",
+                encoding="utf-8",
+            )
+            card = FlatpakCard.from_file(card_path)
+            build_dir = root / "build"
+
+            _write_flatpak_containerfile(
+                final_build_dir=build_dir,
+                flatpak_dir=flatpak_dir,
+                card=card,
+                build_image="localhost/builds:f44-flatpak-kate",
+                orchestrator="localhost/orchestrator:f44",
+                metadata="metadata-body\n",
+                app_ref="app/org.anatase.TextEditor/x86_64/f44",
+                branch="f44",
+                flatpak_arch="x86_64",
+            )
+
+            containerfile = (build_dir / "Containerfile").read_text(encoding="utf-8")
+
+        self.assertIn("mv -f /out/files/share/applications/org.kde.kate.desktop /out/files/share/applications/org.anatase.TextEditor.desktop", containerfile)
+        self.assertIn("mv -f /out/files/share/appdata/org.kde.kate.appdata.xml /out/files/share/appdata/org.anatase.TextEditor.appdata.xml", containerfile)
+        self.assertIn("DISPLAY_NAME=\"$display_name\"", containerfile)
+        self.assertIn("line = f'Name={display_name}", containerfile)
+        self.assertIn("flatpak_command + value[len(original_command):]", containerfile)
+        self.assertIn("cat > /out/files/bin/kate-anatase", containerfile)
+        self.assertIn("exec \"$command\" -qwindowtitle \"$title\" \"$@\"", containerfile)
+        self.assertIn("name.text = display_name", containerfile)
+        self.assertIn("APP_ICON=\"$app_icon\"", containerfile)
+        self.assertIn("icon.text = app_icon", containerfile)
 
     def test_containerfile_exports_app_id_owned_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
