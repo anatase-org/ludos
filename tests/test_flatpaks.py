@@ -555,7 +555,8 @@ postprocess: |
         self.assertIn("appstreamcli compose --verbose --prefix /out/files --origin flatpak --components \"$app_id\"", containerfile)
         self.assertIn("bundle = ET.SubElement(component, 'bundle', {'type': 'flatpak'})", containerfile)
         self.assertIn("bundle.text = app_ref", containerfile)
-        self.assertIn("for dir in mime dbus-1 gnome-shell krunner; do", containerfile)
+        self.assertIn("find /out/files/share/mime/packages -maxdepth 1 -type f -name \"$app_id*.xml\"", containerfile)
+        self.assertIn("for dir in dbus-1 gnome-shell krunner; do", containerfile)
         self.assertIn("FROM scratch", containerfile)
         self.assertIn("LABEL org.flatpak.ref=", containerfile)
         self.assertIn("LABEL org.flatpak.commit-metadata.xa.metadata=", containerfile)
@@ -671,6 +672,8 @@ specs:
         self.assertIn("-name \"$app_id.appdata.xml\"", containerfile)
         self.assertIn("-name \"$app_id.metainfo.xml\"", containerfile)
         self.assertIn("find /out/files/share/icons -type f -name \"$app_id.*\"", containerfile)
+        self.assertIn("find /out/files/share/mime/packages -maxdepth 1 -type f -name \"$app_id*.xml\"", containerfile)
+        self.assertNotIn("for dir in mime dbus-1", containerfile)
 
     def test_stage_flatpak_files_copies_local_files_after_build(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
