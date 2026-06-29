@@ -135,6 +135,8 @@ class ManifestUpdateTargetTests(unittest.TestCase):
             (kde / "card.yml").write_text(
                 """
 version: 1
+env:
+  distro: $distro
 specs:
   - spec: setup/plasma-setup.spec
     upstream:
@@ -164,6 +166,7 @@ cards:
 
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].env["releasever"], "44")
+        self.assertEqual(targets[0].env["distro"], "f44-x86_64")
         self.assertEqual(sources[0].upstream.branch, "f44")
 
 

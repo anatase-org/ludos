@@ -814,6 +814,51 @@ class TargetCardBuildTests(unittest.TestCase):
         self.assertIn("from=oci_base_scx_kernel_0,source=/files,target=/ludos/oci-files/0,ro", containerfile)
         self.assertIn("# build-image: sha256:kernel111", containerfile)
 
+    def test_postprocess_heredoc_defines_requested_card_env(self) -> None:
+        metadata = replace(
+            self._metadata(),
+            postprocess_blocks=(
+                ("base-scx", "set -eux\nprintf '%s\\n' \"$distro\""),
+            ),
+            card_envs=(
+                (
+                    "base-scx",
+                    (
+                        ("arch", "x86_64"),
+                        ("distro", "f44-x86_64"),
+                        ("releasever", "44"),
+                    ),
+                ),
+            ),
+        )
+        package_blocks = (("common", tuple()),)
+
+        for mode in ("separated", "combined"):
+            with self.subTest(mode=mode):
+                containerfile = _render_final_containerfile(
+                    metadata,
+                    mode=mode,
+                    package_blocks=package_blocks,
+                    package_images_by_block={
+                        "common": "localhost/cards:f44-x86_64-common-11111111",
+                    },
+                    build_images_by_block={},
+                    build_rpm_files_by_block={},
+                    card_file_cards=set(),
+                    build_file_blocks=set(),
+                    oci_rpm_files_by_index={},
+                    oci_file_indexes=set(),
+                )
+
+                self.assertIn(
+                    "arch=x86_64\ndistro=f44-x86_64\nreleasever=44\n",
+                    containerfile,
+                )
+                if mode == "separated":
+                    self.assertIn("releasever=44\nset -eux\n", containerfile)
+                else:
+                    self.assertIn("releasever=44\nrm -rf /files\n", containerfile)
+
     def _metadata(
         self,
         *,

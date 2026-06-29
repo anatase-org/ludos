@@ -325,6 +325,7 @@ def _manifest_update_targets(
         manifest_path,
         validation.manifest.env,
         validation.manifest.releasever,
+        validation.manifest.distro,
     )
     selected_source = (
         _resolve_card_path(card, root_dir, None).resolve()
@@ -367,6 +368,7 @@ def _manifest_env(
     manifest_path: Path,
     manifest_values: dict[str, str | int],
     releasever_value: str,
+    distro_value: str,
 ) -> dict[str, str]:
     root_dir = manifest_path.parent
     env = {key: str(value) for key, value in manifest_values.items()}
@@ -380,6 +382,10 @@ def _manifest_env(
         _substitute_variables(str(env.get("arch", "")), env),
         "arch",
     )
+    env["distro"] = _cache_name(
+        _substitute_variables(distro_value, env),
+        "distro",
+    )
     return env
 
 
@@ -389,7 +395,10 @@ def _card_env(
 ) -> dict[str, str]:
     values = dict(manifest_env)
     for key, value in card_values.items():
-        values[key] = _substitute_variables(str(value), values)
+        expression = str(value)
+        if expression == f"${key}" and key in values:
+            continue
+        values[key] = _substitute_variables(expression, values)
     keys = ("arch", "releasever", *card_values)
     return {key: values[key] for key in keys if key in values}
 

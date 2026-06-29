@@ -1934,6 +1934,7 @@ def _postprocess_step(
         has_oci_files,
     )
     postprocess = _substitute_variables(postprocess, card_env)
+    env_setup = _postprocess_env_setup(card_env)
     return f"""#
 # Postprocess: {block_name}
 #
@@ -1941,8 +1942,8 @@ def _postprocess_step(
 {_run_with_mounts(
     mounts,
     f"LUDOS_POSTPROCESS_{identifier}",
-    f"{setup}{set_command}{postprocess}\nrm -rf /files\n",
-) if mounts else f"RUN /bin/sh <<'LUDOS_POSTPROCESS_{identifier}'\n{set_command}{postprocess}\nrm -rf /files\nLUDOS_POSTPROCESS_{identifier}\n"}
+    f"{env_setup}{setup}{set_command}{postprocess}\nrm -rf /files\n",
+) if mounts else f"RUN /bin/sh <<'LUDOS_POSTPROCESS_{identifier}'\n{env_setup}{set_command}{postprocess}\nrm -rf /files\nLUDOS_POSTPROCESS_{identifier}\n"}
 """
 
 
@@ -2009,10 +2010,12 @@ def _combined_postprocess_step(
         )
         identifier = _identifier(card_name)
         set_command = "" if _starts_with_set_command(postprocess) else "set -e\n"
+        env_setup = _postprocess_env_setup(card_envs.get(card_name, {}))
         scripts.append(
             f"""#
 # Postprocess: {card_name}
 #
+{env_setup}\
 rm -rf /files
 mkdir -p /files
 for dir in /ludos/oci-files/{identifier}/*; do [ -d "$dir" ] && cp -a "$dir"/. /files/; done
@@ -2045,6 +2048,17 @@ def _postprocess_file_setup(
         lines.append("cp -a /ludos/card-files/. /files/")
     if has_build_files:
         lines.append("cp -a /ludos/build-files/. /files/")
+    return "\n".join(lines) + "\n"
+
+
+def _postprocess_env_setup(card_env: dict[str, str]) -> str:
+    lines = []
+    for key, value in sorted(card_env.items()):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ConfigError(f"invalid postprocess environment key '{key}'")
+        lines.append(f"{key}={shlex.quote(value)}")
+    if not lines:
+        return ""
     return "\n".join(lines) + "\n"
 
 
@@ -4794,7 +4808,10 @@ def _card_env(
 ) -> dict[str, str]:
     values = dict(manifest_env)
     for key, value in card_env.items():
-        values[key] = _expand_expression(str(value), values, None)
+        expression = str(value)
+        if expression == f"${key}" and key in values:
+            continue
+        values[key] = _expand_expression(expression, values, None)
     return {k: values[k] for k in ENV_ALWAYS_AVAILABLE + tuple(card_env) if k in values}
 
 

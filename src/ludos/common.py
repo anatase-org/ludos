@@ -117,6 +117,7 @@ def resolve_manifest_context(
         _substitute_variables(validation.manifest.distro, manifest_env),
         "distro",
     )
+    manifest_env["distro"] = distro
     orchestrator_source = _substitute_variables(
         validation.manifest.orchestrator, manifest_env
     )

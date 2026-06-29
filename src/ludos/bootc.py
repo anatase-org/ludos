@@ -311,7 +311,12 @@ def _manifest_artifact_env(
         "arch",
     )
     env["arch"] = arch
-    return {key: _substitute_variables(value, env) for key, value in env.items()}
+    env = {key: _substitute_variables(value, env) for key, value in env.items()}
+    env["distro"] = _cache_name(
+        _substitute_variables(manifest.distro, env),
+        "distro",
+    )
+    return env
 
 
 def _bootc_artifact_name(image: str, distro: str) -> str:
