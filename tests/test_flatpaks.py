@@ -136,7 +136,7 @@ class FlatpakParserTests(unittest.TestCase):
         self.assertEqual(validation.missing_flatpaks, ("flatpaks/missing",))
         self.assertFalse(validation.ok)
 
-    def test_build_flatpaks_builds_manifest_entries_in_order(self) -> None:
+    def test_build_flatpaks_runs_grouped_phases_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             manifest_path = root / "anatase.yml"
@@ -151,32 +151,74 @@ class FlatpakParserTests(unittest.TestCase):
                 dnf_workspace_dir=root / "dnf-workspace",
                 podman="podman",
             )
+            plans = (SimpleNamespace(name="kate"), SimpleNamespace(name="ark"))
             results = (SimpleNamespace(ref="kate"), SimpleNamespace(ref="ark"))
-            seen: list[Path] = []
+            events: list[object] = []
 
-            def build_one(
+            def prepare(
                 _context: object,
                 flatpak_path: Path,
                 **_kwargs: object,
             ) -> object:
-                seen.append(flatpak_path)
-                return results[len(seen) - 1]
+                events.append(("prepare", flatpak_path))
+                return plans[len(events) - 1]
+
+            def builders(
+                _context: object,
+                phase_plans: tuple[object, ...],
+                **_kwargs: object,
+            ) -> None:
+                events.append(("builders", phase_plans))
+
+            def rpms(
+                _context: object,
+                phase_plans: tuple[object, ...],
+                **_kwargs: object,
+            ) -> tuple[object, ...]:
+                events.append(("rpms", phase_plans))
+                return phase_plans
+
+            def images(
+                _context: object,
+                phase_plans: tuple[object, ...],
+                **_kwargs: object,
+            ) -> tuple[object, ...]:
+                events.append(("images", phase_plans))
+                return results
 
             with (
-                patch("ludos.flatpaks.resolve_manifest_context", return_value=context),
                 patch(
-                    "ludos.flatpaks._build_flatpak_with_context",
-                    side_effect=build_one,
+                    "ludos.flatpaks.resolve_manifest_context",
+                    return_value=context,
+                ),
+                patch(
+                    "ludos.flatpaks._prepare_flatpak_build_plan",
+                    side_effect=prepare,
+                ),
+                patch(
+                    "ludos.flatpaks._ensure_flatpak_builders",
+                    side_effect=builders,
+                ),
+                patch(
+                    "ludos.flatpaks._ensure_flatpak_rpm_builds",
+                    side_effect=rpms,
+                ),
+                patch(
+                    "ludos.flatpaks._ensure_flatpak_images",
+                    side_effect=images,
                 ),
             ):
                 built = build_flatpaks(manifest_path)
 
         self.assertEqual(built, results)
         self.assertEqual(
-            seen,
+            events,
             [
-                root / "flatpaks/kate",
-                root / "flatpaks/ark/card.yaml",
+                ("prepare", root / "flatpaks/kate"),
+                ("prepare", root / "flatpaks/ark/card.yaml"),
+                ("builders", plans),
+                ("rpms", plans),
+                ("images", plans),
             ],
         )
 

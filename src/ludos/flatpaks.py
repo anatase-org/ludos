@@ -110,6 +110,33 @@ class FlatpakCard:
         )
 
 
+@dataclass(frozen=True)
+class FlatpakBuildPlan:
+    card_path: Path
+    card: FlatpakCard
+    flatpak_dir: Path
+    app_name: str
+    block: str
+    branch: str
+    flatpak_arch: str
+    app_ref: str
+    output_image: str
+    latest_image: str
+    substitution_env: dict[str, str]
+    build_env: dict[str, str]
+    specs: tuple[SpecBuild, ...]
+    spec_revisions: dict[str, str]
+    spec_build_dir: Path
+    artifact_cache_dir: Path
+    final_build_dir: Path
+    rpmbuild_defines: tuple[str, ...]
+    builder_packages: tuple[str, ...]
+    builder_image: str
+    build_image: str
+    metadata: str
+    rpm_files: tuple[str, ...] = tuple()
+
+
 def build_flatpak(
     manifest_path: Path,
     flatpak_path: Path,
@@ -129,7 +156,11 @@ def build_flatpak(
             cache_only=cache_only,
             ccache=ccache,
         )
-        return _build_flatpak_with_context(context, flatpak_path, cache_only=cache_only)
+        return _build_flatpak_with_context(
+            context,
+            flatpak_path,
+            cache_only=cache_only,
+        )
     finally:
         if context is not None:
             _remove_tree(context.dnf_workspace_dir, podman=context.podman)
@@ -163,14 +194,17 @@ def build_flatpaks(
             raise ConfigError(
                 f"{manifest_path}: 'flatpaks' must contain at least one item"
             )
-        return tuple(
-            _build_flatpak_with_context(
+        plans = tuple(
+            _prepare_flatpak_build_plan(
                 context,
                 _manifest_flatpak_path(flatpak_ref, context.root_dir),
                 cache_only=cache_only,
             )
             for flatpak_ref in flatpak_refs
         )
+        _ensure_flatpak_builders(context, plans, cache_only=cache_only)
+        plans = _ensure_flatpak_rpm_builds(context, plans, cache_only=cache_only)
+        return _ensure_flatpak_images(context, plans, cache_only=cache_only)
     finally:
         if context is not None:
             _remove_tree(context.dnf_workspace_dir, podman=context.podman)
@@ -182,6 +216,18 @@ def _build_flatpak_with_context(
     *,
     cache_only: bool,
 ) -> FlatpakBuildResult:
+    plan = _prepare_flatpak_build_plan(context, flatpak_path, cache_only=cache_only)
+    _ensure_flatpak_builders(context, (plan,), cache_only=cache_only)
+    plan = _ensure_flatpak_rpm_builds(context, (plan,), cache_only=cache_only)[0]
+    return _ensure_flatpak_images(context, (plan,), cache_only=cache_only)[0]
+
+
+def _prepare_flatpak_build_plan(
+    context: ResolvedManifestContext,
+    flatpak_path: Path,
+    *,
+    cache_only: bool,
+) -> FlatpakBuildPlan:
     card_path = _flatpak_card_path(flatpak_path)
     card = FlatpakCard.from_file(card_path)
     flatpak_dir = card_path.parent
@@ -197,11 +243,17 @@ def _build_flatpak_with_context(
     substitution_env = dict(context.manifest_env)
     build_env = _flatpak_build_env(context.manifest_env, card.env)
     specs = _substitute_specs(card.specs, substitution_env)
-    flatpak_cache_dir = context.distro_cache_dir / "flatpaks" / _identifier(app_name)
+    flatpak_cache_dir = (
+        context.distro_cache_dir / "flatpaks" / _identifier(app_name)
+    )
     spec_build_dir = flatpak_cache_dir / "spec-build"
     spec_scan_dir = flatpak_cache_dir / "spec-scan"
-    artifact_cache_dir = context.build_artifact_cache_dir / "flatpaks" / _identifier(app_name)
-    final_build_dir = context.distro_cache_dir / "build" / "flatpaks" / _identifier(app_name)
+    artifact_cache_dir = (
+        context.build_artifact_cache_dir / "flatpaks" / _identifier(app_name)
+    )
+    final_build_dir = (
+        context.distro_cache_dir / "build" / "flatpaks" / _identifier(app_name)
+    )
     flatpak_cache_dir.mkdir(parents=True, exist_ok=True)
 
     spec_hash, spec_revisions = _card_specs_hash(
@@ -259,18 +311,66 @@ def _build_flatpak_with_context(
         "builders",
         f"{context.distro}-flatpak-{app_name}-{builder_hash}",
     )
-    if _image_exists(context.podman, builder_image):
-        log(f"Reusing flatpak builder image: {builder_image}")
-    elif cache_only:
-        raise ConfigError(f"flatpak builder image is not cached: {builder_image}")
-    else:
+    build_image = _local_image(
+        context.local_prefix,
+        "builds",
+        f"{context.distro}-flatpak-{app_name}-{spec_hash}",
+    )
+    metadata = _flatpak_metadata(
+        card.flatpak,
+        branch=branch,
+        flatpak_arch=flatpak_arch,
+    )
+
+    return FlatpakBuildPlan(
+        card_path=card_path,
+        card=card,
+        flatpak_dir=flatpak_dir,
+        app_name=app_name,
+        block=block,
+        branch=branch,
+        flatpak_arch=flatpak_arch,
+        app_ref=app_ref,
+        output_image=output_image,
+        latest_image=latest_image,
+        substitution_env=substitution_env,
+        build_env=build_env,
+        specs=specs,
+        spec_revisions=spec_revisions,
+        spec_build_dir=spec_build_dir,
+        artifact_cache_dir=artifact_cache_dir,
+        final_build_dir=final_build_dir,
+        rpmbuild_defines=rpmbuild_defines,
+        builder_packages=builder_packages,
+        builder_image=builder_image,
+        build_image=build_image,
+        metadata=metadata,
+    )
+
+
+def _ensure_flatpak_builders(
+    context: ResolvedManifestContext,
+    plans: tuple[FlatpakBuildPlan, ...],
+    *,
+    cache_only: bool,
+) -> None:
+    orchestrator_dnf_base = _orchestrator_dnf_base(context)
+    for plan in plans:
+        if _image_exists(context.podman, plan.builder_image):
+            log(f"Reusing flatpak builder image: {plan.builder_image}")
+            continue
+        if cache_only:
+            raise ConfigError(
+                f"flatpak builder image is not cached: {plan.builder_image}"
+            )
+
         builder_rpm_files = _download_block_packages(
             orchestrator_dnf_base,
-            builder_packages,
+            plan.builder_packages,
             package_dir=context.package_dir,
             resolve_dependencies=True,
         )
-        log(f"Creating flatpak builder image: {builder_image}")
+        log(f"Creating flatpak builder image: {plan.builder_image}")
         _create_builder_image(
             podman=context.podman,
             buildah=_require_buildah(context.buildah),
@@ -280,90 +380,119 @@ def _build_flatpak_with_context(
             dnf_cache_dir=context.dnf_cache_dir,
             dnf_persist_dir=context.dnf_persist_dir,
             dnf_log_dir=context.dnf_log_dir,
-            image=builder_image,
+            image=plan.builder_image,
             package_dir=context.package_dir,
             rpm_files=builder_rpm_files,
             releasever=context.releasever,
         )
 
-    build_image = _local_image(
-        context.local_prefix,
-        "builds",
-        f"{context.distro}-flatpak-{app_name}-{spec_hash}",
-    )
-    if _image_exists(context.podman, build_image):
-        log(f"Reusing flatpak build output image: {build_image}")
-        rpm_files, _has_files = _output_metadata_in_image(context.podman, build_image)
-    elif cache_only:
-        raise ConfigError(f"flatpak build output image is not cached: {build_image}")
-    else:
-        log(f"Running flatpak RPM build: {block} (:{build_image.rsplit(':', 1)[-1]})")
-        build_output = _build_specs_output_image(
-            podman=context.podman,
-            orchestrator=builder_image,
-            image=build_image,
-            build_dir=spec_build_dir,
-            artifact_cache_dir=artifact_cache_dir,
-            ccache_dir=context.ccache_dir,
-            card_name=block,
-            card_source=card_path,
-            card_env=substitution_env,
-            specs=specs,
-            prepare_script="",
-            arch=context.arch,
-            spec_source_cache_dir=context.spec_source_cache_dir,
-            source_revisions=spec_revisions,
-            rpmbuild_defines=rpmbuild_defines,
-            build_env=build_env,
-        )
-        if not build_output.rpm_files:
-            raise ConfigError(f"{card_path}: flatpak specs produced no RPMs")
-        rpm_files, _has_files = _output_metadata_in_image(context.podman, build_image)
 
-    if not rpm_files:
-        raise ConfigError(f"{card_path}: flatpak build output has no RPMs")
+def _ensure_flatpak_rpm_builds(
+    context: ResolvedManifestContext,
+    plans: tuple[FlatpakBuildPlan, ...],
+    *,
+    cache_only: bool,
+) -> tuple[FlatpakBuildPlan, ...]:
+    results = []
+    for plan in plans:
+        if _image_exists(context.podman, plan.build_image):
+            log(f"Reusing flatpak build output image: {plan.build_image}")
+            rpm_files, _has_files = _output_metadata_in_image(
+                context.podman,
+                plan.build_image,
+            )
+        elif cache_only:
+            raise ConfigError(
+                f"flatpak build output image is not cached: {plan.build_image}"
+            )
+        else:
+            log(
+                f"Running flatpak RPM build: {plan.block} "
+                f"(:{plan.build_image.rsplit(':', 1)[-1]})"
+            )
+            build_output = _build_specs_output_image(
+                podman=context.podman,
+                orchestrator=plan.builder_image,
+                image=plan.build_image,
+                build_dir=plan.spec_build_dir,
+                artifact_cache_dir=plan.artifact_cache_dir,
+                ccache_dir=context.ccache_dir,
+                card_name=plan.block,
+                card_source=plan.card_path,
+                card_env=plan.substitution_env,
+                specs=plan.specs,
+                prepare_script="",
+                arch=context.arch,
+                spec_source_cache_dir=context.spec_source_cache_dir,
+                source_revisions=plan.spec_revisions,
+                rpmbuild_defines=plan.rpmbuild_defines,
+                build_env=plan.build_env,
+            )
+            if not build_output.rpm_files:
+                raise ConfigError(
+                    f"{plan.card_path}: flatpak specs produced no RPMs"
+                )
+            rpm_files, _has_files = _output_metadata_in_image(
+                context.podman,
+                plan.build_image,
+            )
 
-    metadata = _flatpak_metadata(
-        card.flatpak,
-        branch=branch,
-        flatpak_arch=flatpak_arch,
-    )
-    _write_flatpak_containerfile(
-        final_build_dir=final_build_dir,
-        flatpak_dir=flatpak_dir,
-        card=card,
-        build_image=build_image,
-        orchestrator=context.orchestrator,
-        metadata=metadata,
-        app_ref=app_ref,
-        branch=branch,
-        flatpak_arch=flatpak_arch,
-    )
-    if cache_only and _image_exists(context.podman, output_image):
-        log(f"Reusing flatpak image: {output_image}")
-    elif cache_only:
-        raise ConfigError(f"flatpak image is not cached: {output_image}")
-    else:
-        _run_flatpak_image_build(
-            context.podman,
-            _require_buildah(context.buildah),
-            final_build_dir,
-            output_image,
-            metadata,
-            card.flatpak.app_id,
+        if not rpm_files:
+            raise ConfigError(f"{plan.card_path}: flatpak build output has no RPMs")
+        results.append(replace(plan, rpm_files=rpm_files))
+    return tuple(results)
+
+
+def _ensure_flatpak_images(
+    context: ResolvedManifestContext,
+    plans: tuple[FlatpakBuildPlan, ...],
+    *,
+    cache_only: bool,
+) -> tuple[FlatpakBuildResult, ...]:
+    results = []
+    for plan in plans:
+        _write_flatpak_containerfile(
+            final_build_dir=plan.final_build_dir,
+            flatpak_dir=plan.flatpak_dir,
+            card=plan.card,
+            build_image=plan.build_image,
+            orchestrator=context.orchestrator,
+            metadata=plan.metadata,
+            app_ref=plan.app_ref,
+            branch=plan.branch,
+            flatpak_arch=plan.flatpak_arch,
         )
-    subprocess.run([context.podman, "tag", output_image, latest_image], check=True)
-    return FlatpakBuildResult(
-        app_id=card.flatpak.app_id,
-        branch=branch,
-        ref=app_ref,
-        image=output_image,
-        latest_image=latest_image,
-        build_image=build_image,
-        builder_image=builder_image,
-        podman=context.podman,
-        orchestrator=context.orchestrator,
-    )
+        if cache_only and _image_exists(context.podman, plan.output_image):
+            log(f"Reusing flatpak image: {plan.output_image}")
+        elif cache_only:
+            raise ConfigError(f"flatpak image is not cached: {plan.output_image}")
+        else:
+            _run_flatpak_image_build(
+                context.podman,
+                _require_buildah(context.buildah),
+                plan.final_build_dir,
+                plan.output_image,
+                plan.metadata,
+                plan.card.flatpak.app_id,
+            )
+        subprocess.run(
+            [context.podman, "tag", plan.output_image, plan.latest_image],
+            check=True,
+        )
+        results.append(
+            FlatpakBuildResult(
+                app_id=plan.card.flatpak.app_id,
+                branch=plan.branch,
+                ref=plan.app_ref,
+                image=plan.output_image,
+                latest_image=plan.latest_image,
+                build_image=plan.build_image,
+                builder_image=plan.builder_image,
+                podman=context.podman,
+                orchestrator=context.orchestrator,
+            )
+        )
+    return tuple(results)
 
 
 def _reject_unknown_keys(path: Path, data: dict[str, Any], allowed: set[str], prefix: str = "") -> None:
