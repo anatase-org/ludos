@@ -1063,6 +1063,14 @@ specs:
                 "--pull=false",
                 "--tag",
                 "localhost/flatpaks:f44-x86_64-kate",
+                "--label",
+                "org.flatpak.ref=app/org.kde.kate/x86_64/f44",
+                "--label",
+                "org.flatpak.metadata=metadata-body\n",
+                "--label",
+                "org.freedesktop.appstream.appdata=<component/>",
+                "--label",
+                "org.freedesktop.appstream.icon-64=data:image/png;base64,AA==",
                 "--file",
                 str(build_dir / "Containerfile.final"),
                 str(build_dir),
@@ -1079,6 +1087,7 @@ specs:
         )
         self.assertTrue(all("buildah" not in command for command in streamed))
         self.assertTrue(all("buildah" not in command for command, _kwargs in runs))
+        self.assertIn("org.flatpak.metadata=metadata-body\n", streamed[1])
         appstream_labels.assert_called_once_with(
             "podman",
             build_dir,
@@ -1089,22 +1098,7 @@ specs:
         podman_cp.assert_not_called()
         self.assertIn("FROM scratch", final_containerfile)
         self.assertIn("COPY --from=sha256:buildimageid /out/ /", final_containerfile)
-        self.assertIn(
-            'LABEL org.flatpak.ref="app/org.kde.kate/x86_64/f44"',
-            final_containerfile,
-        )
-        self.assertIn(
-            'LABEL org.flatpak.metadata="metadata-body\\n"',
-            final_containerfile,
-        )
-        self.assertIn(
-            'LABEL org.freedesktop.appstream.appdata="<component/>"',
-            final_containerfile,
-        )
-        self.assertIn(
-            'LABEL org.freedesktop.appstream.icon-64="data:image/png;base64,AA=="',
-            final_containerfile,
-        )
+        self.assertNotIn("LABEL ", final_containerfile)
 
     def test_stage_flatpak_files_copies_local_files_after_build(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

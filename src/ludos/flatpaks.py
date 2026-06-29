@@ -1366,7 +1366,6 @@ def _run_flatpak_image_build(
         _write_flatpak_final_containerfile(
             final_containerfile,
             build_image_id=build_image_id,
-            labels=labels,
         )
 
         command = _flatpak_final_image_build_command(
@@ -1374,6 +1373,7 @@ def _run_flatpak_image_build(
             final_containerfile,
             build_dir,
             image,
+            labels,
         )
         returncode, _output = _run_streamed_command(command)
         if returncode != 0:
@@ -1432,13 +1432,20 @@ def _flatpak_final_image_build_command(
     containerfile: Path,
     build_dir: Path,
     image: str,
+    labels: tuple[tuple[str, str], ...],
 ) -> list[str]:
+    label_args = [
+        argument
+        for key, value in labels
+        for argument in ("--label", f"{key}={value}")
+    ]
     return [
         podman,
         "build",
         "--pull=false",
         "--tag",
         image,
+        *label_args,
         "--file",
         str(containerfile),
         str(build_dir),
@@ -1449,12 +1456,10 @@ def _write_flatpak_final_containerfile(
     containerfile: Path,
     *,
     build_image_id: str,
-    labels: tuple[tuple[str, str], ...],
 ) -> None:
     lines = [
         "FROM scratch",
         f"COPY --from={build_image_id} /out/ /",
-        *(f"LABEL {key}={json.dumps(value)}" for key, value in labels),
     ]
     containerfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
