@@ -135,6 +135,47 @@ def build_flatpak(
             _remove_tree(context.dnf_workspace_dir, podman=context.podman)
 
 
+def build_flatpaks(
+    manifest_path: Path,
+    cards_dir: Path | None = None,
+    cache_dir: Path | None = None,
+    cache_version: str | None = None,
+    cache_only: bool = False,
+    ccache: bool = True,
+) -> tuple[FlatpakBuildResult, ...]:
+    context: ResolvedManifestContext | None = None
+    try:
+        context = resolve_manifest_context(
+            manifest_path,
+            cards_dir=cards_dir,
+            cache_dir=cache_dir,
+            cache_version=cache_version,
+            cache_only=cache_only,
+            ccache=ccache,
+        )
+        if context.validation.missing_flatpaks:
+            missing = ", ".join(context.validation.missing_flatpaks)
+            raise ConfigError(
+                f"{manifest_path}: missing flatpak definitions: {missing}"
+            )
+        flatpak_refs = context.validation.manifest.flatpaks
+        if not flatpak_refs:
+            raise ConfigError(
+                f"{manifest_path}: 'flatpaks' must contain at least one item"
+            )
+        return tuple(
+            _build_flatpak_with_context(
+                context,
+                _manifest_flatpak_path(flatpak_ref, context.root_dir),
+                cache_only=cache_only,
+            )
+            for flatpak_ref in flatpak_refs
+        )
+    finally:
+        if context is not None:
+            _remove_tree(context.dnf_workspace_dir, podman=context.podman)
+
+
 def _build_flatpak_with_context(
     context: ResolvedManifestContext,
     flatpak_path: Path,
@@ -409,6 +450,13 @@ def _flatpak_card_path(flatpak_path: Path) -> Path:
             return yml_path
         raise ConfigError(f"{path}: missing card.yaml")
     return path
+
+
+def _manifest_flatpak_path(flatpak_ref: str, root_dir: Path) -> Path:
+    path = Path(flatpak_ref)
+    if path.is_absolute():
+        return path
+    return root_dir / path
 
 
 def _flatpak_name(flatpak_dir: Path) -> str:

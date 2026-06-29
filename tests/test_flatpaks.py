@@ -3,10 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from ludos.__main__ import build_parser
+from ludos.__main__ import build_command, build_parser
 from ludos.flatpaks import (
     FlatpakCard,
+    build_flatpaks,
     _flatpak_build_env,
     _flatpak_commit_metadata_labels,
     _flatpak_metadata,
@@ -15,7 +18,7 @@ from ludos.flatpaks import (
     _substitute_specs,
     _write_flatpak_containerfile,
 )
-from ludos.model import ConfigError, SpecBuild
+from ludos.model import ConfigError, Manifest, SpecBuild, validate_manifest
 
 
 class FlatpakParserTests(unittest.TestCase):
@@ -27,6 +30,16 @@ class FlatpakParserTests(unittest.TestCase):
         )
 
         self.assertEqual(args.flatpak, Path("flatpaks/kate"))
+        self.assertIsNone(args.card)
+        self.assertFalse(args.flatpaks)
+
+    def test_build_parser_accepts_flatpaks_target(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(["build", "--flatpaks", "anatase.yml"])
+
+        self.assertTrue(args.flatpaks)
+        self.assertIsNone(args.flatpak)
         self.assertIsNone(args.card)
 
     def test_build_parser_rejects_card_and_flatpak_together(self) -> None:
@@ -43,6 +56,170 @@ class FlatpakParserTests(unittest.TestCase):
                     "anatase.yml",
                 ]
             )
+
+    def test_build_parser_rejects_flatpaks_and_flatpak_together(self) -> None:
+        parser = build_parser()
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "build",
+                    "--flatpaks",
+                    "--flatpak",
+                    "flatpaks/kate",
+                    "anatase.yml",
+                ]
+            )
+
+    def test_build_command_calls_build_flatpaks(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "build",
+                "--flatpaks",
+                "--cache",
+                "--cache-dir",
+                "cache",
+                "--version",
+                "20260629",
+                "--no-ccache",
+                "anatase.yml",
+            ]
+        )
+        result = SimpleNamespace(
+            ref="app/org.kde.kate/x86_64/f44",
+            image="localhost/org.kde.kate:f44",
+            latest_image="localhost/org.kde.kate:latest",
+        )
+
+        with (
+            patch("ludos.__main__.show_logo"),
+            patch("ludos.__main__.build_flatpaks", return_value=(result,)) as build,
+            patch("ludos.__main__.log") as log,
+        ):
+            exit_code = build_command(args)
+
+        self.assertEqual(exit_code, 0)
+        build.assert_called_once_with(
+            Path("anatase.yml"),
+            cards_dir=None,
+            cache_dir=Path("cache"),
+            cache_version="20260629",
+            cache_only=True,
+            ccache=False,
+        )
+        self.assertIn(
+            "Built flatpak app/org.kde.kate/x86_64/f44",
+            log.call_args.args[0],
+        )
+
+    def test_manifest_parser_accepts_flatpaks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            manifest_path = self._write_manifest(
+                Path(temp),
+                flatpaks=("flatpaks/kate",),
+            )
+
+            manifest = Manifest.from_file(manifest_path)
+
+        self.assertEqual(manifest.flatpaks, ("flatpaks/kate",))
+
+    def test_validate_manifest_reports_missing_flatpaks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            manifest_path = self._write_manifest(
+                Path(temp),
+                flatpaks=("flatpaks/kate", "flatpaks/missing"),
+                create_flatpaks=("flatpaks/kate",),
+            )
+
+            validation = validate_manifest(manifest_path)
+
+        self.assertEqual(validation.missing_flatpaks, ("flatpaks/missing",))
+        self.assertFalse(validation.ok)
+
+    def test_build_flatpaks_builds_manifest_entries_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_path = root / "anatase.yml"
+            context = SimpleNamespace(
+                validation=SimpleNamespace(
+                    missing_flatpaks=tuple(),
+                    manifest=SimpleNamespace(
+                        flatpaks=("flatpaks/kate", "flatpaks/ark/card.yaml")
+                    )
+                ),
+                root_dir=root,
+                dnf_workspace_dir=root / "dnf-workspace",
+                podman="podman",
+            )
+            results = (SimpleNamespace(ref="kate"), SimpleNamespace(ref="ark"))
+            seen: list[Path] = []
+
+            def build_one(
+                _context: object,
+                flatpak_path: Path,
+                **_kwargs: object,
+            ) -> object:
+                seen.append(flatpak_path)
+                return results[len(seen) - 1]
+
+            with (
+                patch("ludos.flatpaks.resolve_manifest_context", return_value=context),
+                patch(
+                    "ludos.flatpaks._build_flatpak_with_context",
+                    side_effect=build_one,
+                ),
+            ):
+                built = build_flatpaks(manifest_path)
+
+        self.assertEqual(built, results)
+        self.assertEqual(
+            seen,
+            [
+                root / "flatpaks/kate",
+                root / "flatpaks/ark/card.yaml",
+            ],
+        )
+
+    def test_build_flatpaks_rejects_manifest_without_flatpaks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            context = SimpleNamespace(
+                validation=SimpleNamespace(
+                    missing_flatpaks=tuple(),
+                    manifest=SimpleNamespace(flatpaks=tuple()),
+                ),
+                root_dir=root,
+                dnf_workspace_dir=root / "dnf-workspace",
+                podman="podman",
+            )
+
+            with (
+                patch("ludos.flatpaks.resolve_manifest_context", return_value=context),
+                self.assertRaisesRegex(ConfigError, "flatpaks"),
+            ):
+                build_flatpaks(root / "anatase.yml")
+
+    def test_build_flatpaks_rejects_missing_manifest_flatpaks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            context = SimpleNamespace(
+                validation=SimpleNamespace(
+                    missing_flatpaks=("flatpaks/missing",),
+                    manifest=SimpleNamespace(flatpaks=("flatpaks/missing",)),
+                ),
+                root_dir=root,
+                dnf_workspace_dir=root / "dnf-workspace",
+                podman="podman",
+            )
+
+            with (
+                patch("ludos.flatpaks.resolve_manifest_context", return_value=context),
+                patch("ludos.flatpaks._build_flatpak_with_context") as build,
+                self.assertRaisesRegex(ConfigError, "missing flatpak definitions"),
+            ):
+                build_flatpaks(root / "anatase.yml")
+
+        build.assert_not_called()
 
     def test_card_parser_accepts_metadata_hooks_and_specs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -143,6 +320,45 @@ specs:
             substituted[0].spec,
             "git+https://example.test/kate:kate.spec#branch=f44",
         )
+
+    def _write_manifest(
+        self,
+        root: Path,
+        *,
+        flatpaks: tuple[str, ...],
+        create_flatpaks: tuple[str, ...] | None = None,
+    ) -> Path:
+        create_flatpaks = flatpaks if create_flatpaks is None else create_flatpaks
+        (root / "cards").mkdir()
+        (root / "cards/bootstrap.yml").write_text("version: 1\n", encoding="utf-8")
+        (root / "cards/base.yml").write_text("version: 1\n", encoding="utf-8")
+        for flatpak in create_flatpaks:
+            flatpak_path = root / flatpak
+            card_path = (
+                flatpak_path if flatpak_path.suffix else flatpak_path / "card.yaml"
+            )
+            card_path.parent.mkdir(parents=True, exist_ok=True)
+            card_path.write_text("version: 1\n", encoding="utf-8")
+        manifest_path = root / "anatase.yml"
+        manifest_path.write_text(
+            "\n".join(
+                [
+                    "version: 1",
+                    "releasever: '44'",
+                    "distro: f$releasever-$arch",
+                    "orchestrator: quay.io/fedora/fedora:$releasever",
+                    "bootstrap: cards/bootstrap.yml",
+                    "repos: []",
+                    "cards:",
+                    "  - cards/base.yml",
+                    "flatpaks:",
+                    *(f"  - {flatpak}" for flatpak in flatpaks),
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return manifest_path
 
 
 class FlatpakAssemblyTests(unittest.TestCase):

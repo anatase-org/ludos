@@ -10,7 +10,7 @@ from pathlib import Path
 from .bootc import DEFAULT_OCI_WRITERS, bootc_create, ostree_import
 from .build import build_manifest
 from .cleanup import cleanup_local_images
-from .flatpaks import build_flatpak
+from .flatpaks import build_flatpak, build_flatpaks
 from .installer import bootc_installer
 from .logging import LOGO_STR, configure_logging, configure_tracebacks, error, log
 from .model import ConfigError, Project, validate_manifest
@@ -80,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Build a flatpak app from the selected flatpak directory or card YAML.",
+    )
+    target.add_argument(
+        "--flatpaks",
+        action="store_true",
+        help="Build every flatpak app declared by the manifest's flatpaks list.",
     )
     build.set_defaults(func=build_command)
 
@@ -546,10 +551,13 @@ def validate_command(args: argparse.Namespace) -> int:
     if result.missing_cards:
         missing = ", ".join(result.missing_cards)
         raise ConfigError(f"{args.manifest}: missing card definitions: {missing}")
+    if result.missing_flatpaks:
+        missing = ", ".join(result.missing_flatpaks)
+        raise ConfigError(f"{args.manifest}: missing flatpak definitions: {missing}")
 
     log(
         f"Manifest is valid: bootstrap, {len(result.repos)} repos, "
-        f"{len(result.cards)} cards"
+        f"{len(result.cards)} cards, {len(result.manifest.flatpaks)} flatpaks"
     )
     return 0
 
@@ -571,6 +579,22 @@ def build_command(args: argparse.Namespace) -> int:
             f"Built flatpak {result.ref}: {result.image} "
             f"(latest: {result.latest_image})"
         )
+        return 0
+
+    if args.flatpaks:
+        results = build_flatpaks(
+            args.manifest,
+            cards_dir=args.cards_dir,
+            cache_dir=args.cache_dir,
+            cache_version=args.version,
+            cache_only=args.cache,
+            ccache=not args.no_ccache,
+        )
+        for result in results:
+            log(
+                f"Built flatpak {result.ref}: {result.image} "
+                f"(latest: {result.latest_image})"
+            )
         return 0
 
     result = build_manifest(

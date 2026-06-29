@@ -145,6 +145,7 @@ class Manifest:
     bootstrap: str
     repos: tuple[RepoRef, ...]
     cards: tuple[str, ...]
+    flatpaks: tuple[str, ...] = tuple()
     name: str = ""
     orchestrator_deps: tuple[str, ...] = tuple()
     local_prefix: str = ""
@@ -165,6 +166,7 @@ class Manifest:
             bootstrap=_required_string(data, "bootstrap", path),
             repos=_repo_refs_tuple(data, "repos", path),
             cards=_required_string_tuple(data, "cards", path),
+            flatpaks=_string_tuple(data, "flatpaks", path),
             name=_optional_string(data, "name", path),
             local_prefix=_optional_string(data, "local_prefix", path),
             labels=_string_dict(data, "labels", path),
@@ -182,6 +184,7 @@ class ManifestValidation:
     missing_bootstrap: str
     missing_repos: tuple[str, ...]
     missing_cards: tuple[str, ...]
+    missing_flatpaks: tuple[str, ...] = tuple()
 
     @property
     def ok(self) -> bool:
@@ -189,6 +192,7 @@ class ManifestValidation:
             not self.missing_bootstrap
             and not self.missing_repos
             and not self.missing_cards
+            and not self.missing_flatpaks
         )
 
 
@@ -230,6 +234,12 @@ def validate_manifest(
         card = Card.from_file(card_path)
         cards.append(card)
 
+    missing_flatpaks = []
+    for flatpak_ref in manifest.flatpaks:
+        flatpak_path = _resolve_flatpak_path(flatpak_ref, root_dir)
+        if not flatpak_path.exists():
+            missing_flatpaks.append(flatpak_ref)
+
     return ManifestValidation(
         manifest=manifest,
         bootstrap=bootstrap,
@@ -238,6 +248,7 @@ def validate_manifest(
         missing_bootstrap=missing_bootstrap,
         missing_repos=tuple(missing_repos),
         missing_cards=tuple(missing_cards),
+        missing_flatpaks=tuple(missing_flatpaks),
     )
 
 
@@ -280,6 +291,23 @@ def _resolve_repo_path(repo_ref: str, root_dir: Path) -> Path:
         return path
 
     return path.with_suffix(".repo")
+
+
+def _resolve_flatpak_path(flatpak_ref: str, root_dir: Path) -> Path:
+    path = Path(flatpak_ref)
+    if not path.is_absolute():
+        path = root_dir / path
+
+    if path.suffix in (".yml", ".yaml"):
+        return path
+
+    if path.is_dir():
+        for card_path in (path / "card.yaml", path / "card.yml"):
+            if card_path.exists():
+                return card_path
+        return path / "card.yaml"
+
+    return path / "card.yaml"
 
 
 def _validate_repo_vars(repo_ref: RepoRef, env: dict[str, str | int]) -> None:
