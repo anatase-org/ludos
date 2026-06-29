@@ -296,7 +296,7 @@ postprocess: |
         self.assertIn("appstreamcli compose --verbose --prefix /out/files --origin flatpak --components \"$app_id\"", containerfile)
         self.assertIn("bundle = ET.SubElement(component, 'bundle', {'type': 'flatpak'})", containerfile)
         self.assertIn("bundle.text = app_ref", containerfile)
-        self.assertIn("for dir in mime dbus-1 gnome-shell krunner app-info; do", containerfile)
+        self.assertIn("for dir in mime dbus-1 gnome-shell krunner; do", containerfile)
         self.assertIn("FROM scratch", containerfile)
         self.assertIn("LABEL org.flatpak.ref=", containerfile)
         self.assertIn("LABEL org.flatpak.commit-metadata.xa.metadata=", containerfile)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 import shlex
 import shutil
@@ -304,9 +305,11 @@ def _build_flatpak_with_context(
     else:
         _run_flatpak_image_build(
             context.podman,
+            _require_buildah(context.buildah),
             final_build_dir,
             output_image,
             metadata,
+            card.flatpak.app_id,
         )
     subprocess.run([context.podman, "tag", output_image, latest_image], check=True)
     return FlatpakBuildResult(
@@ -938,7 +941,7 @@ def _export_lines(config: FlatpakConfig) -> list[str]:
         "    cp -a \"$icon\" \"$target\"",
         "  done",
         "fi",
-        "for dir in mime dbus-1 gnome-shell krunner app-info; do",
+        "for dir in mime dbus-1 gnome-shell krunner; do",
         "  if [ -d \"/out/files/share/$dir\" ]; then",
         "    mkdir -p \"/out/export/share/$dir\"",
         "    cp -a \"/out/files/share/$dir/.\" \"/out/export/share/$dir/\"",
@@ -953,9 +956,11 @@ def _flatpak_body(app_id: str, flatpak_arch: str, branch: str) -> str:
 
 def _run_flatpak_image_build(
     podman: str,
+    buildah: str,
     build_dir: Path,
     image: str,
     metadata: str,
+    app_id: str,
 ) -> None:
     containerfile = build_dir / "Containerfile"
     command = [
@@ -973,6 +978,80 @@ def _run_flatpak_image_build(
     returncode = subprocess.run(command, check=False).returncode
     if returncode != 0:
         raise ConfigError(f"flatpak image build failed with exit status {returncode}")
+    appstream_labels = _flatpak_appstream_labels(podman, build_dir, image, app_id)
+    if not appstream_labels:
+        return
+
+    container = subprocess.run(
+        [buildah, "from", "--quiet", image],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    try:
+        command = [buildah, "config"]
+        for key, value in appstream_labels.items():
+            command.extend(["--label", f"{key}={value}"])
+        command.append(container)
+        subprocess.run(command, check=True)
+        subprocess.run([buildah, "commit", "--rm", "--quiet", "--format", "oci", container, image], check=True)
+        container = ""
+    finally:
+        if container:
+            subprocess.run([buildah, "rm", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _flatpak_appstream_labels(
+    podman: str,
+    build_dir: Path,
+    image: str,
+    app_id: str,
+) -> dict[str, str]:
+    label_dir = build_dir / "appstream-labels"
+    _remove_tree(label_dir)
+    label_dir.mkdir(parents=True, exist_ok=True)
+    labels = {}
+
+    container = subprocess.run(
+        [podman, "create", image],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    try:
+        appstream_gz = label_dir / f"{app_id}.xml.gz"
+        if _podman_cp(podman, container, f"/files/share/app-info/xmls/{app_id}.xml.gz", appstream_gz):
+            appstream_xml = gzip.decompress(appstream_gz.read_bytes()).decode("utf-8")
+            labels["org.freedesktop.appstream.appdata"] = _compact_xml(appstream_xml)
+
+        for size in ("64", "128"):
+            icon = label_dir / f"{app_id}-{size}.png"
+            for source in (
+                f"/files/share/app-info/icons/flatpak/{size}x{size}/{app_id}.png",
+                f"/files/share/icons/hicolor/{size}x{size}/apps/{app_id}.png",
+            ):
+                if _podman_cp(podman, container, source, icon):
+                    data = base64.b64encode(icon.read_bytes()).decode()
+                    labels[f"org.freedesktop.appstream.icon-{size}"] = f"data:image/png;base64,{data}"
+                    break
+    finally:
+        subprocess.run([podman, "rm", "-f", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    return labels
+
+
+def _compact_xml(value: str) -> str:
+    return " ".join(line.strip() for line in value.splitlines())
+
+
+def _podman_cp(podman: str, container: str, source: str, target: Path) -> bool:
+    result = subprocess.run(
+        [podman, "cp", f"{container}:{source}", str(target)],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
 
 
 def _hash_lines(values: tuple[str, ...]) -> str:
