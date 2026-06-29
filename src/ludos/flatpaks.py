@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
 import shlex
 import shutil
+import struct
 import subprocess
 import time
 from dataclasses import dataclass, replace
@@ -603,6 +605,7 @@ def _write_flatpak_containerfile(
     staged_file_count = _stage_flatpak_files(card, flatpak_dir, files_dir)
     containerfile = final_build_dir / "Containerfile"
     timestamp = str(int(time.time()))
+    commit_metadata_labels = _flatpak_commit_metadata_labels(metadata, app_ref)
     lines = [
         f"FROM {build_image} AS rpms",
         f"FROM {orchestrator} AS build",
@@ -658,6 +661,10 @@ def _write_flatpak_containerfile(
             "COPY --from=build /out/ /",
             f"LABEL org.flatpak.ref={json.dumps(app_ref)}",
             'LABEL org.flatpak.metadata="$LUDOS_FLATPAK_METADATA"',
+            *(
+                f"LABEL {key}={json.dumps(value)}"
+                for key, value in commit_metadata_labels.items()
+            ),
             f"LABEL org.flatpak.subject={json.dumps(f'Export {card.flatpak.app_id}')}",
             f"LABEL org.flatpak.body={json.dumps(_flatpak_body(card.flatpak.app_id, flatpak_arch, branch))}",
             f"LABEL org.flatpak.timestamp={json.dumps(timestamp)}",
@@ -668,6 +675,39 @@ def _write_flatpak_containerfile(
     )
     containerfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
     log(f"Wrote flatpak Containerfile: {containerfile}")
+
+
+def _flatpak_commit_metadata_labels(metadata: str, app_ref: str) -> dict[str, str]:
+    return {
+        "org.flatpak.commit-metadata.xa.metadata": _gvariant_string_variant_b64(metadata),
+        "org.flatpak.commit-metadata.xa.ref": _gvariant_string_variant_b64(app_ref),
+        "org.flatpak.commit-metadata.ostree.ref-binding": _gvariant_strv_variant_b64((app_ref,)),
+        "org.flatpak.commit-metadata.ostree.collection-binding": _gvariant_string_variant_b64(""),
+        "org.flatpak.commit-metadata.xa.download-size": _gvariant_uint64_variant_b64(0),
+        "org.flatpak.commit-metadata.xa.installed-size": _gvariant_uint64_variant_b64(0),
+    }
+
+
+def _gvariant_string_variant_b64(value: str) -> str:
+    return base64.b64encode(value.encode() + b"\0\0s").decode()
+
+
+def _gvariant_uint64_variant_b64(value: int) -> str:
+    return base64.b64encode(struct.pack("<Q", value) + b"\0t").decode()
+
+
+def _gvariant_strv_variant_b64(values: tuple[str, ...]) -> str:
+    body = bytearray()
+    offsets = []
+    for value in values:
+        body.extend(value.encode())
+        body.append(0)
+        offsets.append(len(body))
+    if any(offset > 255 for offset in offsets):
+        raise ConfigError("flatpak commit metadata string array is too large")
+    body.extend(offsets)
+    body.extend(b"\0as")
+    return base64.b64encode(bytes(body)).decode()
 
 
 def _stage_flatpak_files(card: FlatpakCard, flatpak_dir: Path, files_dir: Path) -> int:

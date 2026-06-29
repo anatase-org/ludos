@@ -7,6 +7,7 @@ from pathlib import Path
 from ludos.__main__ import build_parser
 from ludos.flatpaks import (
     FlatpakCard,
+    _flatpak_commit_metadata_labels,
     _flatpak_metadata,
     _stage_flatpak_files,
     _substitute_specs,
@@ -241,9 +242,35 @@ postprocess: |
         self.assertIn("for dir in mime dbus-1 gnome-shell krunner app-info; do", containerfile)
         self.assertIn("FROM scratch", containerfile)
         self.assertIn("LABEL org.flatpak.ref=", containerfile)
+        self.assertIn("LABEL org.flatpak.commit-metadata.xa.metadata=", containerfile)
+        self.assertIn("LABEL org.flatpak.commit-metadata.xa.ref=", containerfile)
+        self.assertIn("LABEL org.flatpak.commit-metadata.ostree.ref-binding=", containerfile)
         self.assertIn("LABEL org.flatpak.subject=", containerfile)
         self.assertIn("LABEL org.flatpak.body=", containerfile)
         self.assertIn("LABEL org.flatpak.timestamp=", containerfile)
+
+    def test_commit_metadata_labels_match_flatpak_oci_shape(self) -> None:
+        labels = _flatpak_commit_metadata_labels(
+            "[Application]\nname=org.kde.kate\n",
+            "app/org.kde.kate/x86_64/f44",
+        )
+
+        self.assertEqual(
+            labels["org.flatpak.commit-metadata.xa.metadata"],
+            "W0FwcGxpY2F0aW9uXQpuYW1lPW9yZy5rZGUua2F0ZQoAAHM=",
+        )
+        self.assertEqual(
+            labels["org.flatpak.commit-metadata.xa.ref"],
+            "YXBwL29yZy5rZGUua2F0ZS94ODZfNjQvZjQ0AABz",
+        )
+        self.assertEqual(
+            labels["org.flatpak.commit-metadata.ostree.ref-binding"],
+            "YXBwL29yZy5rZGUua2F0ZS94ODZfNjQvZjQ0ABwAYXM=",
+        )
+        self.assertEqual(
+            labels["org.flatpak.commit-metadata.ostree.collection-binding"],
+            "AABz",
+        )
 
     def test_containerfile_rewrites_desktop_icon_for_rename_icon(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
