@@ -13,7 +13,7 @@ from typing import Any
 
 from .build import (
     _card_specs_hash,
-    _create_build_output_image,
+    _build_specs_output_image,
     _create_builder_image,
     _download_block_packages,
     _identifier,
@@ -24,7 +24,6 @@ from .build import (
     _require_buildah,
     _resolve_packages,
     _resolve_staged_spec_builder_packages,
-    _run_specs_build,
     _stage_card_specs,
     _substitute_variables,
     _unique_packages,
@@ -34,6 +33,7 @@ from .logging import log
 from .model import (
     ConfigError,
     SpecBuild,
+    _env_dict,
     _load_mapping,
     _optional_string,
     _required_string,
@@ -78,6 +78,7 @@ class FlatpakConfig:
 class FlatpakCard:
     version: int
     flatpak: FlatpakConfig
+    env: dict[str, str | int]
     build_deps: tuple[str, ...]
     specs: tuple[SpecBuild, ...]
     files: tuple[str, ...] = tuple()
@@ -87,10 +88,11 @@ class FlatpakCard:
     @classmethod
     def from_file(cls, path: Path) -> "FlatpakCard":
         data = _load_mapping(path)
-        allowed = {"version", "flatpak", "build-deps", "specs", "files", "postprocess"}
+        allowed = {"version", "flatpak", "env", "build-deps", "specs", "files", "postprocess"}
         _reject_unknown_keys(path, data, allowed)
         version = _required_version(data, path)
         flatpak = _flatpak_config(data, path)
+        env = _env_dict(data, path, include_default=False)
         build_deps = _required_string_tuple(data, "build-deps", path)
         specs = _required_spec_builds_tuple(data, "specs", path)
         files = _string_tuple(data, "files", path)
@@ -98,6 +100,7 @@ class FlatpakCard:
         return cls(
             version=version,
             flatpak=flatpak,
+            env=env,
             build_deps=build_deps,
             specs=specs,
             files=files,
@@ -149,8 +152,9 @@ def _build_flatpak_with_context(
     latest_image = f"localhost/{card.flatpak.app_id}:latest"
 
     log(f"Building flatpak {card.flatpak.app_id} for {context.distro}")
-    card_env = dict(context.manifest_env)
-    specs = _substitute_specs(card.specs, card_env)
+    substitution_env = dict(context.manifest_env)
+    build_env = _flatpak_build_env(context.manifest_env, card.env)
+    specs = _substitute_specs(card.specs, substitution_env)
     flatpak_cache_dir = context.distro_cache_dir / "flatpaks" / _identifier(app_name)
     spec_build_dir = flatpak_cache_dir / "spec-build"
     spec_scan_dir = flatpak_cache_dir / "spec-scan"
@@ -161,19 +165,24 @@ def _build_flatpak_with_context(
     spec_hash, spec_revisions = _card_specs_hash(
         card_path,
         specs,
-        card_env,
+        substitution_env,
         "",
         context.spec_source_cache_dir,
         hash_expression="",
         cache_only=cache_only,
     )
+    if build_env:
+        build_env_hash = _hash_lines(
+            tuple(f"{key}={value}" for key, value in sorted(build_env.items()))
+        )
+        spec_hash = f"{spec_hash}-{build_env_hash}"
 
     package_id_by_nevra: dict[str, tuple[str, str]] = {}
     orchestrator_dnf_base = _orchestrator_dnf_base(context)
     staged_specs = _stage_card_specs(
         card_source=card_path,
         specs=specs,
-        card_env=card_env,
+        card_env=substitution_env,
         workspace_dir=spec_scan_dir,
         arch=context.arch,
         spec_source_cache_dir=context.spec_source_cache_dir,
@@ -247,31 +256,26 @@ def _build_flatpak_with_context(
         raise ConfigError(f"flatpak build output image is not cached: {build_image}")
     else:
         log(f"Running flatpak RPM build: {block} (:{build_image.rsplit(':', 1)[-1]})")
-        build_output = _run_specs_build(
+        build_output = _build_specs_output_image(
             podman=context.podman,
             orchestrator=builder_image,
+            image=build_image,
             build_dir=spec_build_dir,
             artifact_cache_dir=artifact_cache_dir,
             ccache_dir=context.ccache_dir,
             card_name=block,
             card_source=card_path,
-            card_env=card_env,
+            card_env=substitution_env,
             specs=specs,
             prepare_script="",
             arch=context.arch,
             spec_source_cache_dir=context.spec_source_cache_dir,
             source_revisions=spec_revisions,
             rpmbuild_defines=rpmbuild_defines,
+            build_env=build_env,
         )
         if not build_output.rpm_files:
             raise ConfigError(f"{card_path}: flatpak specs produced no RPMs")
-        log(f"Creating flatpak build output image: {build_image}")
-        _create_build_output_image(
-            buildah=_require_buildah(context.buildah),
-            image=build_image,
-            rpm_dir=build_output.rpm_dir,
-            files_dir=build_output.files_dir,
-        )
         rpm_files, _has_files = _output_metadata_in_image(context.podman, build_image)
 
     if not rpm_files:
@@ -413,6 +417,23 @@ def _substitute_specs(specs: tuple[SpecBuild, ...], env: dict[str, str]) -> tupl
         replace(spec, spec=_substitute_variables(spec.spec, env))
         for spec in specs
     )
+
+
+def _flatpak_build_env(
+    manifest_env: dict[str, str],
+    flatpak_env: dict[str, str | int],
+) -> dict[str, str]:
+    env = {
+        key: manifest_env[key]
+        for key in ("arch", "releasever")
+        if key in manifest_env
+    }
+    variables = dict(manifest_env)
+    variables.update({key: str(value) for key, value in env.items()})
+    for key, value in flatpak_env.items():
+        env[key] = _substitute_variables(str(value), variables)
+        variables[key] = env[key]
+    return env
 
 
 def _orchestrator_dnf_base(context: ResolvedManifestContext) -> list[str]:

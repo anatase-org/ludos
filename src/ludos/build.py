@@ -1222,11 +1222,12 @@ def build_build_images(
                 )
                 card_env.update(prepared_env)
 
-            log(f"Running build for card: {plan.block} (:{_image_tag(plan.image)})")
+            log(f"Building output image for card: {plan.block} (:{_image_tag(plan.image)})")
             if plan.block in card_specs:
-                build_output = _run_specs_build(
+                build_output = _build_specs_output_image(
                     podman=manifest.podman,
                     orchestrator=plan.builder_image,
+                    image=plan.image,
                     build_dir=Path(manifest.card_build_dir) / _identifier(plan.block),
                     artifact_cache_dir=Path(manifest.build_artifact_cache_dir)
                     / _identifier(plan.block),
@@ -1245,9 +1246,10 @@ def build_build_images(
                     source_revisions=spec_source_revisions.get(plan.block, tuple()),
                 )
             else:
-                build_output = _run_card_build(
+                build_output = _build_card_output_image(
                     podman=manifest.podman,
                     orchestrator=plan.builder_image,
+                    image=plan.image,
                     build_dir=Path(manifest.card_build_dir) / _identifier(plan.block),
                     artifact_cache_dir=Path(manifest.build_artifact_cache_dir)
                     / _identifier(plan.block),
@@ -1263,21 +1265,12 @@ def build_build_images(
                 )
             if not build_output.rpm_files and build_output.file_count == 0:
                 log(f"No build outputs found for card: {plan.block}")
+                _remove_image(manifest.podman, plan.image)
                 continue
 
-            log(f"Creating build output image: {plan.image}")
-            _create_build_output_image(
-                buildah=_require_buildah(manifest.buildah),
-                image=plan.image,
-                rpm_dir=build_output.rpm_dir,
-                files_dir=build_output.files_dir,
-            )
             images_by_block[plan.block] = plan.image
-            rpm_files, has_files = _output_metadata_in_image(
-                manifest.podman, plan.image
-            )
-            rpm_files_by_block[plan.block] = rpm_files
-            if has_files:
+            rpm_files_by_block[plan.block] = build_output.rpm_files
+            if build_output.file_count:
                 file_blocks.add(plan.block)
 
     return BuildImageOutputs(
@@ -2305,6 +2298,15 @@ def _image_exists(podman: str, image: str) -> bool:
     return subprocess.run([podman, "image", "exists", image], check=False).returncode == 0
 
 
+def _remove_image(podman: str, image: str) -> None:
+    subprocess.run(
+        [podman, "rmi", image],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _require_buildah(buildah: str | None) -> str:
     if buildah is None:
         raise ConfigError("buildah must be installed to create card/build output images")
@@ -2864,31 +2866,6 @@ def _create_package_image(
     _create_scratch_image(buildah=buildah, image=image, body=body)
 
 
-def _create_build_output_image(
-    *,
-    buildah: str,
-    image: str,
-    rpm_dir: Path | None,
-    files_dir: Path | None,
-) -> None:
-    body = ['mkdir -p "$mount_path/rpms" "$mount_path/files"']
-    if rpm_dir is not None and rpm_dir.exists():
-        body.extend(
-            _copy_files_to_shell_dir_lines(
-                (
-                    source_path
-                    for source_path in rpm_dir.rglob("*.rpm")
-                    if not source_path.name.endswith(".src.rpm")
-                ),
-                "$mount_path/rpms",
-            )
-        )
-    if files_dir is not None and files_dir.exists():
-        body.extend(_copy_tree_to_shell_dir_lines(files_dir, "$mount_path/files"))
-
-    _create_scratch_image(buildah=buildah, image=image, body=body)
-
-
 def _copy_files_to_shell_dir_lines(
     source_paths, destination_expr: str
 ) -> list[str]:
@@ -3013,10 +2990,11 @@ def _ccache_build_prelude(ccache_dir: Path | None) -> str:
     )
 
 
-def _run_card_build(
+def _build_card_output_image(
     *,
     podman: str,
     orchestrator: str,
+    image: str,
     build_dir: Path,
     artifact_cache_dir: Path,
     ccache_dir: Path | None,
@@ -3027,12 +3005,8 @@ def _run_card_build(
 ) -> CardBuildOutput:
     card_base_dir = _card_base_dir(card_source)
     workspace_dir = build_dir / "workspace"
-    rpm_dir = build_dir / "rpms"
-    files_dir = build_dir / "files"
     _remove_tree(build_dir, podman=podman)
     workspace_dir.mkdir(parents=True)
-    rpm_dir.mkdir(parents=True)
-    files_dir.mkdir(parents=True)
     artifact_cache_dir.mkdir(parents=True, exist_ok=True)
     podman_cache_dir = artifact_cache_dir / "podman"
     podman_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -3040,68 +3014,42 @@ def _run_card_build(
     ignore_rules = _load_containerignore(card_base_dir)
     _copy_build_context(card_base_dir, workspace_dir, ignore_rules)
 
-    command = [
-        podman,
-        "run",
-        "--rm",
-        "--interactive",
-        "--privileged",
-        "--volume",
-        f"{workspace_dir}:/workspace",
-        "--volume",
-        f"{rpm_dir}:/rpms",
-        "--volume",
-        f"{files_dir}:/files",
-        "--volume",
-        f"{artifact_cache_dir}:/cache/artifacts",
-        "--volume",
-        f"{podman_cache_dir}:/cache/podman",
-        "--workdir",
-        "/workspace",
-    ]
-    for key, value in sorted(card_env.items()):
-        command.extend(["--env", f"{key}={value}"])
-    _add_ccache_builder_options(command, ccache_dir)
-    command.extend(["--env", "PS4=+ "])
-    command.extend([orchestrator, "/bin/sh", "-ex", "-s"])
-    returncode, _output = _run_streamed_command(
-        command,
-        input_text=_ccache_build_prelude(ccache_dir) + build_script + "\n",
-        line_rewriter=_workspace_path_rewriter(
-            source_dir=card_base_dir,
-            workspace_dir=workspace_dir,
-            root_dir=Path.cwd(),
+    containerfile = build_dir / "Containerfile"
+    containerfile.write_text(
+        _render_card_build_output_containerfile(
+            orchestrator=orchestrator,
+            card_env=card_env,
+            build_script=build_script,
+            ccache_dir=ccache_dir,
         ),
+        encoding="utf-8",
     )
-    if returncode != 0:
-        command_line = " ".join(shlex.quote(str(part)) for part in command)
-        raise ConfigError(f"card build failed with exit status {returncode}")
+    _run_build_output_image_build(
+        podman=podman,
+        build_dir=build_dir,
+        image=image,
+        artifact_cache_dir=artifact_cache_dir,
+        ccache_dir=ccache_dir,
+        podman_cache_dir=podman_cache_dir,
+        source_dir=card_base_dir,
+        workspace_dir=workspace_dir,
+    )
 
-    rpm_files = []
-    rpm_sources = sorted(rpm_dir.rglob("*.rpm"))
-    if not rpm_sources:
-        rpm_sources = sorted((workspace_dir / "build" / "RPMS").rglob("*.rpm"))
-    for rpm_path in rpm_sources:
-        if rpm_path.name.endswith(".src.rpm"):
-            continue
-        rpm_files.append(rpm_path.name)
-
+    rpm_files, has_files = _output_metadata_in_image(podman, image)
     log(f"Collected {len(rpm_files)} built RPMs for card: {card_name}")
-    file_count = sum(1 for path in files_dir.rglob("*") if path.is_file())
-    if file_count:
-        log(f"Collected {file_count} built files for card: {card_name}")
+    if has_files:
+        log(f"Collected built files for card: {card_name}")
     return CardBuildOutput(
         rpm_files=tuple(rpm_files),
-        file_count=file_count,
-        rpm_dir=rpm_dir,
-        files_dir=files_dir,
+        file_count=1 if has_files else 0,
     )
 
 
-def _run_specs_build(
+def _build_specs_output_image(
     *,
     podman: str,
     orchestrator: str,
+    image: str,
     build_dir: Path,
     artifact_cache_dir: Path,
     ccache_dir: Path | None,
@@ -3114,6 +3062,7 @@ def _run_specs_build(
     spec_source_cache_dir: Path,
     source_revisions: tuple[tuple[str, str], ...],
     rpmbuild_defines: tuple[str, ...] = tuple(),
+    build_env: dict[str, str] | None = None,
 ) -> CardBuildOutput:
     workspace_dir = build_dir / "workspace"
     rpm_dir = build_dir / "rpms"
@@ -3137,6 +3086,7 @@ def _run_specs_build(
     if not staged_specs:
         raise ConfigError(f"{card_source}: specs build has no specs")
 
+    run_env = dict(card_env if build_env is None else build_env)
     if prepare_script.strip():
         prepared_env = _run_specs_prepare(
             podman=podman,
@@ -3153,59 +3103,268 @@ def _run_specs_build(
         )
         if prepared_env:
             card_env.update(prepared_env)
+            run_env.update(prepared_env)
 
-    build_script = _specs_build_script(
-        staged_specs,
-        workspace_dir,
-        arch,
-        rpmbuild_defines=rpmbuild_defines,
+    _stage_spec_build_contexts(build_dir, workspace_dir, staged_specs)
+    containerfile = build_dir / "Containerfile"
+    containerfile.write_text(
+        _render_specs_build_output_containerfile(
+            orchestrator=orchestrator,
+            staged_specs=staged_specs,
+            workspace_dir=workspace_dir,
+            card_env=run_env,
+            arch=arch,
+            rpmbuild_defines=rpmbuild_defines,
+            ccache_dir=ccache_dir,
+        ),
+        encoding="utf-8",
     )
+    _run_build_output_image_build(
+        podman=podman,
+        build_dir=build_dir,
+        image=image,
+        artifact_cache_dir=artifact_cache_dir,
+        ccache_dir=ccache_dir,
+        source_dir=_card_base_dir(card_source),
+        workspace_dir=workspace_dir,
+    )
+
+    rpm_files, has_files = _output_metadata_in_image(podman, image)
+    log(f"Collected {len(rpm_files)} built RPMs for card: {card_name}")
+    if has_files:
+        log(f"Collected built files for card: {card_name}")
+    return CardBuildOutput(
+        rpm_files=rpm_files,
+        file_count=1 if has_files else 0,
+    )
+
+
+def _render_card_build_output_containerfile(
+    *,
+    orchestrator: str,
+    card_env: dict[str, str],
+    build_script: str,
+    ccache_dir: Path | None,
+) -> str:
+    body = _ccache_build_prelude(ccache_dir) + build_script.rstrip() + "\n"
+    stage = "\n".join(
+        [
+            f"FROM {orchestrator} AS build",
+            "WORKDIR /workspace",
+            "COPY workspace/ /workspace/",
+            "RUN mkdir -p /rpms /files /cache/artifacts /cache/podman",
+            _containerfile_run_shell_command(
+                _build_container_env(card_env, ccache_dir),
+                "LUDOS_CARD_BUILD",
+            ),
+            body.rstrip(),
+            "if ! find /rpms -type f -name '*.rpm' ! -name '*.src.rpm' -print -quit | grep -q .; then",
+            "  if [ -d /workspace/build/RPMS ]; then",
+            "    find /workspace/build/RPMS -type f -name '*.rpm' ! -name '*.src.rpm' -exec cp -f -t /rpms {} +",
+            "  fi",
+            "fi",
+            "LUDOS_CARD_BUILD",
+            "FROM scratch",
+            "COPY --from=build /rpms/ /rpms/",
+            "COPY --from=build /files/ /files/",
+        ]
+    )
+    return stage + "\n"
+
+
+def _render_specs_build_output_containerfile(
+    *,
+    orchestrator: str,
+    staged_specs: tuple[StagedSpec, ...],
+    workspace_dir: Path,
+    card_env: dict[str, str],
+    arch: str,
+    rpmbuild_defines: tuple[str, ...],
+    ccache_dir: Path | None,
+) -> str:
+    stage_names = _spec_build_stage_names(staged_specs)
+    lines: list[str] = []
+    for stage_name, staged in zip(stage_names, staged_specs):
+        build_script = _ccache_build_prelude(ccache_dir) + _specs_build_script(
+            (staged,),
+            workspace_dir,
+            arch,
+            rpmbuild_defines=rpmbuild_defines,
+        )
+        lines.extend(
+            [
+                f"#",
+                f"# Build: {stage_name}",
+                f"#",
+                "",
+                f"FROM {orchestrator} AS {stage_name}",
+                "WORKDIR /workspace",
+                _spec_stage_workspace_copy_line(stage_name, staged, workspace_dir),
+                "RUN mkdir -p /rpms /files /cache/artifacts",
+                _containerfile_run_shell_command(
+                    _build_container_env(card_env, ccache_dir),
+                    f"LUDOS_SPEC_BUILD_{stage_name}",
+                ),
+                build_script.rstrip(),
+                f"LUDOS_SPEC_BUILD_{stage_name}",
+            ]
+        )
+    lines.extend(
+        [
+            "FROM scratch",
+            "COPY rpms/ /rpms/",
+            "COPY files/ /files/",
+        ]
+    )
+    for stage_name in stage_names:
+        lines.extend(
+            [
+                f"COPY --from={stage_name} /rpms/ /rpms/",
+                f"COPY --from={stage_name} /files/ /files/",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _spec_build_stage_names(staged_specs: tuple[StagedSpec, ...]) -> tuple[str, ...]:
+    return tuple(
+        f"spec_{_identifier(staged.spec_path.stem)}_{index}"
+        for index, staged in enumerate(staged_specs)
+    )
+
+
+def _stage_spec_build_contexts(
+    build_dir: Path,
+    workspace_dir: Path,
+    staged_specs: tuple[StagedSpec, ...],
+) -> None:
+    context_dir = build_dir / "spec-workspaces"
+    _remove_tree(context_dir)
+    for stage_name, staged in zip(_spec_build_stage_names(staged_specs), staged_specs):
+        _copy_spec_stage_context(
+            staged.source_dir,
+            staged.spec_path,
+            context_dir / stage_name,
+        )
+
+
+def _copy_spec_stage_context(
+    source_dir: Path,
+    spec_path: Path,
+    destination_dir: Path,
+) -> None:
+    source_dir = source_dir.resolve()
+    spec_path = spec_path.resolve()
+    selected_spec = spec_path.relative_to(source_dir)
+    shutil.rmtree(destination_dir, ignore_errors=True)
+    for source_path in source_dir.rglob("*"):
+        relative = source_path.relative_to(source_dir)
+        target_path = destination_dir / relative
+        if source_path.is_dir():
+            target_path.mkdir(parents=True, exist_ok=True)
+            continue
+        if not source_path.is_file():
+            continue
+        if source_path.suffix == ".spec" and relative != selected_spec:
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+
+
+def _spec_stage_workspace_copy_line(
+    stage_name: str,
+    staged: StagedSpec,
+    workspace_dir: Path,
+) -> str:
+    relative = staged.source_dir.relative_to(workspace_dir).as_posix()
+    source = f"spec-workspaces/{stage_name}/"
+    if relative == ".":
+        return f"COPY {json.dumps(source)} {json.dumps('/workspace/')}"
+    target = f"/workspace/{relative}/"
+    return f"COPY {json.dumps(source)} {json.dumps(target)}"
+
+
+def _build_container_env(
+    card_env: dict[str, str],
+    ccache_dir: Path | None,
+) -> dict[str, str]:
+    env = dict(card_env)
+    env["PS4"] = "+ "
+    if ccache_dir is not None:
+        env["CCACHE_DIR"] = CCACHE_CONTAINER_DIR
+        env["SCCACHE_DIR"] = SCCACHE_CONTAINER_DIR
+        if "CCACHE_MAXSIZE" in os.environ:
+            env["CCACHE_MAXSIZE"] = os.environ["CCACHE_MAXSIZE"]
+        if "SCCACHE_CACHE_SIZE" in os.environ:
+            env["SCCACHE_CACHE_SIZE"] = os.environ["SCCACHE_CACHE_SIZE"]
+    return env
+
+
+def _containerfile_run_shell_command(env: dict[str, str], heredoc: str) -> str:
+    parts = ["RUN"]
+    if env:
+        parts.append("env")
+        parts.extend(
+            f"{key}={shlex.quote(value)}"
+            for key, value in sorted(env.items())
+        )
+    parts.extend(["/bin/sh", "-ex", f"<<'{heredoc}'"])
+    return " ".join(parts)
+
+
+def _run_build_output_image_build(
+    *,
+    podman: str,
+    build_dir: Path,
+    image: str,
+    artifact_cache_dir: Path,
+    ccache_dir: Path | None,
+    source_dir: Path,
+    workspace_dir: Path,
+    podman_cache_dir: Path | None = None,
+) -> None:
+    containerfile = build_dir / "Containerfile"
     command = [
         podman,
-        "run",
-        "--rm",
-        "--interactive",
-        "--privileged",
-        "--volume",
-        f"{workspace_dir}:/workspace",
-        "--volume",
-        f"{rpm_dir}:/rpms",
-        "--volume",
-        f"{files_dir}:/files",
+        "build",
+        "--layers",
+        "--pull=false",
+        "--cap-add",
+        "all",
+        "--security-opt",
+        "label=disable",
+        "--tag",
+        image,
         "--volume",
         f"{artifact_cache_dir}:/cache/artifacts",
-        "--workdir",
-        "/workspace",
     ]
-    for key, value in sorted(card_env.items()):
-        command.extend(["--env", f"{key}={value}"])
-    _add_ccache_builder_options(command, ccache_dir)
-    command.extend(["--env", "PS4=+ "])
-    command.extend([orchestrator, "/bin/sh", "-ex", "-s"])
-    returncode, _output = _run_streamed_command(
+    if podman_cache_dir is not None:
+        command.extend(["--volume", f"{podman_cache_dir}:/cache/podman"])
+    if ccache_dir is not None:
+        command.extend(["--volume", f"{ccache_dir}:{CCACHE_CONTAINER_DIR}"])
+    command.extend(
+        [
+            "--file",
+            str(containerfile),
+            str(build_dir),
+        ]
+    )
+    returncode, output = _run_streamed_command(
         command,
-        input_text=_ccache_build_prelude(ccache_dir) + build_script,
         line_rewriter=_workspace_path_rewriter(
-            source_dir=_card_base_dir(card_source),
+            source_dir=source_dir,
             workspace_dir=workspace_dir,
             root_dir=Path.cwd(),
         ),
     )
-    if returncode != 0:
-        command_line = " ".join(shlex.quote(str(part)) for part in command)
-        raise ConfigError(f"spec build failed with exit status {returncode}")
+    if returncode == 0:
+        return
 
-    rpm_files = tuple(sorted(path.name for path in rpm_dir.rglob("*.rpm")))
-    log(f"Collected {len(rpm_files)} built RPMs for card: {card_name}")
-    file_count = sum(1 for path in files_dir.rglob("*") if path.is_file())
-    if file_count:
-        log(f"Collected {file_count} built files for card: {card_name}")
-    return CardBuildOutput(
-        rpm_files=rpm_files,
-        file_count=file_count,
-        rpm_dir=rpm_dir,
-        files_dir=files_dir,
-    )
+    location = _containerfile_error_location(containerfile, output)
+    message = f"build output image build failed with exit status {returncode}"
+    if location is not None:
+        message = f"{message}\n\nThe error occurred in:\n{location}"
+    raise ConfigError(message)
 
 
 def _run_specs_prepare(
@@ -3858,6 +4017,102 @@ def _specs_build_script(
         'source_cache="/cache/artifacts/sources"',
         'mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}',
         'mkdir -p "$source_cache"',
+    ]
+    if any("i686" in staged.targets for staged in staged_specs):
+        lines.extend(_i686_rpmbuild_setup_lines())
+    wanted = tuple(
+        dict.fromkeys(package for staged in staged_specs for package in staged.packages)
+    )
+    extra_defines = " ".join(
+        f"--define {shlex.quote(define)}" for define in rpmbuild_defines
+    )
+    if extra_defines:
+        extra_defines = f" {extra_defines}"
+    lines.extend(
+        [
+            'cat > "$topdir/wanted.txt" <<\'LUDOS_WANTED_RPMS\'',
+            *wanted,
+            "LUDOS_WANTED_RPMS",
+        ]
+    )
+    for staged in staged_specs:
+        source_dir = f"/workspace/{staged.source_dir.relative_to(workspace_dir).as_posix()}"
+        spec_path = f"/workspace/{staged.spec_path.relative_to(workspace_dir).as_posix()}"
+        spec_name = staged.spec_path.name
+        spec_source_cache_name = _identifier(staged.spec_path.stem)
+        targets = " ".join(shlex.quote(target) for target in staged.targets)
+        i686_target_lines = _i686_target_environment_lines() if "i686" in staged.targets else []
+        lines.extend(
+            [
+                f"find {shlex.quote(source_dir)} -maxdepth 1 -type f ! -name '*.spec' -exec cp -f -t \"$topdir/SOURCES\" {{}} +",
+                f"cp -f {shlex.quote(spec_path)} \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
+                f"spec_source_cache=\"$source_cache/{spec_source_cache_name}\"",
+                'mkdir -p "$spec_source_cache"',
+                f"if spectool -l \"$topdir/SPECS/{shlex.quote(spec_name)}\" > \"$topdir/sources.list\"; then",
+                "  if grep -Eq '^(Source|Patch)[0-9]*:[[:space:]]+https?://' \"$topdir/sources.list\"; then",
+                "  missing_sources=0",
+                "  while IFS= read -r source_entry; do",
+                "    source_url=${source_entry#*:}",
+                "    source_url=$(printf '%s\\n' \"$source_url\" | sed 's/^[[:space:]]*//')",
+                "    case \"$source_url\" in http://*|https://*) ;; *) continue ;; esac",
+                "    source_name=${source_url##*/}",
+                "    source_name=${source_name%%\\?*}",
+                "    if [ ! -f \"$spec_source_cache/$source_name\" ]; then",
+                "      missing_sources=1",
+                "      break",
+                "    fi",
+                "  done < \"$topdir/sources.list\"",
+                "  if [ \"$missing_sources\" -eq 1 ]; then",
+                f"    spectool -g -C \"$spec_source_cache\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
+                "  fi",
+                '  find "$spec_source_cache" -maxdepth 1 -type f -exec cp -f -t "$topdir/SOURCES" {} +',
+                "  fi",
+                "fi",
+                f"for target in {targets}; do",
+                *i686_target_lines,
+                f"  echo {shlex.quote(f'Building packages from {topdir}/SPECS/{spec_name}')}",
+                *(
+                    [
+                        "  if [ \"$target\" = i686 ]; then",
+                        f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\" --define \"__meson $topdir/ludos-meson-i686\"{extra_defines}",
+                        "  else",
+                        f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"{extra_defines}",
+                        "  fi",
+                    ]
+                    if "i686" in staged.targets
+                    else [
+                        f"  rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"{extra_defines}",
+                    ]
+                ),
+                "done",
+            ]
+        )
+    lines.extend(
+        [
+            'find "$topdir/RPMS" -type f -name "*.rpm" | sort | while read -r rpm; do',
+            "  name=$(rpm -qp --queryformat '%{NAME}' \"$rpm\")",
+            "  rpm_arch=$(rpm -qp --queryformat '%{ARCH}' \"$rpm\")",
+            '  if grep -Fxq "$name.$rpm_arch" "$topdir/wanted.txt"; then',
+            '    cp -f "$rpm" /rpms/',
+            '    echo "$name.$rpm_arch" >> "$topdir/matched.txt"',
+            f"  elif [ \"$rpm_arch\" = {shlex.quote(arch)} ] || [ \"$rpm_arch\" = noarch ]; then",
+            '    if grep -Fxq "$name" "$topdir/wanted.txt"; then',
+            '      cp -f "$rpm" /rpms/',
+            '      echo "$name" >> "$topdir/matched.txt"',
+            "    fi",
+            "  fi",
+            "done",
+            'touch "$topdir/matched.txt"',
+            'while read -r wanted; do',
+            '  grep -Fxq "$wanted" "$topdir/matched.txt" || { echo "Missing built RPM for $wanted"; exit 1; }',
+            'done < "$topdir/wanted.txt"',
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _i686_rpmbuild_setup_lines() -> list[str]:
+    return [
         'cat > "$topdir/ludos-meson-i686-cross.ini" <<\'LUDOS_MESON_I686_CROSS\'',
         "[binaries]",
         "c = ['gcc', '-m32']",
@@ -3887,100 +4142,26 @@ def _specs_build_script(
         "LUDOS_MESON_I686_WRAPPER",
         'chmod +x "$topdir/ludos-meson-i686"',
     ]
-    wanted = tuple(
-        dict.fromkeys(package for staged in staged_specs for package in staged.packages)
-    )
-    extra_defines = " ".join(
-        f"--define {shlex.quote(define)}" for define in rpmbuild_defines
-    )
-    if extra_defines:
-        extra_defines = f" {extra_defines}"
-    lines.extend(
-        [
-            'cat > "$topdir/wanted.txt" <<\'LUDOS_WANTED_RPMS\'',
-            *wanted,
-            "LUDOS_WANTED_RPMS",
-        ]
-    )
-    for staged in staged_specs:
-        source_dir = f"/workspace/{staged.source_dir.relative_to(workspace_dir).as_posix()}"
-        spec_path = f"/workspace/{staged.spec_path.relative_to(workspace_dir).as_posix()}"
-        spec_name = staged.spec_path.name
-        spec_source_cache_name = _identifier(staged.spec_path.stem)
-        targets = " ".join(shlex.quote(target) for target in staged.targets)
-        lines.extend(
-            [
-                f"find {shlex.quote(source_dir)} -maxdepth 1 -type f ! -name '*.spec' -exec cp -f -t \"$topdir/SOURCES\" {{}} +",
-                f"cp -f {shlex.quote(spec_path)} \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
-                f"spec_source_cache=\"$source_cache/{spec_source_cache_name}\"",
-                'mkdir -p "$spec_source_cache"',
-                f"if spectool -l \"$topdir/SPECS/{shlex.quote(spec_name)}\" > \"$topdir/sources.list\"; then",
-                "  if grep -Eq '^(Source|Patch)[0-9]*:[[:space:]]+https?://' \"$topdir/sources.list\"; then",
-                "  missing_sources=0",
-                "  while IFS= read -r source_entry; do",
-                "    source_url=${source_entry#*:}",
-                "    source_url=$(printf '%s\\n' \"$source_url\" | sed 's/^[[:space:]]*//')",
-                "    case \"$source_url\" in http://*|https://*) ;; *) continue ;; esac",
-                "    source_name=${source_url##*/}",
-                "    source_name=${source_name%%\\?*}",
-                "    if [ ! -f \"$spec_source_cache/$source_name\" ]; then",
-                "      missing_sources=1",
-                "      break",
-                "    fi",
-                "  done < \"$topdir/sources.list\"",
-                "  if [ \"$missing_sources\" -eq 1 ]; then",
-                f"    spectool -g -C \"$spec_source_cache\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
-                "  fi",
-                '  find "$spec_source_cache" -maxdepth 1 -type f -exec cp -f -t "$topdir/SOURCES" {} +',
-                "  fi",
-                "fi",
-                f"for target in {targets}; do",
-                "  if [ \"$target\" = i686 ]; then",
-                "    export PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/share/pkgconfig",
-                "    export PKG_CONFIG_PATH=",
-                "    export BINDGEN_EXTRA_CLANG_ARGS=\"${BINDGEN_EXTRA_CLANG_ARGS:+$BINDGEN_EXTRA_CLANG_ARGS }-m32\"",
-                "    cxx_target_include=$(find /usr/include/c++ -mindepth 2 -maxdepth 2 -type d -path '*/i686-redhat-linux' -print -quit 2>/dev/null || true)",
-                "    if [ -n \"$cxx_target_include\" ]; then",
-                "      export CPLUS_INCLUDE_PATH=\"$cxx_target_include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}\"",
-                "    fi",
-                "    export LDFLAGS=\"${LDFLAGS:+$LDFLAGS }-Wl,--no-warn-rwx-segments\"",
-                "    export LUDOS_MESON_CROSS_FILE=\"$topdir/ludos-meson-i686-cross.ini\"",
-                "    if [ -x /usr/lib/llvm22/bin/llvm-config ]; then",
-                "      export LLVM_CONFIG=/usr/lib/llvm22/bin/llvm-config",
-                "      export PATH=/usr/lib/llvm22/bin:$PATH",
-                "    fi",
-                "  fi",
-                f"  echo {shlex.quote(f'Building packages from {topdir}/SPECS/{spec_name}')}",
-                "  if [ \"$target\" = i686 ]; then",
-                f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\" --define \"__meson $topdir/ludos-meson-i686\"{extra_defines}",
-                "  else",
-                f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"{extra_defines}",
-                "  fi",
-                "done",
-            ]
-        )
-    lines.extend(
-        [
-            'find "$topdir/RPMS" -type f -name "*.rpm" | sort | while read -r rpm; do',
-            "  name=$(rpm -qp --queryformat '%{NAME}' \"$rpm\")",
-            "  rpm_arch=$(rpm -qp --queryformat '%{ARCH}' \"$rpm\")",
-            '  if grep -Fxq "$name.$rpm_arch" "$topdir/wanted.txt"; then',
-            '    cp -f "$rpm" /rpms/',
-            '    echo "$name.$rpm_arch" >> "$topdir/matched.txt"',
-            f"  elif [ \"$rpm_arch\" = {shlex.quote(arch)} ] || [ \"$rpm_arch\" = noarch ]; then",
-            '    if grep -Fxq "$name" "$topdir/wanted.txt"; then',
-            '      cp -f "$rpm" /rpms/',
-            '      echo "$name" >> "$topdir/matched.txt"',
-            "    fi",
-            "  fi",
-            "done",
-            'touch "$topdir/matched.txt"',
-            'while read -r wanted; do',
-            '  grep -Fxq "$wanted" "$topdir/matched.txt" || { echo "Missing built RPM for $wanted"; exit 1; }',
-            'done < "$topdir/wanted.txt"',
-        ]
-    )
-    return "\n".join(lines) + "\n"
+
+
+def _i686_target_environment_lines() -> list[str]:
+    return [
+        "  if [ \"$target\" = i686 ]; then",
+        "    export PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/share/pkgconfig",
+        "    export PKG_CONFIG_PATH=",
+        "    export BINDGEN_EXTRA_CLANG_ARGS=\"${BINDGEN_EXTRA_CLANG_ARGS:+$BINDGEN_EXTRA_CLANG_ARGS }-m32\"",
+        "    cxx_target_include=$(find /usr/include/c++ -mindepth 2 -maxdepth 2 -type d -path '*/i686-redhat-linux' -print -quit 2>/dev/null || true)",
+        "    if [ -n \"$cxx_target_include\" ]; then",
+        "      export CPLUS_INCLUDE_PATH=\"$cxx_target_include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}\"",
+        "    fi",
+        "    export LDFLAGS=\"${LDFLAGS:+$LDFLAGS }-Wl,--no-warn-rwx-segments\"",
+        "    export LUDOS_MESON_CROSS_FILE=\"$topdir/ludos-meson-i686-cross.ini\"",
+        "    if [ -x /usr/lib/llvm22/bin/llvm-config ]; then",
+        "      export LLVM_CONFIG=/usr/lib/llvm22/bin/llvm-config",
+        "      export PATH=/usr/lib/llvm22/bin:$PATH",
+        "    fi",
+        "  fi",
+    ]
 
 
 def _package_hash(packages: tuple[str, ...]) -> str:

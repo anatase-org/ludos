@@ -11,8 +11,11 @@ from ludos.build import (
     StagedSpec,
     _card_specs_hash,
     _git_source_cache_key,
+    _render_card_build_output_containerfile,
+    _render_specs_build_output_containerfile,
     _resolve_spec_build_requires,
     _resolve_staged_spec_builder_packages,
+    _stage_spec_build_contexts,
     _stage_card_specs,
     _specs_build_script,
 )
@@ -490,6 +493,25 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         self.assertIn("i686-redhat-linux", script)
         self.assertIn("export CPLUS_INCLUDE_PATH=", script)
 
+    def test_x86_64_build_script_omits_i686_overrides(self) -> None:
+        workspace_dir = Path("/workspace")
+        staged_specs = (
+            StagedSpec(
+                spec=SpecBuild(spec="kate.spec"),
+                spec_path=workspace_dir / "kate.spec",
+                source_dir=workspace_dir,
+                packages=("kate",),
+                targets=("x86_64",),
+            ),
+        )
+
+        script = _specs_build_script(staged_specs, workspace_dir, "x86_64")
+
+        self.assertNotIn("ludos-meson-i686", script)
+        self.assertNotIn("BINDGEN_EXTRA_CLANG_ARGS", script)
+        self.assertNotIn("i686-redhat-linux", script)
+        self.assertNotIn("if [ \"$target\" = i686 ]; then", script)
+
     def test_remote_sources_are_cached_per_spec_name(self) -> None:
         workspace_dir = Path("/workspace")
         staged_specs = (
@@ -517,6 +539,106 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         self.assertIn('spectool -g -C "$spec_source_cache"', script)
         self.assertIn('cp -f -t "$topdir/SOURCES"', script)
         self.assertNotIn('cp -n -t "$topdir/SOURCES"', script)
+
+    def test_spec_output_containerfile_builds_each_spec_stage(self) -> None:
+        workspace_dir = Path("/tmp/build/workspace")
+        staged_specs = (
+            StagedSpec(
+                spec=SpecBuild(spec="scx-tools.spec"),
+                spec_path=workspace_dir / "tools" / "scx-tools.spec",
+                source_dir=workspace_dir / "tools",
+                packages=("scx-tools",),
+                targets=("x86_64",),
+            ),
+            StagedSpec(
+                spec=SpecBuild(spec="scx-scheds.spec"),
+                spec_path=workspace_dir / "scheds" / "scx-scheds.spec",
+                source_dir=workspace_dir / "scheds",
+                packages=("scx-scheds",),
+                targets=("x86_64",),
+            ),
+        )
+
+        containerfile = _render_specs_build_output_containerfile(
+            orchestrator="localhost/builders:f44",
+            staged_specs=staged_specs,
+            workspace_dir=workspace_dir,
+            card_env={"releasever": "44"},
+            arch="x86_64",
+            rpmbuild_defines=("flatpak 1", "_prefix /app"),
+            ccache_dir=Path("/cache/ccache"),
+        )
+
+        self.assertIn("FROM localhost/builders:f44 AS spec_scx_tools_0", containerfile)
+        self.assertIn("FROM localhost/builders:f44 AS spec_scx_scheds_1", containerfile)
+        self.assertIn("#\n# Build: spec_scx_tools_0\n#\n", containerfile)
+        self.assertIn("#\n# Build: spec_scx_scheds_1\n#\n", containerfile)
+        self.assertIn(
+            'COPY "spec-workspaces/spec_scx_tools_0/" "/workspace/tools/"',
+            containerfile,
+        )
+        self.assertIn(
+            'COPY "spec-workspaces/spec_scx_scheds_1/" "/workspace/scheds/"',
+            containerfile,
+        )
+        self.assertNotIn("COPY workspace/ /workspace/", containerfile)
+        self.assertIn("RUN env CCACHE_DIR=/cache/ccache", containerfile)
+        self.assertNotIn("\nENV CCACHE_DIR=", containerfile)
+        self.assertIn("export PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH", containerfile)
+        self.assertIn('spec_source_cache="$source_cache/scx_tools"', containerfile)
+        self.assertIn('spec_source_cache="$source_cache/scx_scheds"', containerfile)
+        self.assertIn("--define 'flatpak 1'", containerfile)
+        self.assertIn("--define '_prefix /app'", containerfile)
+        self.assertIn("FROM scratch", containerfile)
+        self.assertIn("COPY rpms/ /rpms/", containerfile)
+        self.assertIn("COPY files/ /files/", containerfile)
+        self.assertIn("COPY --from=spec_scx_tools_0 /rpms/ /rpms/", containerfile)
+        self.assertIn("COPY --from=spec_scx_scheds_1 /files/ /files/", containerfile)
+
+    def test_spec_stage_context_excludes_sibling_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace_dir = root / "workspace"
+            source_dir = workspace_dir / "specs"
+            source_dir.mkdir(parents=True)
+            (source_dir / "scx-tools.spec").write_text("Name: scx-tools\n", encoding="utf-8")
+            (source_dir / "scx-scheds.spec").write_text("Name: scx-scheds\n", encoding="utf-8")
+            (source_dir / "source.tar.xz").write_text("source\n", encoding="utf-8")
+            staged_specs = (
+                StagedSpec(
+                    spec=SpecBuild(spec="scx-tools.spec"),
+                    spec_path=source_dir / "scx-tools.spec",
+                    source_dir=source_dir,
+                    packages=("scx-tools",),
+                    targets=("x86_64",),
+                ),
+            )
+
+            _stage_spec_build_contexts(root / "build", workspace_dir, staged_specs)
+
+            stage_dir = root / "build" / "spec-workspaces" / "spec_scx_tools_0"
+            self.assertTrue((stage_dir / "scx-tools.spec").is_file())
+            self.assertTrue((stage_dir / "source.tar.xz").is_file())
+            self.assertFalse((stage_dir / "scx-scheds.spec").exists())
+
+    def test_card_build_output_containerfile_runs_build_stage(self) -> None:
+        containerfile = _render_card_build_output_containerfile(
+            orchestrator="localhost/builders:f44",
+            card_env={"FOO": "bar baz"},
+            build_script="mkdir -p build/RPMS\nprintf data > /files/output.txt",
+            ccache_dir=Path("/cache/ccache"),
+        )
+
+        self.assertIn("FROM localhost/builders:f44 AS build", containerfile)
+        self.assertIn("RUN env CCACHE_DIR=/cache/ccache FOO='bar baz'", containerfile)
+        self.assertNotIn("\nENV FOO=", containerfile)
+        self.assertIn("COPY workspace/ /workspace/", containerfile)
+        self.assertIn("RUN mkdir -p /rpms /files /cache/artifacts /cache/podman", containerfile)
+        self.assertIn("printf data > /files/output.txt", containerfile)
+        self.assertIn("find /workspace/build/RPMS -type f -name '*.rpm' ! -name '*.src.rpm'", containerfile)
+        self.assertIn("FROM scratch", containerfile)
+        self.assertIn("COPY --from=build /rpms/ /rpms/", containerfile)
+        self.assertIn("COPY --from=build /files/ /files/", containerfile)
 
     def test_cross_arch_variants_are_discovered_from_builddep_dependencies(self) -> None:
         package_id_by_nevra: dict[str, tuple[str, str]] = {}

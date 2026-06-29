@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,7 @@ from ludos.build import (
     SCCACHE_CONTAINER_DIR,
     _add_ccache_builder_options,
     _ccache_build_prelude,
+    _run_build_output_image_build,
 )
 
 
@@ -103,3 +105,41 @@ class BuildCcacheTests(unittest.TestCase):
 
         self.assertIsNone(default.card)
         self.assertEqual(targeted.card, "cards/base/scx")
+
+    def test_podman_build_output_mounts_artifact_podman_and_compiler_caches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            build_dir = root / "build"
+            build_dir.mkdir()
+            (build_dir / "Containerfile").write_text("FROM scratch\n", encoding="utf-8")
+            artifact_cache = root / "artifacts"
+            artifact_cache.mkdir()
+            podman_cache = artifact_cache / "podman"
+            podman_cache.mkdir()
+            ccache = root / "ccache"
+            ccache.mkdir()
+
+            with patch("ludos.build._run_streamed_command", return_value=(0, "")) as run:
+                _run_build_output_image_build(
+                    podman="podman",
+                    build_dir=build_dir,
+                    image="localhost/builds:test",
+                    artifact_cache_dir=artifact_cache,
+                    ccache_dir=ccache,
+                    podman_cache_dir=podman_cache,
+                    source_dir=root / "card",
+                    workspace_dir=build_dir / "workspace",
+                )
+
+        command = run.call_args.args[0]
+        self.assertNotIn("--privileged", command)
+        self.assertIn("--cap-add", command)
+        self.assertIn("all", command)
+        self.assertIn("--security-opt", command)
+        self.assertIn("label=disable", command)
+        self.assertIn("--layers", command)
+        self.assertIn("--pull=false", command)
+        self.assertIn(f"{artifact_cache}:/cache/artifacts", command)
+        self.assertIn(f"{podman_cache}:/cache/podman", command)
+        self.assertIn(f"{ccache}:{CCACHE_CONTAINER_DIR}", command)
+        self.assertIn("localhost/builds:test", command)

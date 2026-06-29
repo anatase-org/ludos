@@ -7,6 +7,7 @@ from pathlib import Path
 from ludos.__main__ import build_parser
 from ludos.flatpaks import (
     FlatpakCard,
+    _flatpak_build_env,
     _flatpak_commit_metadata_labels,
     _flatpak_metadata,
     _flatpak_rpmbuild_defines,
@@ -58,6 +59,8 @@ flatpak:
 build-deps:
   - rpm-build
   - flatpak-rpm-macros
+env:
+  EXTRA_VERSION: $releasever-app
 specs:
   - spec: git+https://example.test/kate:kate.spec#branch=f$releasever
     packages:
@@ -75,6 +78,7 @@ postprocess: |
         self.assertEqual(card.flatpak.app_id, "org.kde.kate")
         self.assertEqual(card.flatpak.command, "kate")
         self.assertEqual(card.flatpak.rename_icon, "kate")
+        self.assertEqual(card.env, {"EXTRA_VERSION": "$releasever-app"})
         self.assertEqual(card.build_deps, ("rpm-build", "flatpak-rpm-macros"))
         self.assertEqual(card.specs[0].spec, "git+https://example.test/kate:kate.spec#branch=f$releasever")
         self.assertEqual(card.files, ("app/share/test.txt",))
@@ -142,6 +146,39 @@ specs:
 
 
 class FlatpakAssemblyTests(unittest.TestCase):
+    def test_flatpak_build_env_defaults_to_arch_and_releasever_only(self) -> None:
+        env = _flatpak_build_env(
+            {
+                "arch": "x86_64",
+                "releasever": "44",
+                "tag": "44.20260629",
+                "version": "20260629",
+            },
+            {},
+        )
+
+        self.assertEqual(env, {"arch": "x86_64", "releasever": "44"})
+
+    def test_flatpak_build_env_substitutes_explicit_entries(self) -> None:
+        env = _flatpak_build_env(
+            {
+                "arch": "x86_64",
+                "releasever": "44",
+                "tag": "44.20260629",
+                "version": "20260629",
+            },
+            {"EXTRA_VERSION": "$tag", "releasever": "$releasever-app"},
+        )
+
+        self.assertEqual(
+            env,
+            {
+                "arch": "x86_64",
+                "releasever": "44-app",
+                "EXTRA_VERSION": "44.20260629",
+            },
+        )
+
     def test_flatpak_rpmbuild_defines_match_fedora_flatpak_macros(self) -> None:
         defines = _flatpak_rpmbuild_defines()
 
