@@ -17,7 +17,7 @@ from ..common import (
 from ..flatpaks import build_flatpak, build_flatpaks
 from ..logging import log
 from ..model import ConfigError, ManifestValidation, validate_manifest
-from .registry import upload_oci
+from .registry import tree_shake_oci, upload_oci
 
 
 @dataclass(frozen=True)
@@ -64,10 +64,27 @@ def upload_flatpaks(
     return 0
 
 
+def tree_shake_flatpaks(
+    manifest: Path,
+    flatpaks: tuple[Path, ...],
+    *,
+    dry_run: bool = False,
+) -> int:
+    context = _resolve_flatpak_upload_context(
+        manifest,
+        cache_dir=None,
+        require_podman=False,
+    )
+    for target in _upload_targets(context, flatpaks):
+        tree_shake_oci(target.ref, dry_run=dry_run)
+    return 0
+
+
 def _resolve_flatpak_upload_context(
     manifest: Path,
     *,
     cache_dir: Path | None,
+    require_podman: bool = True,
 ) -> FlatpakUploadContext:
     manifest_path = manifest.expanduser().resolve()
     log(f"Validating manifest: {manifest}")
@@ -115,10 +132,11 @@ def _resolve_flatpak_upload_context(
     resolved_cache_dir = (
         root_dir / "cache" if cache_dir is None else cache_dir.expanduser().resolve()
     )
-    podman = shutil.which("podman")
-    if not podman:
-        raise ConfigError("podman must be installed to upload flatpaks")
-    log(f"Using Podman: {podman}")
+    podman = shutil.which("podman") if require_podman else ""
+    if require_podman:
+        if not podman:
+            raise ConfigError("podman must be installed to upload flatpaks")
+        log(f"Using Podman: {podman}")
     return FlatpakUploadContext(
         validation=validation,
         root_dir=root_dir,

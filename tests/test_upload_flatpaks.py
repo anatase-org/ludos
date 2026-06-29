@@ -9,7 +9,7 @@ from unittest.mock import call, patch
 
 from ludos.__main__ import build_parser
 from ludos.model import ConfigError
-from ludos.upload.flatpaks import upload_flatpaks
+from ludos.upload.flatpaks import tree_shake_flatpaks, upload_flatpaks
 
 
 class UploadFlatpaksTests(unittest.TestCase):
@@ -60,6 +60,61 @@ class UploadFlatpaksTests(unittest.TestCase):
             (Path("flatpaks/ark"),),
             build=True,
             cache_dir=Path("out/cache"),
+        )
+
+    def test_registry_flatpak_tree_shake_parser(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "flatpak", "tree-shake", "anatase.yml"]
+        )
+
+        self.assertEqual(args.registry_action, "flatpak")
+        self.assertEqual(args.registry_flatpak_action, "tree-shake")
+        self.assertEqual(args.manifest, Path("anatase.yml"))
+        self.assertIsNone(args.flatpaks)
+        self.assertFalse(args.dry_run)
+
+    def test_registry_flatpak_tree_shake_parser_accepts_selected_flatpaks(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "flatpak",
+                "tree-shake",
+                "custom.yml",
+                "--flatpak",
+                "flatpaks/ark",
+                "--flatpak",
+                "flatpaks/kate/card.yaml",
+                "--dry-run",
+            ]
+        )
+
+        self.assertEqual(args.manifest, Path("custom.yml"))
+        self.assertEqual(
+            args.flatpaks,
+            [Path("flatpaks/ark"), Path("flatpaks/kate/card.yaml")],
+        )
+        self.assertTrue(args.dry_run)
+
+    def test_registry_flatpak_tree_shake_command_dispatches(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "flatpak",
+                "tree-shake",
+                "anatase.yml",
+                "--flatpak",
+                "flatpaks/ark",
+                "--dry-run",
+            ]
+        )
+
+        with patch("ludos.__main__.tree_shake_flatpaks", return_value=0) as shake:
+            self.assertEqual(args.func(args), 0)
+
+        shake.assert_called_once_with(
+            Path("anatase.yml"),
+            (Path("flatpaks/ark"),),
+            dry_run=True,
         )
 
     def test_upload_flatpaks_exports_all_manifest_flatpaks_by_default(self) -> None:
@@ -209,6 +264,39 @@ class UploadFlatpaksTests(unittest.TestCase):
                 deps.run_streamed.call_args.args[0][7],
                 "localhost/flatpaks:built-ark",
             )
+
+    def test_tree_shake_flatpaks_uses_all_manifest_flatpaks_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate", "flatpaks/ark"))
+
+            with patch("ludos.upload.flatpaks.tree_shake_oci", return_value=0) as shake:
+                self.assertEqual(tree_shake_flatpaks(manifest, tuple()), 0)
+
+        self.assertEqual(
+            shake.call_args_list,
+            [
+                call("flatpaks/kate", dry_run=False),
+                call("flatpaks/ark", dry_run=False),
+            ],
+        )
+
+    def test_tree_shake_flatpaks_uses_selected_flatpaks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate", "flatpaks/ark"))
+
+            with patch("ludos.upload.flatpaks.tree_shake_oci", return_value=0) as shake:
+                self.assertEqual(
+                    tree_shake_flatpaks(
+                        manifest,
+                        (Path("flatpaks/ark/card.yaml"),),
+                        dry_run=True,
+                    ),
+                    0,
+                )
+
+        shake.assert_called_once_with("flatpaks/ark", dry_run=True)
 
 
 def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:

@@ -18,7 +18,7 @@ from .contrib.package import package_target
 from .contrib.patchwork import patch_target
 from .contrib.update import update_targets
 from .upload.file import delete_file, upload_file
-from .upload.flatpaks import upload_flatpaks
+from .upload.flatpaks import tree_shake_flatpaks, upload_flatpaks
 from .upload.registry import (
     delete_oci_tags,
     list_oci_tags,
@@ -304,6 +304,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for flatpak export caches. Defaults to ./cache next to the manifest.",
     )
     registry_flatpak_upload.set_defaults(func=registry_command)
+    registry_flatpak_tree_shake = registry_flatpak_subcommands.add_parser(
+        "tree-shake",
+        help="Delete OCI blobs not referenced by flatpak repository manifests.",
+    )
+    registry_flatpak_tree_shake.add_argument(
+        "manifest",
+        type=Path,
+        help="Path to a Ludos YAML manifest.",
+    )
+    registry_flatpak_tree_shake.add_argument(
+        "--flatpak",
+        action="append",
+        type=Path,
+        default=None,
+        dest="flatpaks",
+        help="Flatpak directory or card YAML to tree-shake. May be specified more than once.",
+    )
+    registry_flatpak_tree_shake.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print blobs that would be deleted without deleting them.",
+    )
+    registry_flatpak_tree_shake.set_defaults(func=registry_command)
 
     registry_oci = registry_subcommands.add_parser(
         "oci",
@@ -740,6 +763,12 @@ def registry_command(args: argparse.Namespace) -> int:
                 tuple(args.flatpaks or ()),
                 build=args.build,
                 cache_dir=args.cache_dir,
+            )
+        if args.registry_flatpak_action == "tree-shake":
+            return tree_shake_flatpaks(
+                args.manifest,
+                tuple(args.flatpaks or ()),
+                dry_run=args.dry_run,
             )
         raise ConfigError(
             f"unknown registry flatpak action: {args.registry_flatpak_action}"
