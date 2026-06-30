@@ -10,6 +10,7 @@ from ludos.__main__ import build_parser
 from ludos.build import (
     CCACHE_CONTAINER_DIR,
     CCACHE_PATH_PREFIX,
+    CCACHE_SLOPPINESS,
     SCCACHE_CONTAINER_DIR,
     _add_ccache_builder_options,
     _ccache_build_prelude,
@@ -40,6 +41,8 @@ class BuildCcacheTests(unittest.TestCase):
                 "--env",
                 f"SCCACHE_DIR={SCCACHE_CONTAINER_DIR}",
                 "--env",
+                f"CCACHE_SLOPPINESS={CCACHE_SLOPPINESS}",
+                "--env",
                 "CCACHE_MAXSIZE=20G",
                 "--env",
                 "SCCACHE_CACHE_SIZE=30G",
@@ -63,8 +66,19 @@ class BuildCcacheTests(unittest.TestCase):
                 f"CCACHE_DIR={CCACHE_CONTAINER_DIR}",
                 "--env",
                 f"SCCACHE_DIR={SCCACHE_CONTAINER_DIR}",
+                "--env",
+                f"CCACHE_SLOPPINESS={CCACHE_SLOPPINESS}",
             ],
         )
+
+    def test_builder_options_respect_sloppiness_override(self) -> None:
+        command = ["podman", "run"]
+
+        with patch.dict(os.environ, {"CCACHE_SLOPPINESS": "time_macros"}, clear=True):
+            _add_ccache_builder_options(command, Path("/tmp/cache/ccache"))
+
+        self.assertIn("--env", command)
+        self.assertIn("CCACHE_SLOPPINESS=time_macros", command)
 
     def test_ccache_disabled_noops(self) -> None:
         command = ["podman", "run"]

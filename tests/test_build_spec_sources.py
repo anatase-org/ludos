@@ -633,7 +633,12 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         )
 
         self.assertIn("FROM localhost/builders:f44 AS build", containerfile)
-        self.assertIn("RUN env CCACHE_DIR=/cache/ccache FOO='bar baz'", containerfile)
+        self.assertIn(
+            "RUN env CCACHE_DIR=/cache/ccache "
+            "CCACHE_SLOPPINESS=include_file_ctime,include_file_mtime,time_macros "
+            "FOO='bar baz'",
+            containerfile,
+        )
         self.assertNotIn("\nENV FOO=", containerfile)
         self.assertIn("COPY workspace/ /workspace/", containerfile)
         self.assertIn("RUN mkdir -p /rpms /files /cache/artifacts /cache/podman", containerfile)

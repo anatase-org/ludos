@@ -25,6 +25,7 @@ from .model import ConfigError, SpecBuild, _resolve_card_path
 HASH_LENGTH = 8
 CCACHE_CONTAINER_DIR = "/cache/ccache"
 CCACHE_PATH_PREFIX = "/usr/lib64/ccache:/usr/lib/ccache"
+CCACHE_SLOPPINESS = "include_file_ctime,include_file_mtime,time_macros"
 SCCACHE_CONTAINER_DIR = f"{CCACHE_CONTAINER_DIR}/sccache"
 RPM_ARCH_SUFFIXES = frozenset(
     (
@@ -2984,6 +2985,12 @@ def _add_ccache_builder_options(command: list[str], ccache_dir: Path | None) -> 
     command.extend(["--volume", f"{ccache_dir}:{CCACHE_CONTAINER_DIR}"])
     command.extend(["--env", f"CCACHE_DIR={CCACHE_CONTAINER_DIR}"])
     command.extend(["--env", f"SCCACHE_DIR={SCCACHE_CONTAINER_DIR}"])
+    command.extend(
+        [
+            "--env",
+            f"CCACHE_SLOPPINESS={os.environ.get('CCACHE_SLOPPINESS', CCACHE_SLOPPINESS)}",
+        ]
+    )
     if "CCACHE_MAXSIZE" in os.environ:
         command.extend(["--env", f"CCACHE_MAXSIZE={os.environ['CCACHE_MAXSIZE']}"])
     if "SCCACHE_CACHE_SIZE" in os.environ:
@@ -3309,6 +3316,9 @@ def _build_container_env(
     if ccache_dir is not None:
         env["CCACHE_DIR"] = CCACHE_CONTAINER_DIR
         env["SCCACHE_DIR"] = SCCACHE_CONTAINER_DIR
+        env["CCACHE_SLOPPINESS"] = os.environ.get(
+            "CCACHE_SLOPPINESS", CCACHE_SLOPPINESS
+        )
         if "CCACHE_MAXSIZE" in os.environ:
             env["CCACHE_MAXSIZE"] = os.environ["CCACHE_MAXSIZE"]
         if "SCCACHE_CACHE_SIZE" in os.environ:
