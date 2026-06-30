@@ -3823,6 +3823,7 @@ def _resolve_spec_build_requires(
 ) -> tuple[str, ...]:
     if not spec_paths:
         return tuple()
+    rpmbuild_defines = (*rpmbuild_defines, *_rpmbuild_defines_from_env())
     spec_args = []
     for spec_path in spec_paths:
         relative = spec_path.relative_to(workspace_dir).as_posix()
@@ -4026,6 +4027,7 @@ def _specs_build_script(
     *,
     rpmbuild_defines: tuple[str, ...] = tuple(),
 ) -> str:
+    rpmbuild_defines = (*rpmbuild_defines, *_rpmbuild_defines_from_env())
     topdir = "/workspace/rpmbuild"
     lines = [
         "set -eux",
@@ -4125,6 +4127,19 @@ def _specs_build_script(
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def _rpmbuild_defines_from_env() -> tuple[str, ...]:
+    value = os.environ.get("LUDOS_MAX_WORKERS")
+    if value is None:
+        return tuple()
+    try:
+        max_workers = int(value)
+    except ValueError as exc:
+        raise ConfigError("LUDOS_MAX_WORKERS must be a positive integer") from exc
+    if max_workers < 1:
+        raise ConfigError("LUDOS_MAX_WORKERS must be a positive integer")
+    return (f"_smp_build_ncpus {max_workers}",)
 
 
 def _i686_rpmbuild_setup_lines() -> list[str]:
