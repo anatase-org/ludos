@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ludos.model import Card, SpecBuild, UpstreamRef
+from ludos.__main__ import build_parser
+from ludos.model import Card, ConfigError, SpecBuild, UpstreamRef
 from ludos.contrib.update import (
     LUDOS_BRANCH,
     UpstreamSource,
@@ -16,6 +17,33 @@ from ludos.contrib.update import (
     _target_cards,
     _upstream_sources,
 )
+
+
+class UpdateParserTests(unittest.TestCase):
+    def test_update_parser_accepts_flatpak_target(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            ["update", "anatase.yml", "--flatpak", "flatpaks/steam"]
+        )
+
+        self.assertEqual(args.flatpak, "flatpaks/steam")
+        self.assertIsNone(args.card)
+
+    def test_update_parser_rejects_card_and_flatpak_together(self) -> None:
+        parser = build_parser()
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "update",
+                    "anatase.yml",
+                    "--card",
+                    "cards/de/kde",
+                    "--flatpak",
+                    "flatpaks/steam",
+                ]
+            )
 
 
 class UpdateConfirmationTests(unittest.TestCase):
@@ -168,6 +196,124 @@ cards:
         self.assertEqual(targets[0].env["releasever"], "44")
         self.assertEqual(targets[0].env["distro"], "f44-x86_64")
         self.assertEqual(sources[0].upstream.branch, "f44")
+
+    def test_targeted_manifest_flatpak_carries_releasever_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = root / "anatase.yml"
+            bootstrap = root / "cards" / "bootstrap.yml"
+            kde = root / "cards" / "de" / "kde"
+            steam = root / "flatpaks" / "steam"
+            bootstrap.parent.mkdir(parents=True)
+            kde.mkdir(parents=True)
+            steam.mkdir(parents=True)
+            bootstrap.write_text("version: 1\n", encoding="utf-8")
+            (kde / "card.yml").write_text("version: 1\n", encoding="utf-8")
+            (steam / "steam.spec").write_text("Name: steam\n", encoding="utf-8")
+            (steam / "card.yaml").write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.Steam
+  command: steam
+env:
+  distro: $distro
+build-deps:
+  - rpm-build
+specs:
+  - spec: steam.spec
+    upstream:
+      type: dist-git
+      url: https://example.test/steam
+      branch: f$releasever
+""".lstrip(),
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """
+version: 1
+env:
+  releasever: 44
+releasever: $releasever
+distro: f$releasever-$arch
+orchestrator: quay.io/fedora/fedora:$releasever
+bootstrap: cards/bootstrap.yml
+cards:
+  - cards/de/kde
+flatpaks:
+  - flatpaks/steam
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            targets = _target_cards((manifest_path,), flatpak="flatpaks/steam")
+            sources = _upstream_sources(targets[0].card, env=targets[0].env)
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].card.source, steam / "card.yaml")
+        self.assertEqual(targets[0].env["releasever"], "44")
+        self.assertEqual(targets[0].env["distro"], "f44-x86_64")
+        self.assertEqual(sources[0].upstream.branch, "f44")
+
+    def test_targeted_manifest_flatpak_must_be_listed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = root / "anatase.yml"
+            bootstrap = root / "cards" / "bootstrap.yml"
+            kde = root / "cards" / "de" / "kde"
+            steam = root / "flatpaks" / "steam"
+            ark = root / "flatpaks" / "ark"
+            bootstrap.parent.mkdir(parents=True)
+            kde.mkdir(parents=True)
+            steam.mkdir(parents=True)
+            ark.mkdir(parents=True)
+            bootstrap.write_text("version: 1\n", encoding="utf-8")
+            (kde / "card.yml").write_text("version: 1\n", encoding="utf-8")
+            (ark / "card.yaml").write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.Ark
+  command: ark
+build-deps:
+  - rpm-build
+specs:
+  - spec: ark.spec
+""".lstrip(),
+                encoding="utf-8",
+            )
+            (steam / "card.yaml").write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.Steam
+  command: steam
+build-deps:
+  - rpm-build
+specs:
+  - spec: steam.spec
+""".lstrip(),
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """
+version: 1
+env:
+  releasever: 44
+releasever: $releasever
+distro: f$releasever-$arch
+orchestrator: quay.io/fedora/fedora:$releasever
+bootstrap: cards/bootstrap.yml
+cards:
+  - cards/de/kde
+flatpaks:
+  - flatpaks/ark
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "flatpak not listed"):
+                _target_cards((manifest_path,), flatpak="flatpaks/steam")
 
 
 class DistGitUpdateTests(unittest.TestCase):

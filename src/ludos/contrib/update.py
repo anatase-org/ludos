@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from ..flatpaks import FlatpakCard
 from ..logging import confirm, log, stream
 from ..model import (
     Card,
@@ -18,6 +19,7 @@ from ..model import (
     SpecBuild,
     UpstreamRef,
     _resolve_card_path,
+    _resolve_flatpak_path,
     validate_manifest,
 )
 from .patch import (
@@ -81,7 +83,7 @@ class UpstreamHead:
 
 @dataclass(frozen=True)
 class CardUpdateTarget:
-    card: Card
+    card: Card | FlatpakCard
     env: dict[str, str]
 
 
@@ -98,10 +100,11 @@ def update_targets(
     dry_run: bool = False,
     assume_yes: bool = False,
     card: str | None = None,
+    flatpak: str | None = None,
 ) -> int:
     cache_dir = _cache_dir(cache_dir)
     patchwork_dir = _patchwork_dir(patchwork_dir)
-    cards = _target_cards(targets, card=card)
+    cards = _target_cards(targets, card=card, flatpak=flatpak)
     totals = CardUpdateResult()
     for target in cards:
         result = update_card(
@@ -131,7 +134,7 @@ def update_targets(
 
 
 def update_card(
-    card: Card,
+    card: Card | FlatpakCard,
     cache_dir: Path,
     patchwork_dir: Path,
     *,
@@ -272,14 +275,17 @@ def _target_cards(
     targets: tuple[Path, ...],
     *,
     card: str | None = None,
+    flatpak: str | None = None,
 ) -> tuple[CardUpdateTarget, ...]:
-    if card is not None and len(targets) != 1:
-        raise ConfigError("targeted card updates require exactly one manifest")
+    if card is not None and flatpak is not None:
+        raise ConfigError("--card and --flatpak are mutually exclusive")
+    if (card is not None or flatpak is not None) and len(targets) != 1:
+        raise ConfigError("targeted updates require exactly one manifest")
 
     cards: list[CardUpdateTarget] = []
     seen: set[Path] = set()
     for target in targets:
-        for update_target in _cards_for_target(target, card=card):
+        for update_target in _cards_for_target(target, card=card, flatpak=flatpak):
             source = _card_source(update_target.card).resolve()
             if source in seen:
                 continue
@@ -292,13 +298,16 @@ def _cards_for_target(
     target: Path,
     *,
     card: str | None = None,
+    flatpak: str | None = None,
 ) -> tuple[CardUpdateTarget, ...]:
     target = target.expanduser().resolve()
     if _is_manifest(target):
-        return _manifest_update_targets(target, card=card)
+        return _manifest_update_targets(target, card=card, flatpak=flatpak)
 
     if card is not None:
         raise ConfigError("--card requires a manifest target")
+    if flatpak is not None:
+        raise ConfigError("--flatpak requires a manifest target")
 
     return (CardUpdateTarget(card=Card.from_file(target), env={}),)
 
@@ -307,6 +316,7 @@ def _manifest_update_targets(
     manifest_path: Path,
     *,
     card: str | None,
+    flatpak: str | None,
 ) -> tuple[CardUpdateTarget, ...]:
     validation = validate_manifest(manifest_path)
     if validation.missing_bootstrap:
@@ -319,6 +329,9 @@ def _manifest_update_targets(
     if validation.missing_cards:
         missing = ", ".join(validation.missing_cards)
         raise ConfigError(f"{manifest_path}: missing card definitions: {missing}")
+    if flatpak is not None and validation.missing_flatpaks:
+        missing = ", ".join(validation.missing_flatpaks)
+        raise ConfigError(f"{manifest_path}: missing flatpak definitions: {missing}")
 
     root_dir = manifest_path.parent
     manifest_env = _manifest_env(
@@ -332,9 +345,18 @@ def _manifest_update_targets(
         if card is not None
         else None
     )
+    selected_flatpak_source = (
+        _resolve_flatpak_path(flatpak, root_dir).resolve()
+        if flatpak is not None
+        else None
+    )
 
     updates: list[CardUpdateTarget] = []
-    if validation.bootstrap is not None and selected_source is None:
+    if (
+        validation.bootstrap is not None
+        and selected_source is None
+        and selected_flatpak_source is None
+    ):
         updates.append(
             CardUpdateTarget(
                 card=validation.bootstrap,
@@ -350,6 +372,8 @@ def _manifest_update_targets(
     for _insertion_order, update_card in card_entries:
         card_env = _card_env(inherited_env, update_card.env)
         inherited_env.update(card_env)
+        if selected_flatpak_source is not None:
+            continue
         if selected_source is not None:
             if (
                 update_card.source is None
@@ -358,8 +382,24 @@ def _manifest_update_targets(
                 continue
         updates.append(CardUpdateTarget(card=update_card, env=card_env))
 
+    if selected_flatpak_source is not None:
+        for flatpak_ref in validation.manifest.flatpaks:
+            flatpak_source = _resolve_flatpak_path(flatpak_ref, root_dir)
+            if flatpak_source.resolve() != selected_flatpak_source:
+                continue
+            update_flatpak = FlatpakCard.from_file(flatpak_source)
+            updates.append(
+                CardUpdateTarget(
+                    card=update_flatpak,
+                    env=_card_env(manifest_env, update_flatpak.env),
+                )
+            )
+            break
+
     if selected_source is not None and not updates:
         raise ConfigError(f"{manifest_path}: card not listed in manifest: {card}")
+    if selected_flatpak_source is not None and not updates:
+        raise ConfigError(f"{manifest_path}: flatpak not listed in manifest: {flatpak}")
 
     return tuple(updates)
 

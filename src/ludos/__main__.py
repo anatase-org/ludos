@@ -114,10 +114,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Manifest or card YAML files to update.",
     )
-    update.add_argument(
+    update_target = update.add_mutually_exclusive_group()
+    update_target.add_argument(
         "--card",
         default=None,
         help="Update only the selected card from a manifest.",
+    )
+    update_target.add_argument(
+        "--flatpak",
+        default=None,
+        help="Update only the selected flatpak from a manifest.",
     )
     update.add_argument(
         "--cache-dir",
@@ -752,6 +758,7 @@ def update_command(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         assume_yes=args.assume_yes,
         card=args.card,
+        flatpak=args.flatpak,
     )
 
 
