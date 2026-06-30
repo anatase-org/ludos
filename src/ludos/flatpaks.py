@@ -78,6 +78,7 @@ class FlatpakConfig:
     command: str
     finish_args: str = ""
     rename: str = ""
+    rename_author: str = ""
     rename_icon: str = ""
     rename_desktop_file: str = ""
     rename_appdata_file: str = ""
@@ -522,6 +523,7 @@ def _flatpak_config(data: dict[str, Any], path: Path) -> FlatpakConfig:
         "command",
         "finish-args",
         "rename",
+        "rename-author",
         "rename-icon",
         "rename-desktop-file",
         "rename-appdata-file",
@@ -536,6 +538,7 @@ def _flatpak_config(data: dict[str, Any], path: Path) -> FlatpakConfig:
         command=command,
         finish_args=finish_args,
         rename=_optional_string(value, "rename", path),
+        rename_author=_optional_string(value, "rename-author", path),
         rename_icon=_optional_string(value, "rename-icon", path),
         rename_desktop_file=_optional_string(value, "rename-desktop-file", path),
         rename_appdata_file=_optional_string(value, "rename-appdata-file", path),
@@ -1221,11 +1224,13 @@ def _appstream_compose_lines(config: FlatpakConfig, app_ref: str) -> list[str]:
     app_id = shlex.quote(config.app_id)
     ref = shlex.quote(app_ref)
     display_name = shlex.quote(config.rename)
+    author_template = shlex.quote(config.rename_author)
     app_icon = shlex.quote(config.app_id if config.rename_icon else "")
     return [
         f"app_id={app_id}",
         f"app_ref={ref}",
         f"display_name={display_name}",
+        f"author_template={author_template}",
         f"app_icon={app_icon}",
         "if [ -f \"/out/files/share/appdata/$app_id.appdata.xml\" ]; then",
         "  if ! command -v appstreamcli >/dev/null 2>&1; then",
@@ -1243,7 +1248,7 @@ def _appstream_compose_lines(config: FlatpakConfig, app_ref: str) -> list[str]:
         "  if [ -f \"$appstream_xml\" ] && command -v gzip >/dev/null 2>&1; then",
         "    appstream_tmp=\"/out/appstream-$app_id.xml\"",
         "    gzip -dc \"$appstream_xml\" > \"$appstream_tmp\"",
-        "    APPSTREAM_FILE=\"$appstream_tmp\" APP_ID=\"$app_id\" APP_REF=\"$app_ref\" DISPLAY_NAME=\"$display_name\" APP_ICON=\"$app_icon\" python3 - <<'LUDOS_REWRITE_APPSTREAM'",
+        "    APPSTREAM_FILE=\"$appstream_tmp\" APP_ID=\"$app_id\" APP_REF=\"$app_ref\" DISPLAY_NAME=\"$display_name\" AUTHOR_TEMPLATE=\"$author_template\" APP_ICON=\"$app_icon\" python3 - <<'LUDOS_REWRITE_APPSTREAM'",
         "import os",
         "import xml.etree.ElementTree as ET",
         "",
@@ -1251,9 +1256,45 @@ def _appstream_compose_lines(config: FlatpakConfig, app_ref: str) -> list[str]:
         "app_id = os.environ['APP_ID']",
         "app_ref = os.environ['APP_REF']",
         "display_name = os.environ['DISPLAY_NAME']",
+        "author_template = os.environ['AUTHOR_TEMPLATE']",
         "app_icon = os.environ['APP_ICON']",
         "tree = ET.parse(path)",
         "root = tree.getroot()",
+        "def rewrite_author(component):",
+        "    if not author_template:",
+        "        return",
+        "    author = ''",
+        "    developer = component.find('developer')",
+        "    if developer is not None:",
+        "        name = developer.find('name')",
+        "        if name is not None and name.text:",
+        "            author = name.text.strip()",
+        "    developer_names = component.findall('developer_name')",
+        "    if not author:",
+        "        for developer_name in developer_names:",
+        "            if developer_name.text:",
+        "                author = developer_name.text.strip()",
+        "                break",
+        "    if '%s' in author_template:",
+        "        prefix, suffix = author_template.split('%s', 1)",
+        "        while author.startswith(prefix) and author.endswith(suffix):",
+        "            author = author[len(prefix):]",
+        "            if suffix:",
+        "                author = author[:-len(suffix)]",
+        "            author = author.strip()",
+        "        rewritten = author_template.replace('%s', author).strip()",
+        "    else:",
+        "        rewritten = author_template.strip()",
+        "    if not rewritten:",
+        "        return",
+        "    if developer is None:",
+        "        developer = ET.SubElement(component, 'developer')",
+        "    name = developer.find('name')",
+        "    if name is None:",
+        "        name = ET.SubElement(developer, 'name')",
+        "    name.text = rewritten",
+        "    for developer_name in developer_names:",
+        "        developer_name.text = rewritten",
         "for component in root.iter('component'):",
         "    component_id = component.find('id')",
         "    if component_id is not None and component_id.text != app_id:",
@@ -1271,6 +1312,7 @@ def _appstream_compose_lines(config: FlatpakConfig, app_ref: str) -> list[str]:
         "        if name is None:",
         "            name = ET.SubElement(component, 'name')",
         "        name.text = display_name",
+        "    rewrite_author(component)",
         "    for launchable in component.findall('launchable'):",
         "        if launchable.get('type') == 'desktop-id':",
         "            launchable.text = f'{app_id}.desktop'",

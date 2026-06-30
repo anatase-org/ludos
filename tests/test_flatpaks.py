@@ -1121,9 +1121,17 @@ specs:
         self.assertIn("exec \"$command\" -qwindowtitle \"$title\" \"$@\"", containerfile)
         self.assertIn("name.text = display_name", containerfile)
         self.assertIn("AUTHOR_TEMPLATE=\"$author_template\"", containerfile)
-        self.assertIn("if author.startswith(prefix) and author.endswith(suffix):", containerfile)
+        self.assertIn("while author.startswith(prefix) and author.endswith(suffix):", containerfile)
+        self.assertIn("author = author[:-len(suffix)]", containerfile)
         self.assertIn("rewritten = author_template.replace('%s', author).strip()", containerfile)
         self.assertIn("name.text = rewritten", containerfile)
+        self.assertIn("developer_name.text = rewritten", containerfile)
+        self.assertNotIn("component.remove(developer_name)", containerfile)
+        self.assertEqual(containerfile.count("AUTHOR_TEMPLATE=\"$author_template\""), 1)
+        self.assertEqual(
+            containerfile.count("rewritten = author_template.replace('%s', author).strip()"),
+            1,
+        )
         self.assertIn("APP_ICON=\"$app_icon\"", containerfile)
         self.assertIn("icon.text = app_icon", containerfile)
 
