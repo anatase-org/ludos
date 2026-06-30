@@ -759,6 +759,8 @@ def _apply_finish_args(editor: _MetadataEditor, args: list[str]) -> None:
             editor.add_list("Context", "filesystems", value)
         elif option == "persist":
             editor.add_list("Context", "persistent", value)
+        elif option == "allow":
+            editor.add_list("Context", "features", value)
         elif option == "env":
             key, env_value = _split_assignment(value, option)
             editor.set("Environment", key, env_value)

@@ -865,6 +865,7 @@ flatpak:
     --filesystem=host
     --share=ipc
     --socket=wayland
+    --allow=multiarch
     --talk-name=org.kde.KGlobalSettings
 build-deps:
   - rpm-build
@@ -890,6 +891,7 @@ specs:
         self.assertIn("filesystems=host;", metadata)
         self.assertIn("shared=ipc;", metadata)
         self.assertIn("sockets=wayland;", metadata)
+        self.assertIn("features=multiarch;", metadata)
         self.assertIn("[Session Bus Policy]", metadata)
         self.assertIn("org.kde.KGlobalSettings=talk", metadata)
 
