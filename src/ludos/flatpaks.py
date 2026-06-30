@@ -708,7 +708,7 @@ def _flatpak_metadata(
     editor.set("Application", "name", config.app_id)
     editor.set("Application", "runtime", f"{runtime_id}/{flatpak_arch}/{branch}")
     editor.set("Application", "sdk", f"{sdk_id}/{flatpak_arch}/{branch}")
-    finish_args = ["--command", _flatpak_command(config)]
+    finish_args = ["--command", config.command]
     if config.finish_args.strip():
         finish_args.extend(shlex.split(config.finish_args, comments=True))
     _apply_finish_args(editor, finish_args)
@@ -884,7 +884,6 @@ def _write_flatpak_containerfile(
             "cp -a /flatpak/app/. /out/files/",
             *_rename_lines(card.flatpak),
             *_rename_display_lines(card.flatpak),
-            *_command_wrapper_lines(card.flatpak),
             *_appdata_lines(card.flatpak),
             *_appstream_compose_lines(card.flatpak, app_ref),
             *_export_lines(card.flatpak),
@@ -1085,73 +1084,31 @@ def _rename_lines(config: FlatpakConfig) -> list[str]:
     return lines
 
 
-def _flatpak_command(config: FlatpakConfig) -> str:
-    if not config.rename:
-        return config.command
-    return f"{Path(config.command).name}-anatase"
-
-
 def _rename_display_lines(config: FlatpakConfig) -> list[str]:
     if not config.rename:
         return []
     app_id = shlex.quote(config.app_id)
     display_name = shlex.quote(config.rename)
-    command = shlex.quote(config.command)
-    flatpak_command = shlex.quote(_flatpak_command(config))
     return [
         f"app_id={app_id}",
         f"display_name={display_name}",
-        f"original_command={command}",
-        f"flatpak_command={flatpak_command}",
         "desktop_file=\"/out/files/share/applications/$app_id.desktop\"",
         "if [ -f \"$desktop_file\" ]; then",
-        "  DISPLAY_NAME=\"$display_name\" ORIGINAL_COMMAND=\"$original_command\" FLATPAK_COMMAND=\"$flatpak_command\" DESKTOP_FILE=\"$desktop_file\" python3 - <<'LUDOS_RENAME_DESKTOP'",
+        "  DISPLAY_NAME=\"$display_name\" DESKTOP_FILE=\"$desktop_file\" python3 - <<'LUDOS_RENAME_DESKTOP'",
         "import os",
         "",
         "path = os.environ['DESKTOP_FILE']",
         "display_name = os.environ['DISPLAY_NAME']",
-        "original_command = os.environ['ORIGINAL_COMMAND']",
-        "flatpak_command = os.environ['FLATPAK_COMMAND']",
         "lines = []",
         "with open(path, encoding='utf-8') as desktop:",
         "    for line in desktop:",
         "        if line.startswith('Name='):",
         "            line = f'Name={display_name}\\n'",
-        "        elif line.startswith('Exec='):",
-        "            value = line.removeprefix('Exec=').rstrip('\\n')",
-        "            if value == original_command:",
-        "                value = flatpak_command",
-        "            elif value.startswith(original_command + ' '):",
-        "                value = flatpak_command + value[len(original_command):]",
-        "            line = f'Exec={value}\\n'",
         "        lines.append(line)",
         "with open(path, 'w', encoding='utf-8') as desktop:",
         "    desktop.writelines(lines)",
         "LUDOS_RENAME_DESKTOP",
         "fi",
-    ]
-
-
-def _command_wrapper_lines(config: FlatpakConfig) -> list[str]:
-    if not config.rename:
-        return []
-    command = Path(config.command).name
-    wrapper = _flatpak_command(config)
-    wrapper_path = shlex.quote(f"/out/files/bin/{wrapper}")
-    original_path = shlex.quote(f"/app/bin/{command}")
-    display_name = shlex.quote(config.rename)
-    return [
-        "mkdir -p /out/files/bin",
-        f"cat > {wrapper_path} <<'LUDOS_COMMAND_WRAPPER'",
-        "#!/bin/sh",
-        f"command={original_path}",
-        f"title={display_name}",
-        "if command -v ldd >/dev/null 2>&1 && ldd \"$command\" 2>/dev/null | grep -Eq 'lib(Qt[56]|KF[56])'; then",
-        "  exec \"$command\" -qwindowtitle \"$title\" \"$@\"",
-        "fi",
-        "exec \"$command\" \"$@\"",
-        "LUDOS_COMMAND_WRAPPER",
-        f"chmod +x {wrapper_path}",
     ]
 
 

@@ -893,7 +893,7 @@ specs:
         self.assertIn("[Session Bus Policy]", metadata)
         self.assertIn("org.kde.KGlobalSettings=talk", metadata)
 
-    def test_metadata_uses_wrapper_command_for_renamed_app(self) -> None:
+    def test_metadata_uses_configured_command_for_renamed_app(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             card_path = Path(temp) / "card.yaml"
             card_path.write_text(
@@ -921,7 +921,7 @@ specs:
         )
 
         self.assertIn("name=org.anatase.TextEditor", metadata)
-        self.assertIn("command=kate-anatase", metadata)
+        self.assertIn("command=kate", metadata)
 
     def test_containerfile_uses_orchestrator_and_applies_final_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1073,7 +1073,7 @@ specs:
         self.assertIn("-name 'org.kde.kate.*'", containerfile)
         self.assertIn("s/^Icon=${old_icon}$/Icon=${new_icon}/", containerfile)
 
-    def test_containerfile_renames_desktop_appdata_and_wraps_qt_command(self) -> None:
+    def test_containerfile_renames_desktop_appdata_without_command_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             flatpak_dir = root / "kate"
@@ -1118,9 +1118,10 @@ specs:
         self.assertIn("mv -f /out/files/share/appdata/org.kde.kate.appdata.xml /out/files/share/appdata/org.anatase.TextEditor.appdata.xml", containerfile)
         self.assertIn("DISPLAY_NAME=\"$display_name\"", containerfile)
         self.assertIn("line = f'Name={display_name}", containerfile)
-        self.assertIn("flatpak_command + value[len(original_command):]", containerfile)
-        self.assertIn("cat > /out/files/bin/kate-anatase", containerfile)
-        self.assertIn("exec \"$command\" -qwindowtitle \"$title\" \"$@\"", containerfile)
+        self.assertNotIn("FLATPAK_COMMAND", containerfile)
+        self.assertNotIn("original_command", containerfile)
+        self.assertNotIn("kate-anatase", containerfile)
+        self.assertNotIn("qwindowtitle", containerfile)
         self.assertIn("name.text = display_name", containerfile)
         self.assertIn("AUTHOR_TEMPLATE=\"$author_template\"", containerfile)
         self.assertIn("while author.startswith(prefix) and author.endswith(suffix):", containerfile)
