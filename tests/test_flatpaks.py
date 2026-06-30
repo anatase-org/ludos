@@ -16,6 +16,7 @@ from ludos.flatpaks import (
     _flatpak_build_env,
     _flatpak_commit_metadata_labels,
     _flatpak_metadata,
+    _ensure_flatpak_images,
     _prepare_flatpak_build_plan,
     _flatpak_rpmbuild_defines,
     _run_flatpak_image_build,
@@ -25,6 +26,7 @@ from ludos.flatpaks import (
 )
 from ludos.model import (
     ConfigError,
+    FlatpakImagesConfig,
     Manifest,
     ManifestRuntime,
     SpecBuild,
@@ -517,6 +519,56 @@ specs:
                     cache_only=False,
                 )
 
+    def test_cache_only_still_builds_final_flatpak_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            card_path = self._write_flatpak_card(
+                root,
+                "kate",
+                app_id="org.anatase.TextEditor",
+                command="kate",
+            )
+            card = FlatpakCard.from_file(card_path)
+            context = self._flatpak_context(root)
+            context.buildah = "buildah"
+            context.flatpak_images = FlatpakImagesConfig()
+            plan = SimpleNamespace(
+                final_build_dir=root / "build" / "flatpak",
+                flatpak_dir=card_path.parent,
+                card=card,
+                build_image="localhost/builds:f44-x86_64-flatpak-kate",
+                output_image="localhost/flatpaks:f44-x86_64-kate",
+                metadata="[Application]\nname=org.anatase.TextEditor\n",
+                app_ref="app/org.anatase.TextEditor/x86_64/stable",
+                branch="stable",
+                flatpak_arch="x86_64",
+                app_id="org.anatase.TextEditor",
+                latest_image="localhost/flatpaks:f44-x86_64-kate",
+                builder_image="localhost/builders:f44-x86_64-flatpak-kate",
+            )
+
+            with (
+                patch("ludos.flatpaks._write_flatpak_containerfile") as write,
+                patch("ludos.flatpaks._run_flatpak_image_build") as run,
+            ):
+                results = _ensure_flatpak_images(
+                    context,
+                    (plan,),
+                    cache_only=True,
+                )
+
+        write.assert_called_once()
+        run.assert_called_once_with(
+            "podman",
+            "buildah",
+            plan.final_build_dir,
+            "localhost/flatpaks:f44-x86_64-kate",
+            "[Application]\nname=org.anatase.TextEditor\n",
+            "org.anatase.TextEditor",
+            flatpak_images=context.flatpak_images,
+        )
+        self.assertEqual(results[0].image, "localhost/flatpaks:f44-x86_64-kate")
+
     def test_card_parser_accepts_metadata_hooks_and_specs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             card_path = Path(temp) / "card.yaml"
@@ -527,6 +579,7 @@ flatpak:
   id: org.kde.kate
   command: kate
   rename: Text Editor (Kate)
+  rename-author: "%s (packaged by Anatase)"
   finish-args: |-
     --device=dri
   rename-icon: kate
@@ -552,6 +605,7 @@ postprocess: |
         self.assertEqual(card.flatpak.app_id, "org.kde.kate")
         self.assertEqual(card.flatpak.command, "kate")
         self.assertEqual(card.flatpak.rename, "Text Editor (Kate)")
+        self.assertEqual(card.flatpak.rename_author, "%s (packaged by Anatase)")
         self.assertEqual(card.flatpak.rename_icon, "kate")
         self.assertEqual(card.env, {"EXTRA_VERSION": "$releasever-app"})
         self.assertEqual(card.build_deps, ("rpm-build", "flatpak-rpm-macros"))
@@ -1030,6 +1084,7 @@ flatpak:
   id: org.anatase.TextEditor
   command: kate
   rename: Text Editor (Kate)
+  rename-author: "%s (packaged by Anatase)"
   rename-desktop-file: org.kde.kate.desktop
   rename-appdata-file: org.kde.kate.appdata.xml
 build-deps:
@@ -1065,6 +1120,10 @@ specs:
         self.assertIn("cat > /out/files/bin/kate-anatase", containerfile)
         self.assertIn("exec \"$command\" -qwindowtitle \"$title\" \"$@\"", containerfile)
         self.assertIn("name.text = display_name", containerfile)
+        self.assertIn("AUTHOR_TEMPLATE=\"$author_template\"", containerfile)
+        self.assertIn("if author.startswith(prefix) and author.endswith(suffix):", containerfile)
+        self.assertIn("rewritten = author_template.replace('%s', author).strip()", containerfile)
+        self.assertIn("name.text = rewritten", containerfile)
         self.assertIn("APP_ICON=\"$app_icon\"", containerfile)
         self.assertIn("icon.text = app_icon", containerfile)
 

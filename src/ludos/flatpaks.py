@@ -477,24 +477,19 @@ def _ensure_flatpak_images(
             branch=plan.branch,
             flatpak_arch=plan.flatpak_arch,
         )
-        if cache_only and _image_exists(context.podman, plan.output_image):
-            log(f"Reusing flatpak image: {plan.output_image}")
-        elif cache_only:
-            raise ConfigError(f"flatpak image is not cached: {plan.output_image}")
-        else:
-            _run_flatpak_image_build(
-                context.podman,
-                _require_buildah(context.buildah),
-                plan.final_build_dir,
-                plan.output_image,
-                plan.metadata,
-                plan.card.flatpak.app_id,
-                flatpak_images=getattr(
-                    context,
-                    "flatpak_images",
-                    FlatpakImagesConfig(),
-                ),
-            )
+        _run_flatpak_image_build(
+            context.podman,
+            _require_buildah(context.buildah),
+            plan.final_build_dir,
+            plan.output_image,
+            plan.metadata,
+            plan.card.flatpak.app_id,
+            flatpak_images=getattr(
+                context,
+                "flatpak_images",
+                FlatpakImagesConfig(),
+            ),
+        )
         results.append(
             FlatpakBuildResult(
                 app_id=plan.card.flatpak.app_id,
