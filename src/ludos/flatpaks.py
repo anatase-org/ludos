@@ -8,6 +8,7 @@ import shutil
 import struct
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from .common import (
 from .logging import log
 from .model import (
     ConfigError,
+    FlatpakImagesConfig,
     ManifestRuntime,
     SpecBuild,
     _env_dict,
@@ -487,6 +489,11 @@ def _ensure_flatpak_images(
                 plan.output_image,
                 plan.metadata,
                 plan.card.flatpak.app_id,
+                flatpak_images=getattr(
+                    context,
+                    "flatpak_images",
+                    FlatpakImagesConfig(),
+                ),
             )
         results.append(
             FlatpakBuildResult(
@@ -1334,6 +1341,8 @@ def _run_flatpak_image_build(
     image: str,
     metadata: str,
     app_id: str,
+    *,
+    flatpak_images: FlatpakImagesConfig = FlatpakImagesConfig(),
 ) -> None:
     containerfile = build_dir / "Containerfile"
     final_containerfile = build_dir / "Containerfile.final"
@@ -1367,6 +1376,11 @@ def _run_flatpak_image_build(
             build_image_id,
             app_id,
             files_root="/out/files",
+        )
+        appstream_labels = _flatpak_appstream_labels_with_remote_icon(
+            appstream_labels,
+            app_id,
+            flatpak_images.uri,
         )
         base_labels = _read_flatpak_label_file(build_dir)
         labels_by_name = dict(base_labels)
@@ -1586,6 +1600,56 @@ def _flatpak_appstream_labels(
         subprocess.run([podman, "rm", "-f", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     return labels
+
+
+def _flatpak_appstream_labels_with_remote_icon(
+    labels: dict[str, str],
+    app_id: str,
+    uri: str,
+) -> dict[str, str]:
+    if not uri or "org.freedesktop.appstream.icon-128" not in labels:
+        return labels
+    appdata = labels.get("org.freedesktop.appstream.appdata")
+    if not appdata:
+        return labels
+    try:
+        root = ET.fromstring(appdata)
+    except ET.ParseError as exc:
+        raise ConfigError(
+            f"invalid flatpak AppStream metadata for {app_id}: {exc}"
+        ) from exc
+
+    icon_url = _join_uri(uri, "128x128", f"{app_id}.png")
+    changed = False
+    for component in root.iter("component"):
+        component_id = component.findtext("id")
+        if component_id is not None and component_id != app_id:
+            continue
+        if any(
+            icon.get("type") == "remote"
+            and (icon.text or "").strip() == icon_url
+            for icon in component.findall("icon")
+        ):
+            continue
+        icon = ET.SubElement(
+            component,
+            "icon",
+            {"type": "remote", "width": "128", "height": "128"},
+        )
+        icon.text = icon_url
+        changed = True
+    if not changed:
+        return labels
+
+    result = dict(labels)
+    result["org.freedesktop.appstream.appdata"] = _compact_xml(
+        ET.tostring(root, encoding="unicode")
+    )
+    return result
+
+
+def _join_uri(base: str, *parts: str) -> str:
+    return "/".join((base.rstrip("/"), *(part.strip("/") for part in parts)))
 
 
 def _flatpak_payload_size(podman: str, image: str, path: str) -> int:

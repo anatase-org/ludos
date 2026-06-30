@@ -12,6 +12,7 @@ from ludos.__main__ import build_command, build_parser
 from ludos.flatpaks import (
     FlatpakCard,
     build_flatpaks,
+    _flatpak_appstream_labels_with_remote_icon,
     _flatpak_build_env,
     _flatpak_commit_metadata_labels,
     _flatpak_metadata,
@@ -42,6 +43,31 @@ class FlatpakParserTests(unittest.TestCase):
         self.assertEqual(args.flatpak, Path("flatpaks/kate"))
         self.assertIsNone(args.card)
         self.assertFalse(args.flatpaks)
+
+    def test_appstream_labels_append_remote_icon_from_project_uri(self) -> None:
+        labels = _flatpak_appstream_labels_with_remote_icon(
+            {
+                "org.freedesktop.appstream.appdata": (
+                    "<components><component type=\"desktop-application\">"
+                    "<id>org.anatase.ArchiveManager</id>"
+                    "<icon type=\"cached\" width=\"128\" height=\"128\">"
+                    "org.anatase.ArchiveManager"
+                    "</icon>"
+                    "</component></components>"
+                ),
+                "org.freedesktop.appstream.icon-128": "data:image/png;base64,AA==",
+            },
+            "org.anatase.ArchiveManager",
+            "https://flatpaks.anatase.org/icons/",
+        )
+
+        self.assertIn(
+            '<icon type="remote" width="128" height="128">'
+            "https://flatpaks.anatase.org/icons/128x128/"
+            "org.anatase.ArchiveManager.png"
+            "</icon>",
+            labels["org.freedesktop.appstream.appdata"],
+        )
 
     def test_build_parser_accepts_flatpaks_target(self) -> None:
         parser = build_parser()

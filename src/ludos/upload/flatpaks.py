@@ -10,6 +10,7 @@ import struct
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Mapping
 from xml.sax.saxutils import escape
 
 from ..common import (
@@ -26,9 +27,22 @@ from ..flatpaks import (
     build_flatpak,
     build_flatpaks,
     _flatpak_arch,
+    _flatpak_appstream_labels_with_remote_icon,
 )
 from ..logging import log
-from ..model import ConfigError, ManifestRuntime, ManifestValidation, validate_manifest
+from ..model import (
+    ConfigError,
+    FlatpakImagesConfig,
+    ManifestRuntime,
+    ManifestValidation,
+    Project,
+    validate_manifest,
+)
+from .common import (
+    REGISTRY_SHORT_CACHE_CONTROL,
+    _create_s3_client,
+    _s3_config_from_env,
+)
 from .registry import tree_shake_oci, update_flatpak_static_index, upload_oci
 
 
@@ -51,6 +65,7 @@ class FlatpakUploadContext:
     local_prefix: str
     cache_dir: Path
     podman: str
+    flatpak_images: FlatpakImagesConfig
 
 
 @dataclass(frozen=True)
@@ -68,6 +83,9 @@ def upload_flatpaks(
     flatpaks: tuple[Path, ...],
     build: bool,
     cache_dir: Path | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
 ) -> int:
     context = _resolve_flatpak_upload_context(manifest, cache_dir=cache_dir)
     targets = _upload_targets(context, flatpaks)
@@ -83,7 +101,9 @@ def upload_flatpaks(
         if not build and not _image_exists(context.podman, image):
             raise ConfigError(f"flatpak image is not cached: {image}")
         _export_flatpak_image(context.podman, image, target)
+        labels = _prepare_exported_flatpak_metadata(context, target)
         upload_oci(target.export_dir, target.ref, (target.tag,))
+        _upload_flatpak_icon(context, labels, environ=environ, client=client)
     return 0
 
 
@@ -163,6 +183,7 @@ def _resolve_flatpak_upload_context(
         raise ConfigError(f"{manifest}: missing flatpak definitions: {missing}")
 
     root_dir = manifest_path.parent
+    flatpak_images = _project_flatpak_images(root_dir)
     manifest_env = {key: str(value) for key, value in validation.manifest.env.items()}
     local_values = _load_dotenv(root_dir / ".env")
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
@@ -204,7 +225,15 @@ def _resolve_flatpak_upload_context(
         local_prefix=local_prefix,
         cache_dir=resolved_cache_dir,
         podman=podman,
+        flatpak_images=flatpak_images,
     )
+
+
+def _project_flatpak_images(root_dir: Path) -> FlatpakImagesConfig:
+    project_config = root_dir / "ludos.yml"
+    if not project_config.exists():
+        return FlatpakImagesConfig()
+    return Project.from_file(project_config).flatpak_images
 
 
 def _upload_targets(
@@ -287,6 +316,192 @@ def _export_flatpak_image(
     returncode, _output = _run_streamed_command(command)
     if returncode != 0:
         raise ConfigError(f"flatpak OCI export failed with exit status {returncode}")
+
+
+def _prepare_exported_flatpak_metadata(
+    context: FlatpakUploadContext,
+    target: FlatpakUploadTarget,
+) -> dict[str, str]:
+    if not context.flatpak_images.uri and not context.flatpak_images.s3:
+        return {}
+
+    state = _read_exported_flatpak_state(target.export_dir)
+    labels = state["labels"]
+    if context.flatpak_images.uri:
+        app_id = _flatpak_ref_app_id(labels.get("org.flatpak.ref", ""))
+        labels = _flatpak_appstream_labels_with_remote_icon(
+            labels,
+            app_id,
+            context.flatpak_images.uri,
+        )
+        if labels != state["labels"]:
+            _write_exported_flatpak_state(target.export_dir, state, labels)
+    return labels
+
+
+def _read_exported_flatpak_state(export_dir: Path) -> dict[str, Any]:
+    blobs_dir = export_dir / "blobs" / "sha256"
+    index = _read_json_file(export_dir / "index.json", "flatpak OCI index")
+    manifests = index.get("manifests")
+    if not isinstance(manifests, list) or len(manifests) != 1:
+        raise ConfigError(f"{export_dir}: flatpak OCI index must contain one manifest")
+    manifest_desc = manifests[0]
+    manifest_digest = _descriptor_digest(manifest_desc, "flatpak OCI manifest")
+    manifest = _read_json_file(
+        blobs_dir / manifest_digest.removeprefix("sha256:"),
+        "flatpak OCI manifest",
+    )
+    config_desc = manifest.get("config")
+    config_digest = _descriptor_digest(config_desc, "flatpak OCI config")
+    config = _read_json_file(
+        blobs_dir / config_digest.removeprefix("sha256:"),
+        "flatpak OCI config",
+    )
+    config_data = config.get("config")
+    if not isinstance(config_data, dict):
+        raise ConfigError(f"{export_dir}: flatpak OCI config.config must be a mapping")
+    labels = config_data.get("Labels")
+    if labels is None:
+        labels = {}
+    if not isinstance(labels, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in labels.items()
+    ):
+        raise ConfigError(f"{export_dir}: flatpak OCI config labels must be strings")
+    return {
+        "index": index,
+        "manifest": manifest,
+        "config": config,
+        "labels": dict(labels),
+    }
+
+
+def _write_exported_flatpak_state(
+    export_dir: Path,
+    state: dict[str, Any],
+    labels: dict[str, str],
+) -> None:
+    blobs_dir = export_dir / "blobs" / "sha256"
+    config = state["config"]
+    config.setdefault("config", {})["Labels"] = labels
+    config_blob = _write_oci_blob(blobs_dir, _json_bytes(config))
+
+    manifest = state["manifest"]
+    manifest["config"]["digest"] = config_blob["digest"]
+    manifest["config"]["size"] = config_blob["size"]
+    manifest_blob = _write_oci_blob(blobs_dir, _json_bytes(manifest))
+
+    index = state["index"]
+    index["manifests"][0]["digest"] = manifest_blob["digest"]
+    index["manifests"][0]["size"] = manifest_blob["size"]
+    (export_dir / "index.json").write_bytes(_json_bytes(index))
+
+
+def _read_json_file(path: Path, what: str) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ConfigError(f"invalid {what}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"{what} must be a JSON object")
+    return data
+
+
+def _descriptor_digest(value: object, what: str) -> str:
+    if not isinstance(value, dict):
+        raise ConfigError(f"{what} descriptor must be a JSON object")
+    digest = value.get("digest")
+    if not isinstance(digest, str) or not digest.startswith("sha256:"):
+        raise ConfigError(f"{what} descriptor is missing sha256 digest")
+    return digest
+
+
+def _flatpak_ref_app_id(ref: str) -> str:
+    parts = ref.split("/")
+    if len(parts) != 4 or parts[0] != "app" or not parts[1]:
+        raise ConfigError(f"invalid flatpak app ref: {ref}")
+    return parts[1]
+
+
+def _upload_flatpak_icon(
+    context: FlatpakUploadContext,
+    labels: dict[str, str],
+    *,
+    environ: Mapping[str, str] | None,
+    client: Any | None,
+) -> None:
+    if not context.flatpak_images.s3:
+        return
+    icon_label = labels.get("org.freedesktop.appstream.icon-128")
+    if not icon_label:
+        return
+    app_id = _flatpak_ref_app_id(labels.get("org.flatpak.ref", ""))
+    icon = _decode_png_data_url(icon_label)
+    if context.flatpak_images.overlay:
+        overlay = _flatpak_image_overlay_path(
+            context.root_dir,
+            context.flatpak_images.overlay,
+        )
+        icon = _overlay_icon(
+            icon,
+            overlay,
+        )
+
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+    key = _join_s3_key(context.flatpak_images.s3, "128x128", f"{app_id}.png")
+    log(f"Uploading flatpak icon: {key}")
+    try:
+        s3.put_object(
+            Bucket=config.bucket,
+            Key=key,
+            Body=icon,
+            ContentType="image/png",
+            CacheControl=REGISTRY_SHORT_CACHE_CONTROL,
+        )
+    except Exception as exc:
+        raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc
+
+
+def _decode_png_data_url(value: str) -> bytes:
+    payload = value.split(",", 1)[1] if value.startswith("data:") else value
+    try:
+        return base64.b64decode(payload, validate=True)
+    except Exception as exc:
+        raise ConfigError("invalid flatpak icon base64 data") from exc
+
+
+def _overlay_icon(icon: bytes, overlay: Path) -> bytes:
+    if not overlay.is_file():
+        raise ConfigError(f"flatpak icon overlay does not exist: {overlay}")
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ConfigError(
+            "Pillow must be installed to use flatpaks.images.overlay"
+        ) from exc
+
+    with Image.open(io.BytesIO(icon)).convert("RGBA") as base:
+        with Image.open(overlay).convert("RGBA") as overlay_image:
+            if overlay_image.size != base.size:
+                resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+                overlay_image = overlay_image.resize(base.size, resample)
+            base.alpha_composite(overlay_image)
+        output = io.BytesIO()
+        base.save(output, format="PNG")
+        return output.getvalue()
+
+
+def _flatpak_image_overlay_path(root_dir: Path, value: str) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else root_dir / path
+
+
+def _join_s3_key(base: str, *parts: str) -> str:
+    key = "/".join((base.strip("/"), *(part.strip("/") for part in parts)))
+    if key.startswith("/") or ".." in key.split("/") or "//" in key:
+        raise ConfigError(f"invalid flatpak image S3 key: {key}")
+    return key
 
 
 def _remove_export_dir(path: Path) -> None:

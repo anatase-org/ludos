@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import ExitStack
+import hashlib
 import json
 import struct
 import tempfile
@@ -17,6 +18,7 @@ from ludos.upload.flatpaks import (
     upload_dummy_runtime,
     upload_flatpaks,
 )
+from test_upload_file import ENV, FakeS3Client
 
 
 class UploadFlatpaksTests(unittest.TestCase):
@@ -357,6 +359,84 @@ class UploadFlatpaksTests(unittest.TestCase):
                 "localhost/flatpaks:built-ark",
             )
 
+    def test_upload_flatpaks_uploads_configured_remote_icon(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+            (root / "ludos.yml").write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "name: Test",
+                        "flatpaks:",
+                        "  images:",
+                        "    uri: https://flatpaks.example.test/icons/",
+                        "    s3: icons/",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            icon = base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+            )
+
+            def run_streamed(command: list[str]) -> tuple[int, str]:
+                export = Path(command[-1].removeprefix("oci:").rsplit(":", 1)[0])
+                _write_exported_flatpak(
+                    export,
+                    labels={
+                        "org.flatpak.ref": "app/org.anatase.Kate/x86_64/stable",
+                        "org.freedesktop.appstream.appdata": (
+                            "<components><component type=\"desktop-application\">"
+                            "<id>org.anatase.Kate</id>"
+                            "</component></components>"
+                        ),
+                        "org.freedesktop.appstream.icon-128": (
+                            "data:image/png;base64,"
+                            + base64.b64encode(icon).decode()
+                        ),
+                    },
+                )
+                return 0, ""
+
+            client = FakeS3Client()
+            with (
+                patch("ludos.upload.flatpaks.shutil.which", return_value="/usr/bin/podman"),
+                patch("ludos.upload.flatpaks._image_exists", return_value=True),
+                patch(
+                    "ludos.upload.flatpaks._run_streamed_command",
+                    side_effect=run_streamed,
+                ),
+                patch("ludos.upload.flatpaks.upload_oci", return_value=0) as upload_oci,
+            ):
+                self.assertEqual(
+                    upload_flatpaks(
+                        manifest,
+                        tuple(),
+                        False,
+                        environ=ENV,
+                        client=client,
+                    ),
+                    0,
+                )
+
+            export_dir = root / "cache" / "flatpaks" / "kate-f44-x86_64"
+            upload_oci.assert_called_once_with(
+                export_dir,
+                "flatpaks/kate",
+                ("f44-x86_64",),
+            )
+            self.assertEqual(
+                [(put["Key"], put["ContentType"], put["Body"]) for put in client.puts],
+                [("icons/128x128/org.anatase.Kate.png", "image/png", icon)],
+            )
+            labels = _exported_flatpak_labels(export_dir)
+            self.assertIn(
+                "https://flatpaks.example.test/icons/128x128/org.anatase.Kate.png",
+                labels["org.freedesktop.appstream.appdata"],
+            )
+
     def test_tree_shake_flatpaks_uses_all_manifest_flatpaks_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -638,6 +718,66 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
         encoding="utf-8",
     )
     return manifest
+
+
+def _write_exported_flatpak(export: Path, *, labels: dict[str, str]) -> None:
+    blobs = export / "blobs" / "sha256"
+    blobs.mkdir(parents=True, exist_ok=True)
+    (export / "oci-layout").write_text(
+        json.dumps({"imageLayoutVersion": "1.0.0"}),
+        encoding="utf-8",
+    )
+    config = {
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {"Labels": labels},
+        "rootfs": {"type": "layers", "diff_ids": []},
+    }
+    config_blob = _write_blob(blobs, config)
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": config_blob["digest"],
+            "size": config_blob["size"],
+        },
+        "layers": [],
+    }
+    manifest_blob = _write_blob(blobs, manifest)
+    index = {
+        "schemaVersion": 2,
+        "manifests": [
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": manifest_blob["digest"],
+                "size": manifest_blob["size"],
+            }
+        ],
+    }
+    (export / "index.json").write_text(json.dumps(index), encoding="utf-8")
+
+
+def _write_blob(blobs: Path, data: object) -> dict[str, object]:
+    body = (json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+    digest = hashlib.sha256(body).hexdigest()
+    (blobs / digest).write_bytes(body)
+    return {"digest": f"sha256:{digest}", "size": len(body)}
+
+
+def _exported_flatpak_labels(export: Path) -> dict[str, str]:
+    index = json.loads((export / "index.json").read_text(encoding="utf-8"))
+    manifest_digest = index["manifests"][0]["digest"].removeprefix("sha256:")
+    manifest = json.loads(
+        (export / "blobs" / "sha256" / manifest_digest).read_text(encoding="utf-8")
+    )
+    config_digest = manifest["config"]["digest"].removeprefix("sha256:")
+    config = json.loads(
+        (export / "blobs" / "sha256" / config_digest).read_text(encoding="utf-8")
+    )
+    return config["config"]["Labels"]
 
 
 def _uint64_variant_label(value: str) -> int:

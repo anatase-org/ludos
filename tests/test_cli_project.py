@@ -9,9 +9,40 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ludos.__main__ import main
+from ludos.model import Project
 
 
 class CliProjectTests(unittest.TestCase):
+    def test_project_parser_accepts_flatpak_images(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "name: Anatase",
+                        "flatpaks:",
+                        "  images:",
+                        "    uri: https://flatpaks.example.test/icons/",
+                        "    s3: icons/",
+                        "    overlay: ./flatpaks/overlay.png",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            project = Project.from_file(config)
+
+        self.assertEqual(project.name, "Anatase")
+        self.assertEqual(
+            project.flatpak_images.uri,
+            "https://flatpaks.example.test/icons/",
+        )
+        self.assertEqual(project.flatpak_images.s3, "icons/")
+        self.assertEqual(project.flatpak_images.overlay, "./flatpaks/overlay.png")
+
     def test_build_from_subdirectory_uses_discovered_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             original_cwd = Path.cwd()

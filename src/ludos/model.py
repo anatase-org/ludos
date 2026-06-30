@@ -14,29 +14,33 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class FlatpakImagesConfig:
+    uri: str = ""
+    s3: str = ""
+    overlay: str = ""
+
+
+@dataclass(frozen=True)
 class Project:
     name: str
     root: Path
+    flatpak_images: FlatpakImagesConfig = FlatpakImagesConfig()
 
     @classmethod
     def from_file(cls, path: Path) -> "Project":
         root = path.resolve().parent
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as exc:
-            raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
-
-        if data is None:
-            return cls(name=root.name, root=root)
-        if not isinstance(data, dict):
-            raise ConfigError(f"{path}: expected a YAML mapping")
+        data = _load_mapping(path)
 
         name = data.get("name", root.name)
         if not isinstance(name, str):
             raise ConfigError(f"{path}: 'name' must be a string")
 
         name = name.strip()
-        return cls(name=name or root.name, root=root)
+        return cls(
+            name=name or root.name,
+            root=root,
+            flatpak_images=_flatpak_images_config(data, path),
+        )
 
 
 @dataclass(frozen=True)
@@ -435,6 +439,34 @@ def _installer_config(data: dict[str, Any], path: Path) -> InstallerConfig:
         files=_string_tuple(value, "files", path),
         build=_optional_string(value, "build", path),
         ostree=_optional_bool(value, "ostree", path, "installer"),
+    )
+
+
+def _flatpak_images_config(data: dict[str, Any], path: Path) -> FlatpakImagesConfig:
+    flatpaks = data.get("flatpaks")
+    if flatpaks is None:
+        return FlatpakImagesConfig()
+    if not isinstance(flatpaks, dict):
+        raise ConfigError(f"{path}: 'flatpaks' must be a mapping")
+    allowed_flatpaks = {"images"}
+    for key in flatpaks:
+        if key not in allowed_flatpaks:
+            raise ConfigError(f"{path}: 'flatpaks.{key}' is not supported")
+
+    images = flatpaks.get("images")
+    if images is None:
+        return FlatpakImagesConfig()
+    if not isinstance(images, dict):
+        raise ConfigError(f"{path}: 'flatpaks.images' must be a mapping")
+    allowed_images = {"uri", "s3", "overlay"}
+    for key in images:
+        if key not in allowed_images:
+            raise ConfigError(f"{path}: 'flatpaks.images.{key}' is not supported")
+
+    return FlatpakImagesConfig(
+        uri=_optional_string(images, "uri", path).strip(),
+        s3=_optional_string(images, "s3", path).strip(),
+        overlay=_optional_string(images, "overlay", path).strip(),
     )
 
 
