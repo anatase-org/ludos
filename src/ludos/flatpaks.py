@@ -254,8 +254,8 @@ def _prepare_flatpak_build_plan(
     latest_image = output_image
 
     log(f"Building flatpak {card.flatpak.app_id} for {context.distro}")
-    substitution_env = dict(context.manifest_env)
-    build_env = _flatpak_build_env(context.manifest_env, card.env)
+    substitution_env = _flatpak_build_env(context.manifest_env, card.env)
+    build_env = dict(substitution_env)
     specs = _substitute_specs(card.specs, substitution_env)
     flatpak_cache_dir = (
         context.distro_cache_dir / "flatpaks" / _identifier(app_name)

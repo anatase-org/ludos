@@ -368,6 +368,90 @@ class FlatpakParserTests(unittest.TestCase):
         self.assertEqual(plan.output_image, "localhost/flatpaks:f44-x86_64-kate")
         self.assertEqual(plan.latest_image, plan.output_image)
 
+    def test_prepare_flatpak_build_plan_hashes_only_scoped_env(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            flatpak_dir = root / "flatpaks" / "kate"
+            flatpak_dir.mkdir(parents=True)
+            card_path = flatpak_dir / "card.yaml"
+            card_path.write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.TextEditor
+  command: kate
+build-deps:
+  - rpm-build
+env:
+  EXTRA_VERSION: $tag-extra
+specs:
+  - spec: git+https://example.test/kate:kate.spec#branch=$EXTRA_VERSION
+    packages: [kate]
+""",
+                encoding="utf-8",
+            )
+            context = self._flatpak_context(root)
+            context.manifest_env = {
+                "arch": "x86_64",
+                "releasever": "44",
+                "tag": "44",
+                "version": "20260629",
+                "distro": "f44-x86_64",
+                "UNUSED": "changes-should-not-matter",
+            }
+            captured: dict[str, object] = {}
+
+            def card_specs_hash(
+                _card_source: Path,
+                specs: tuple[SpecBuild, ...],
+                card_env: dict[str, str],
+                *_args: object,
+                **_kwargs: object,
+            ) -> tuple[str, dict[str, str]]:
+                captured["hash_specs"] = specs
+                captured["hash_env"] = dict(card_env)
+                return "spechash", {}
+
+            def stage_card_specs(
+                *,
+                specs: tuple[SpecBuild, ...],
+                card_env: dict[str, str],
+                **_kwargs: object,
+            ) -> tuple[object, ...]:
+                captured["stage_specs"] = specs
+                captured["stage_env"] = dict(card_env)
+                return tuple()
+
+            with patch.multiple(
+                "ludos.flatpaks",
+                _card_specs_hash=card_specs_hash,
+                _stage_card_specs=stage_card_specs,
+                _resolve_staged_spec_builder_packages=lambda *args, **kwargs: tuple(),
+                _resolve_packages=lambda *args, **kwargs: ("rpm-build",),
+            ):
+                plan = _prepare_flatpak_build_plan(
+                    context,
+                    card_path.parent,
+                    cache_only=False,
+                )
+
+        expected_env = {
+            "arch": "x86_64",
+            "releasever": "44",
+            "EXTRA_VERSION": "44-extra",
+        }
+        self.assertEqual(plan.substitution_env, expected_env)
+        self.assertEqual(plan.build_env, expected_env)
+        self.assertEqual(captured["hash_env"], expected_env)
+        self.assertEqual(captured["stage_env"], expected_env)
+        self.assertNotIn("distro", captured["hash_env"])
+        self.assertNotIn("version", captured["hash_env"])
+        self.assertEqual(
+            captured["hash_specs"][0].spec,
+            "git+https://example.test/kate:kate.spec#branch=44-extra",
+        )
+        self.assertEqual(captured["hash_specs"], captured["stage_specs"])
+
     def test_prepare_flatpak_build_plan_names_multiple_apps_from_cards(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
