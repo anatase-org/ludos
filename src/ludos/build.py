@@ -633,10 +633,6 @@ def _resolve_manifest_metadata(
             card_specs,
             arch,
         )
-        locally_built_package_ids = set().union(
-            *locally_built_package_ids_by_card.values()
-        ) if locally_built_package_ids_by_card else set()
-
         log("Resolving package transaction for bootstrap")
         bootstrap_resolved_packages = _resolve_packages(
             orchestrator_dnf_base,
@@ -761,15 +757,19 @@ def _resolve_manifest_metadata(
 
         resolved_package_list = list(bootstrap_resolved_packages)
         resolved_package_list.extend(common_packages)
+        active_locally_built_package_ids = set()
         active_oci_package_ids = set()
         for card_name, card_resolution in zip(card_names, card_resolutions):
+            active_locally_built_package_ids.update(
+                locally_built_package_ids_by_card.get(card_name, set())
+            )
             active_oci_package_ids.update(card_oci_package_ids.get(card_name, set()))
             card_packages = []
             for package in card_resolution:
                 if package in bootstrap_package_set or package in common_package_set:
                     continue
                 package_id = _resolved_package_id(package_id_by_nevra, package)
-                if package_id in locally_built_package_ids:
+                if package_id in active_locally_built_package_ids:
                     continue
                 if package_id in active_oci_package_ids:
                     continue
