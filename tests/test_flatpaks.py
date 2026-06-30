@@ -181,6 +181,7 @@ class FlatpakParserTests(unittest.TestCase):
                 author="Anatase Test Authors",
                 description="Anatase Platform runtime for tests.",
                 license="LicenseRef-Anatase-Test",
+                image="https://flatpaks.example.test/icons/128x128/org.anatase.Platform.png",
             ),
         )
 
@@ -708,6 +709,7 @@ specs:
                     "  author: Anatase Test Authors",
                     "  description: Anatase Platform runtime for tests.",
                     "  license: LicenseRef-Anatase-Test",
+                    "  image: https://flatpaks.example.test/icons/128x128/org.anatase.Platform.png",
                     "bootstrap: cards/bootstrap.yml",
                     "repos: []",
                     "cards:",

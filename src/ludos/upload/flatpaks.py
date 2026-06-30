@@ -696,6 +696,12 @@ def _dummy_runtime_appstream(
     name = runtime.title or runtime.id
     summary = runtime.description or name
     escaped_author = escape(author)
+    icon = (
+        f"    <icon type=\"remote\" width=\"128\" height=\"128\">"
+        f"{escape(runtime.image)}</icon>\n"
+        if runtime.image
+        else ""
+    )
     return _compact_xml(
         "<?xml version='1.0' encoding='UTF-8'?>\n"
         "<components version=\"1.0\">\n"
@@ -709,6 +715,7 @@ def _dummy_runtime_appstream(
         f"      <name>{escaped_author}</name>\n"
         "    </developer>\n"
         f"    <developer_name>{escaped_author}</developer_name>\n"
+        f"{icon}"
         "    <metadata_license>CC0-1.0</metadata_license>\n"
         f"    <project_license>{escape(runtime.license)}</project_license>\n"
         "  </component>\n"

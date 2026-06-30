@@ -568,6 +568,13 @@ class UploadFlatpaksTests(unittest.TestCase):
                     "<developer_name>Anatase Test Authors</developer_name>",
                     appdata,
                 )
+                self.assertIn(
+                    '<icon type="remote" width="128" height="128">'
+                    "https://flatpaks.example.test/icons/128x128/"
+                    "org.anatase.Platform.png"
+                    "</icon>",
+                    appdata,
+                )
                 self.assertIn("<metadata_license>CC0-1.0</metadata_license>", appdata)
                 self.assertIn(
                     "<project_license>LicenseRef-Anatase-Test</project_license>",
@@ -669,7 +676,8 @@ class UploadFlatpaksTests(unittest.TestCase):
                     "  title: Anatase Test Runtime\n"
                     "  author: Anatase Test Authors\n"
                     "  description: Anatase Platform runtime for tests.\n"
-                    "  license: LicenseRef-Anatase-Test\n",
+                    "  license: LicenseRef-Anatase-Test\n"
+                    "  image: https://flatpaks.example.test/icons/128x128/org.anatase.Platform.png\n",
                     "",
                 ),
                 encoding="utf-8",
@@ -706,6 +714,7 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
                 "  author: Anatase Test Authors",
                 "  description: Anatase Platform runtime for tests.",
                 "  license: LicenseRef-Anatase-Test",
+                "  image: https://flatpaks.example.test/icons/128x128/org.anatase.Platform.png",
                 "bootstrap: cards/bootstrap.yml",
                 "repos: []",
                 "cards:",

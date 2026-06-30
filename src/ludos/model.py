@@ -142,6 +142,7 @@ class ManifestRuntime:
     author: str = ""
     description: str = ""
     license: str = ""
+    image: str = ""
 
 
 @dataclass(frozen=True)
@@ -476,7 +477,16 @@ def _manifest_runtime(data: dict[str, Any], path: Path) -> ManifestRuntime | Non
         return None
     if not isinstance(value, dict):
         raise ConfigError(f"{path}: 'runtime' must be a mapping")
-    allowed = {"id", "repo", "branch", "title", "author", "description", "license"}
+    allowed = {
+        "id",
+        "repo",
+        "branch",
+        "title",
+        "author",
+        "description",
+        "license",
+        "image",
+    }
     for key in value:
         if key not in allowed:
             raise ConfigError(f"{path}: 'runtime.{key}' is not supported")
@@ -488,6 +498,7 @@ def _manifest_runtime(data: dict[str, Any], path: Path) -> ManifestRuntime | Non
         author=_optional_string(value, "author", path).strip(),
         description=_optional_string(value, "description", path).strip(),
         license=_optional_string(value, "license", path).strip(),
+        image=_optional_string(value, "image", path).strip(),
     )
 
 
