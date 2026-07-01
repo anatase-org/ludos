@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as _datetime
 import json
 import shutil
 import subprocess
@@ -8,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .build import _run_logged_command, resolve_manifest_images
+from .common import _default_cache_version
 from .flatpaks import resolve_manifest_flatpak_images
 from .logging import log
 from .model import ConfigError
@@ -100,7 +100,7 @@ def _log_intermediate_cleanup_hint() -> None:
 
 def _cleanup_version(value: str | None) -> str:
     if value is None:
-        return _datetime.date.today().strftime("%Y%m%d")
+        return _default_cache_version()
     if "/" in value or value in ("", ".", ".."):
         raise ConfigError(f"invalid version cache name '{value}'")
     return value

@@ -101,7 +101,7 @@ def resolve_manifest_context(
     local_prefix = _local_prefix(local_prefix)
     manifest_env.update(local_values)
     if cache_version is None:
-        cache_version = _datetime.date.today().strftime("%Y%m%d")
+        cache_version = _default_cache_version()
         load_only_version = False
     else:
         cache_version = _cache_name(cache_version, "version")
@@ -628,6 +628,19 @@ def _cache_name(value: str, description: str) -> str:
     if "/" in value or value in ("", ".", ".."):
         raise ConfigError(f"invalid {description} cache name '{value}'")
     return value
+
+
+def _default_cache_version(
+    now: _datetime.datetime | None = None,
+) -> str:
+    if now is None:
+        now = _datetime.datetime.now(_datetime.UTC)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=_datetime.UTC)
+    else:
+        now = now.astimezone(_datetime.UTC)
+    iso_year, iso_week, _iso_day = now.isocalendar()
+    return f"{iso_year:04d}.{iso_week:02d}"
 
 
 def _substitute_variables(value: str, variables: dict[str, str]) -> str:

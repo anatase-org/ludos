@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--version",
         default=None,
-        help="Repository/package cache version to load. Defaults to the current YYYYMMDD and creates missing cache images.",
+        help="Repository/package cache version to load. Defaults to the current UTC ISO week as YYYY.WW and creates missing cache images.",
     )
     build.add_argument(
         "--ci",
@@ -515,7 +515,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument(
         "--version",
         default=None,
-        help="Repository/package cache version to load. Defaults to the current YYYYMMDD and creates missing cache images.",
+        help="Repository/package cache version to load. Defaults to the current UTC ISO week as YYYY.WW and creates missing cache images.",
     )
     create_parser.add_argument(
         "--ci",
@@ -620,7 +620,7 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.add_argument(
         "--version",
         default=None,
-        help="Cache version to keep. Defaults to the current YYYYMMDD.",
+        help="Cache version to keep. Defaults to the current UTC ISO week as YYYY.WW.",
     )
     cleanup.add_argument(
         "--local-prefix",

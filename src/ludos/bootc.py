@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as _datetime
 import json
 import os
 import re
@@ -22,6 +21,7 @@ from .build import (
     build_package_card_images,
     resolve_build_manifests,
 )
+from .common import _default_cache_version
 from .logging import log, piter, pstream, warning
 from .model import ConfigError, Manifest
 from .rechunk.alg import main as rechunk_main
@@ -323,7 +323,7 @@ def _manifest_artifact_env(
     _local_prefix(local_prefix)
     env.update(local_values)
     if cache_version is None:
-        cache_version = _datetime.date.today().strftime("%Y%m%d")
+        cache_version = _default_cache_version()
     else:
         cache_version = _cache_name(cache_version, "version")
     env["version"] = cache_version

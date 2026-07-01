@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import datetime as _datetime
 import hashlib
 import io
 import json
@@ -15,6 +14,7 @@ from xml.sax.saxutils import escape
 
 from ..common import (
     _cache_name,
+    _default_cache_version,
     _image_exists,
     _load_dotenv,
     _local_image,
@@ -190,7 +190,7 @@ def _resolve_flatpak_upload_context(
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
     local_prefix = _local_prefix(local_prefix)
     manifest_env.update(local_values)
-    manifest_env["version"] = _datetime.date.today().strftime("%Y%m%d")
+    manifest_env["version"] = _default_cache_version()
     releasever = _cache_name(
         _substitute_variables(validation.manifest.releasever, manifest_env),
         "releasever",
