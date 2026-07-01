@@ -612,11 +612,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cache directory used only for the default output location.",
     )
     installer_parser.add_argument(
-        "--cache",
-        action="store_true",
-        help="Use ./cache for installer artifacts and resolved flatpak images.",
-    )
-    installer_parser.add_argument(
         "--orchestrator",
         default=None,
         help="Container image used to run installer tooling. Defaults to the image ref.",
@@ -937,15 +932,11 @@ def bootc_command(args: argparse.Namespace) -> int:
             process=not args.no_process,
         )
     if args.bootc_action == "installer":
-        cache_dir = args.cache_dir
-        if args.cache and cache_dir is None:
-            cache_dir = Path("cache")
         return bootc_installer(
             args.manifest,
             args.ref,
             output=args.output,
-            cache_dir=cache_dir,
-            cache_only=args.cache,
+            cache_dir=args.cache_dir,
             orchestrator=args.orchestrator,
             scratch=args.scratch,
             force=args.force,

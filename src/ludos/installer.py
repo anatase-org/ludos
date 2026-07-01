@@ -25,10 +25,6 @@ from .build import (
 )
 from .logging import log, stream
 from .model import ConfigError, InstallerConfig, InstallerFlatpaksConfig, Manifest
-from .upload.flatpaks import (
-    ExportedFlatpakImage,
-    export_flatpak_oci_images,
-)
 
 
 DEFAULT_LABEL_BASE = "LUDOS"
@@ -42,7 +38,6 @@ EFI_BOOT_IMAGE = Path("images/efiboot.img")
 LIVE_ROOT_IMAGE = Path("LiveOS/squashfs.img")
 LUDOS_EFI_ASSET_DIR = Path("/usr/lib/ludos/efi")
 LUDOS_EFI_BOOT_ASSETS = Path("ludos-efi")
-FLATPAK_OCI_MOUNT = Path("/ludos/flatpaks")
 BIOS_GRUB_MODULES = (
     "biosdisk",
     "iso9660",
@@ -83,7 +78,6 @@ class InstallerContext:
     scratch: bool = False
     force: bool = False
     podman: str = "podman"
-    flatpaks: tuple[ExportedFlatpakImage, ...] = tuple()
 
     @property
     def boot_assets(self) -> Path:
@@ -129,7 +123,6 @@ def bootc_installer(
     *,
     output: Path | None = None,
     cache_dir: Path | None = None,
-    cache_only: bool = False,
     orchestrator: str | None = None,
     scratch: bool = False,
     force: bool = False,
@@ -147,13 +140,6 @@ def bootc_installer(
     if podman is None:
         raise ConfigError("podman must be installed to create an installer ISO")
 
-    installer_flatpaks = _export_installer_flatpaks(
-        manifest_path,
-        manifest,
-        cache_dir=cache_dir,
-        cache_only=cache_only,
-    )
-
     prepare_ctx = InstallerContext(
         manifest=manifest,
         manifest_path=manifest_path,
@@ -163,7 +149,6 @@ def bootc_installer(
         scratch=scratch,
         force=force,
         podman=podman,
-        flatpaks=installer_flatpaks,
     )
 
     log(f"Preparing installer output directory: {prepare_ctx.output_dir}")
@@ -184,7 +169,6 @@ def bootc_installer(
         scratch=scratch,
         force=force,
         podman=podman,
-        flatpaks=installer_flatpaks,
     )
     log(f"Using installer tooling image: {ctx.orchestrator}")
     log("Creating EROFS root image")
@@ -229,31 +213,6 @@ def _prepare_output_dir(output_dir: Path) -> None:
     elif output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
-
-
-def _export_installer_flatpaks(
-    manifest_path: Path,
-    manifest: Manifest,
-    *,
-    cache_dir: Path | None,
-    cache_only: bool = False,
-) -> tuple[ExportedFlatpakImage, ...]:
-    selected = tuple(
-        dict.fromkeys(
-            ref
-            for group in manifest.installer.flatpaks
-            for ref in group.all
-        )
-    )
-    if not selected:
-        return tuple()
-    log(f"Exporting {len(selected)} installer flatpak OCI image(s)")
-    return export_flatpak_oci_images(
-        manifest_path,
-        tuple(Path(ref) for ref in selected),
-        cache_dir=cache_dir,
-        cache_only=cache_only,
-    )
 
 
 def _create_root_erofs(ctx: InstallerContext, source_ref: str, run_ref: str) -> None:
@@ -336,7 +295,6 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
             has_files,
             ctx.manifest.installer.build,
             ostree=ctx.manifest.installer.ostree,
-            flatpaks=ctx.flatpaks,
             flatpak_groups=ctx.manifest.installer.flatpaks,
         ),
         encoding="utf-8",
@@ -353,7 +311,6 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
                 *_podman_storage_volume_options(ctx),
             ]
         )
-    build_options.extend(_flatpak_oci_volume_options(ctx.flatpaks))
     _run_host(
         [
             ctx.podman,
@@ -422,19 +379,11 @@ def _installer_hash(ctx: InstallerContext, source_image: str) -> str:
                 (
                     "remote",
                     group.repo,
+                    group.nodeps,
                     group.preinstall,
                     group.installer,
                 )
                 for group in ctx.manifest.installer.flatpaks
-            )
-            + tuple(
-                (
-                    flatpak.source_ref,
-                    flatpak.image,
-                    flatpak.image_id,
-                    flatpak.tag,
-                )
-                for flatpak in ctx.flatpaks
             ),
         },
     }
@@ -487,7 +436,6 @@ def _installer_containerfile(
     build_script: str,
     *,
     ostree: bool = False,
-    flatpaks: tuple[ExportedFlatpakImage, ...] = tuple(),
     flatpak_groups: tuple[InstallerFlatpaksConfig, ...] = tuple(),
 ) -> str:
     if "\n" in base_ref:
@@ -504,8 +452,8 @@ def _installer_containerfile(
                 "LUDOS_INSTALLER_OSTREE",
             ]
         )
-    if flatpaks:
-        lines.extend(_installer_flatpak_lines(flatpaks, flatpak_groups))
+    if any(group.all for group in flatpak_groups):
+        lines.extend(_installer_flatpak_lines(flatpak_groups))
     lines.extend(
         [
             "RUN /bin/sh -ex <<'LUDOS_INSTALLER_BUILD'",
@@ -517,58 +465,31 @@ def _installer_containerfile(
     return "\n".join(lines)
 
 
-def _flatpak_oci_volume_options(
-    flatpaks: tuple[ExportedFlatpakImage, ...],
-) -> list[str]:
-    options: list[str] = []
-    for flatpak in flatpaks:
-        options.extend(
-            [
-                "--volume",
-                f"{flatpak.export_dir}:{_flatpak_mount_path(flatpak)}:ro",
-            ]
-        )
-    return options
-
-
-def _flatpak_mount_path(flatpak: ExportedFlatpakImage) -> Path:
-    return FLATPAK_OCI_MOUNT / flatpak.export_dir.name
-
-
 def _installer_flatpak_lines(
-    flatpaks: tuple[ExportedFlatpakImage, ...],
     flatpak_groups: tuple[InstallerFlatpaksConfig, ...],
 ) -> list[str]:
-    by_source = {flatpak.source_ref: flatpak for flatpak in flatpaks}
     return [
-        *(
-            f"# {flatpak.source_ref} {flatpak.image_id}"
-            for flatpak in flatpaks
-        ),
         "RUN /bin/sh -ex <<'LUDOS_INSTALL_FLATPAKS'",
-        _installer_flatpak_script(
-            flatpak_groups,
-            by_source,
-        ).rstrip(),
+        _installer_flatpak_script(flatpak_groups).rstrip(),
         "LUDOS_INSTALL_FLATPAKS",
     ]
 
 
 def _installer_flatpak_script(
     flatpak_groups: tuple[InstallerFlatpaksConfig, ...],
-    flatpaks_by_source: dict[str, ExportedFlatpakImage],
 ) -> str:
     lines = [
         "mkdir -p /var/lib/flatpak",
-        *_flatpak_remote_lines(flatpak_groups),
         *(
             line
             for group in flatpak_groups
             for line in _flatpak_install_lines(
                 group.repo,
-                tuple(flatpaks_by_source[ref] for ref in group.preinstall),
+                group.preinstall,
+                nodeps=group.nodeps,
             )
         ),
+        *_flatpak_refresh_lines(),
         "rm -rf /var/lib/flatpak-installer",
         "cp -alT /var/lib/flatpak /var/lib/flatpak-installer",
         *(
@@ -576,47 +497,39 @@ def _installer_flatpak_script(
             for group in flatpak_groups
             for line in _flatpak_install_lines(
                 group.repo,
-                tuple(flatpaks_by_source[ref] for ref in group.installer),
+                group.installer,
+                nodeps=group.nodeps,
             )
         ),
+        *_flatpak_refresh_lines(),
     ]
     return "\n".join(lines) + "\n"
 
 
-def _flatpak_remote_lines(
-    flatpak_groups: tuple[InstallerFlatpaksConfig, ...],
-) -> list[str]:
-    lines = []
-    for repo in dict.fromkeys(group.repo for group in flatpak_groups):
-        repo_arg = shlex.quote(repo)
-        remote_url = shlex.quote("oci+http://localhost")
-        title = shlex.quote(repo.title())
-        lines.extend(
-            [
-                "flatpak remote-add --system --if-not-exists "
-                f"--title {title} --prio=10 {repo_arg} {remote_url}",
-                "flatpak remote-modify --system "
-                f"--title {title} --prio=10 --url {remote_url} {repo_arg}",
-            ]
-        )
-    return lines
-
-
 def _flatpak_install_lines(
     repo: str,
-    flatpaks: tuple[ExportedFlatpakImage, ...],
+    flatpaks: tuple[str, ...],
+    *,
+    nodeps: bool = False,
 ) -> list[str]:
     lines = []
-    for flatpak in flatpaks:
-        sideload_ref = f"oci:{_flatpak_mount_path(flatpak)}"
+    deps_arg = " --no-deps" if nodeps else ""
+    for flatpak_id in flatpaks:
         lines.extend(
             [
                 "flatpak install --system --noninteractive --assumeyes "
-                f"--or-update --no-deps --sideload-repo={shlex.quote(sideload_ref)} "
-                f"{shlex.quote(repo)} {shlex.quote(flatpak.flatpak_ref)}",
+                f"--or-update{deps_arg} "
+                f"{shlex.quote(repo)} {shlex.quote(flatpak_id)}",
             ]
         )
     return lines
+
+
+def _flatpak_refresh_lines() -> list[str]:
+    return [
+        "flatpak --system update --appstream",
+        "appstreamcli refresh --force",
+    ]
 
 
 def _installer_ostree_script() -> str:

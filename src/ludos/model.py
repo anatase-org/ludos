@@ -129,6 +129,7 @@ class RepoRef:
 @dataclass(frozen=True)
 class InstallerFlatpaksConfig:
     repo: str
+    nodeps: bool = False
     preinstall: tuple[str, ...] = tuple()
     installer: tuple[str, ...] = tuple()
 
@@ -187,7 +188,6 @@ class Manifest:
         data = _load_mapping(path)
         flatpaks = _string_tuple(data, "flatpaks", path)
         installer = _installer_config(data, path)
-        _validate_installer_flatpaks(path, flatpaks, installer.flatpaks)
         return cls(
             version=_required_version(data, path),
             env=_env_dict(data, path),
@@ -469,7 +469,7 @@ def _installer_flatpaks_config(
     if not isinstance(value, list):
         raise ConfigError(f"{path}: 'installer.flatpaks' must be a list")
     configs = []
-    allowed = {"repo", "preinstall", "installer"}
+    allowed = {"repo", "nodeps", "preinstall", "installer"}
     for index, item in enumerate(value):
         if not isinstance(item, dict):
             raise ConfigError(
@@ -483,30 +483,12 @@ def _installer_flatpaks_config(
         configs.append(
             InstallerFlatpaksConfig(
                 repo=_required_string(item, "repo", path),
+                nodeps=_optional_bool(item, "nodeps", path, f"installer.flatpaks[{index}]"),
                 preinstall=_string_tuple(item, "preinstall", path),
                 installer=_string_tuple(item, "installer", path),
             )
         )
     return tuple(configs)
-
-
-def _validate_installer_flatpaks(
-    path: Path,
-    flatpaks: tuple[str, ...],
-    installer_flatpaks: tuple[InstallerFlatpaksConfig, ...],
-) -> None:
-    declared = set(flatpaks)
-    missing = tuple(
-        ref
-        for group in installer_flatpaks
-        for ref in group.all
-        if ref not in declared
-    )
-    if missing:
-        refs = ", ".join(missing)
-        raise ConfigError(
-            f"{path}: installer.flatpaks entries must also be listed in top-level flatpaks: {refs}"
-        )
 
 
 def _flatpak_images_config(data: dict[str, Any], path: Path) -> FlatpakImagesConfig:

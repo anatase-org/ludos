@@ -31,8 +31,6 @@ from ludos.installer import (
     _installer_image_ref,
     _installer_latest_image_ref,
     _installer_build_script,
-    _export_installer_flatpaks,
-    _flatpak_oci_volume_options,
     _pull_source_image,
     _fat_label_for_manifest,
     _label_base,
@@ -53,7 +51,6 @@ from ludos.installer import (
     _xorriso_command,
 )
 from ludos.model import ConfigError, InstallerConfig, InstallerFlatpaksConfig, Manifest
-from ludos.upload.flatpaks import ExportedFlatpakImage
 
 
 def _manifest(installer: InstallerConfig = InstallerConfig()) -> Manifest:
@@ -86,23 +83,6 @@ def _context(
         orchestrator=orchestrator,
         scratch=scratch,
         podman="podman",
-    )
-
-
-def _exported_flatpak(
-    name: str,
-    *,
-    source_ref: str | None = None,
-    image_id: str | None = None,
-) -> ExportedFlatpakImage:
-    return ExportedFlatpakImage(
-        source_ref=source_ref or f"flatpaks/{name}",
-        name=name,
-        image=f"localhost/flatpaks:f44-x86_64-{name}-hash",
-        image_id=image_id or "sha256:" + name[0] * 64,
-        export_dir=Path(f"/cache/flatpaks/{name}-f44-x86_64"),
-        flatpak_ref=f"app/org.anatase.{name.title()}/x86_64/stable",
-        tag="f44-x86_64",
     )
 
 
@@ -152,28 +132,27 @@ class InstallerParserTests(unittest.TestCase):
         self.assertIsNone(args.orchestrator)
         self.assertFalse(args.scratch)
 
-    def test_parser_accepts_installer_cache_flag(self) -> None:
+    def test_parser_rejects_installer_cache_flag(self) -> None:
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                [
+                    "bootc",
+                    "installer",
+                    "anatase.yml",
+                    "oci:./cache/oci/anatase-f44-x86_64",
+                    "--cache",
+                ]
+            )
+
+    def test_installer_command_uses_cache_dir_for_output_only(self) -> None:
         args = build_parser().parse_args(
             [
                 "bootc",
                 "installer",
                 "anatase.yml",
                 "oci:./cache/oci/anatase-f44-x86_64",
-                "--cache",
-            ]
-        )
-
-        self.assertTrue(args.cache)
-        self.assertIsNone(args.cache_dir)
-
-    def test_installer_cache_flag_uses_default_cache_dir(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "bootc",
-                "installer",
-                "anatase.yml",
-                "oci:./cache/oci/anatase-f44-x86_64",
-                "--cache",
+                "--cache-dir",
+                "cache",
             ]
         )
 
@@ -182,7 +161,7 @@ class InstallerParserTests(unittest.TestCase):
 
         installer.assert_called_once()
         self.assertEqual(installer.call_args.kwargs["cache_dir"], Path("cache"))
-        self.assertTrue(installer.call_args.kwargs["cache_only"])
+        self.assertNotIn("cache_only", installer.call_args.kwargs)
 
 
 class InstallerManifestTests(unittest.TestCase):
@@ -259,16 +238,14 @@ class InstallerManifestTests(unittest.TestCase):
                         "repos: []",
                         "cards:",
                         "  - cards/base/kernel",
-                        "flatpaks:",
-                        "  - flatpaks/ark",
-                        "  - flatpaks/browser",
                         "installer:",
                         "  flatpaks:",
                         "    - repo: anatase",
+                        "      nodeps: true",
                         "      preinstall:",
-                        "        - flatpaks/ark",
+                        "        - org.anatase.ArchiveManager",
                         "      installer:",
-                        "        - flatpaks/browser",
+                        "        - org.anatase.Browser",
                     ]
                 ),
                 encoding="utf-8",
@@ -281,13 +258,14 @@ class InstallerManifestTests(unittest.TestCase):
             (
                 InstallerFlatpaksConfig(
                     repo="anatase",
-                    preinstall=("flatpaks/ark",),
-                    installer=("flatpaks/browser",),
+                    nodeps=True,
+                    preinstall=("org.anatase.ArchiveManager",),
+                    installer=("org.anatase.Browser",),
                 ),
             ),
         )
 
-    def test_manifest_installer_rejects_flatpak_not_declared_top_level(self) -> None:
+    def test_manifest_installer_accepts_flatpak_ids_not_declared_top_level(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manifest = Path(tmp) / "anatase.yml"
             manifest.write_text(
@@ -302,20 +280,19 @@ class InstallerManifestTests(unittest.TestCase):
                         "repos: []",
                         "cards:",
                         "  - cards/base/kernel",
-                        "flatpaks:",
-                        "  - flatpaks/ark",
                         "installer:",
                         "  flatpaks:",
                         "    - repo: anatase",
                         "      installer:",
-                        "        - flatpaks/browser",
+                        "        - org.anatase.Browser",
                     ]
                 ),
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ConfigError, "top-level flatpaks"):
-                Manifest.from_file(manifest)
+            parsed = Manifest.from_file(manifest)
+
+        self.assertEqual(parsed.installer.flatpaks[0].installer, ("org.anatase.Browser",))
 
     def test_manifest_installer_rejects_non_boolean_ostree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -470,37 +447,6 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertEqual(seen, [("localhost/installer:test", True)])
         self.assertEqual(build_image.call_args.args[1], "sha256:" + "d" * 64)
 
-    def test_export_installer_flatpaks_honors_cache_only(self) -> None:
-        manifest = _manifest(
-            InstallerConfig(
-                flatpaks=(
-                    InstallerFlatpaksConfig(
-                        repo="anatase",
-                        preinstall=("flatpaks/ark",),
-                    ),
-                )
-            )
-        )
-
-        with patch(
-            "ludos.installer.export_flatpak_oci_images",
-            return_value=(),
-        ) as export:
-            result = _export_installer_flatpaks(
-                Path("anatase.yml"),
-                manifest,
-                cache_dir=Path("cache"),
-                cache_only=True,
-            )
-
-        self.assertEqual(result, ())
-        export.assert_called_once_with(
-            Path("anatase.yml"),
-            (Path("flatpaks/ark"),),
-            cache_dir=Path("cache"),
-            cache_only=True,
-        )
-
     def test_installer_image_ref_uses_installer_repository(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _context(Path(tmp))
@@ -629,54 +575,40 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn(f"{run_root}:/run/containers/storage", build_command)
 
     def test_installer_containerfile_places_flatpaks_after_ostree(self) -> None:
-        ark = _exported_flatpak("ark")
-        browser = _exported_flatpak("browser")
-
         text = _installer_containerfile(
             "sha256:" + "c" * 64,
             False,
             "echo build",
             ostree=True,
-            flatpaks=(ark, browser),
             flatpak_groups=(
                 InstallerFlatpaksConfig(
                     repo="anatase",
-                    preinstall=("flatpaks/ark",),
-                    installer=("flatpaks/browser",),
+                    nodeps=True,
+                    preinstall=("org.anatase.ArchiveManager",),
+                    installer=("org.anatase.Browser",),
                 ),
             ),
         )
 
         ostree_index = text.index("LUDOS_INSTALLER_OSTREE")
-        comment_index = text.index("# flatpaks/ark sha256:")
         flatpak_index = text.index("LUDOS_INSTALL_FLATPAKS")
         build_index = text.index("LUDOS_INSTALLER_BUILD")
-        self.assertLess(ostree_index, comment_index)
-        self.assertLess(comment_index, flatpak_index)
+        self.assertLess(ostree_index, flatpak_index)
         self.assertLess(flatpak_index, build_index)
-        self.assertIn("# flatpaks/browser sha256:", text)
-        self.assertIn(
-            "flatpak remote-add --system --if-not-exists --title Anatase "
-            "--prio=10 anatase oci+http://localhost",
-            text,
-        )
         self.assertIn("cp -alT /var/lib/flatpak /var/lib/flatpak-installer", text)
-        self.assertIn("--or-update --no-deps --sideload-repo=oci:/ludos/flatpaks/ark-f44-x86_64", text)
-        self.assertIn("anatase app/org.anatase.Ark/x86_64/stable", text)
-        self.assertIn("--sideload-repo=oci:/ludos/flatpaks/browser-f44-x86_64", text)
+        self.assertIn("--or-update --no-deps anatase org.anatase.ArchiveManager", text)
+        self.assertIn("--or-update --no-deps anatase org.anatase.Browser", text)
+        self.assertIn("flatpak --system update --appstream", text)
 
     def test_installer_containerfile_places_flatpaks_before_build_without_ostree(self) -> None:
-        ark = _exported_flatpak("ark")
-
         text = _installer_containerfile(
             "localhost/anatase:latest",
             False,
             "echo build",
-            flatpaks=(ark,),
             flatpak_groups=(
                 InstallerFlatpaksConfig(
                     repo="anatase",
-                    preinstall=("flatpaks/ark",),
+                    preinstall=("org.anatase.ArchiveManager",),
                 ),
             ),
         )
@@ -688,41 +620,36 @@ class InstallerHelperTests(unittest.TestCase):
         )
 
     def test_installer_flatpak_script_snapshots_preinstall_before_installer_apps(self) -> None:
-        ark = _exported_flatpak("ark")
-        browser = _exported_flatpak("browser")
-
         script = _installer_flatpak_script(
             (
                 InstallerFlatpaksConfig(
                     repo="anatase",
-                    preinstall=("flatpaks/ark",),
-                    installer=("flatpaks/browser",),
+                    preinstall=("org.anatase.ArchiveManager",),
+                    installer=("org.anatase.Browser",),
                 ),
             ),
-            {
-                "flatpaks/ark": ark,
-                "flatpaks/browser": browser,
-            },
         )
 
-        remote_index = script.index("flatpak remote-add")
-        ark_index = script.index("--sideload-repo=oci:/ludos/flatpaks/ark-f44-x86_64")
+        ark_index = script.index("anatase org.anatase.ArchiveManager")
+        refresh_index = script.index("flatpak --system update --appstream")
         snapshot_index = script.index("cp -alT /var/lib/flatpak /var/lib/flatpak-installer")
-        browser_index = script.index("--sideload-repo=oci:/ludos/flatpaks/browser-f44-x86_64")
-        self.assertLess(remote_index, ark_index)
-        self.assertLess(ark_index, snapshot_index)
+        browser_index = script.index("anatase org.anatase.Browser")
+        self.assertLess(ark_index, refresh_index)
+        self.assertLess(refresh_index, snapshot_index)
         self.assertLess(snapshot_index, browser_index)
 
-    def test_flatpak_oci_volume_options_mount_exported_layouts(self) -> None:
-        ark = _exported_flatpak("ark")
-
-        self.assertEqual(
-            _flatpak_oci_volume_options((ark,)),
-            [
-                "--volume",
-                "/cache/flatpaks/ark-f44-x86_64:/ludos/flatpaks/ark-f44-x86_64:ro",
-            ],
+    def test_installer_flatpak_script_omits_no_deps_by_default(self) -> None:
+        script = _installer_flatpak_script(
+            (
+                InstallerFlatpaksConfig(
+                    repo="flathub",
+                    preinstall=("org.example.App",),
+                ),
+            ),
         )
+
+        self.assertIn("--or-update flathub org.example.App", script)
+        self.assertNotIn("--no-deps", script)
 
     def test_container_name_is_deterministic_for_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
