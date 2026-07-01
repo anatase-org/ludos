@@ -31,6 +31,7 @@ from ludos.installer import (
     _installer_image_ref,
     _installer_latest_image_ref,
     _installer_build_script,
+    _export_installer_flatpaks,
     _flatpak_oci_volume_options,
     _pull_source_image,
     _fat_label_for_manifest,
@@ -181,6 +182,7 @@ class InstallerParserTests(unittest.TestCase):
 
         installer.assert_called_once()
         self.assertEqual(installer.call_args.kwargs["cache_dir"], Path("cache"))
+        self.assertTrue(installer.call_args.kwargs["cache_only"])
 
 
 class InstallerManifestTests(unittest.TestCase):
@@ -462,6 +464,32 @@ class InstallerHelperTests(unittest.TestCase):
 
         self.assertEqual(seen, [("localhost/installer:test", True)])
         self.assertEqual(build_image.call_args.args[1], "sha256:" + "d" * 64)
+
+    def test_export_installer_flatpaks_honors_cache_only(self) -> None:
+        manifest = _manifest(
+            InstallerConfig(
+                flatpaks=InstallerFlatpaksConfig(preinstall=("flatpaks/ark",))
+            )
+        )
+
+        with patch(
+            "ludos.installer.export_flatpak_oci_images",
+            return_value=(),
+        ) as export:
+            result = _export_installer_flatpaks(
+                Path("anatase.yml"),
+                manifest,
+                cache_dir=Path("cache"),
+                cache_only=True,
+            )
+
+        self.assertEqual(result, ())
+        export.assert_called_once_with(
+            Path("anatase.yml"),
+            (Path("flatpaks/ark"),),
+            cache_dir=Path("cache"),
+            cache_only=True,
+        )
 
     def test_installer_image_ref_uses_installer_repository(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

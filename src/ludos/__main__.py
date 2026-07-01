@@ -945,6 +945,7 @@ def bootc_command(args: argparse.Namespace) -> int:
             args.ref,
             output=args.output,
             cache_dir=cache_dir,
+            cache_only=args.cache,
             orchestrator=args.orchestrator,
             scratch=args.scratch,
             force=args.force,

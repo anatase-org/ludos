@@ -126,6 +126,7 @@ def bootc_installer(
     *,
     output: Path | None = None,
     cache_dir: Path | None = None,
+    cache_only: bool = False,
     orchestrator: str | None = None,
     scratch: bool = False,
     force: bool = False,
@@ -147,6 +148,7 @@ def bootc_installer(
         manifest_path,
         manifest,
         cache_dir=cache_dir,
+        cache_only=cache_only,
     )
 
     prepare_ctx = InstallerContext(
@@ -231,6 +233,7 @@ def _export_installer_flatpaks(
     manifest: Manifest,
     *,
     cache_dir: Path | None,
+    cache_only: bool = False,
 ) -> tuple[ExportedFlatpakImage, ...]:
     selected = manifest.installer.flatpaks.all
     if not selected:
@@ -240,6 +243,7 @@ def _export_installer_flatpaks(
         manifest_path,
         tuple(Path(ref) for ref in selected),
         cache_dir=cache_dir,
+        cache_only=cache_only,
     )
 
 
