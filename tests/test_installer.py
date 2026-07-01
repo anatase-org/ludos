@@ -151,6 +151,37 @@ class InstallerParserTests(unittest.TestCase):
         self.assertIsNone(args.orchestrator)
         self.assertFalse(args.scratch)
 
+    def test_parser_accepts_installer_cache_flag(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "bootc",
+                "installer",
+                "anatase.yml",
+                "oci:./cache/oci/anatase-f44-x86_64",
+                "--cache",
+            ]
+        )
+
+        self.assertTrue(args.cache)
+        self.assertIsNone(args.cache_dir)
+
+    def test_installer_cache_flag_uses_default_cache_dir(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "bootc",
+                "installer",
+                "anatase.yml",
+                "oci:./cache/oci/anatase-f44-x86_64",
+                "--cache",
+            ]
+        )
+
+        with patch("ludos.__main__.bootc_installer", return_value=0) as installer:
+            self.assertEqual(args.func(args), 0)
+
+        installer.assert_called_once()
+        self.assertEqual(installer.call_args.kwargs["cache_dir"], Path("cache"))
+
 
 class InstallerManifestTests(unittest.TestCase):
     def test_manifest_installer_defaults(self) -> None:
@@ -582,6 +613,7 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertLess(flatpak_index, build_index)
         self.assertIn("# flatpaks/browser sha256:", text)
         self.assertIn("cp -alT /var/lib/flatpak /var/lib/flatpak-installer", text)
+        self.assertIn("--or-update --no-deps --image", text)
         self.assertIn("oci:/ludos/flatpaks/ark:f44-x86_64", text)
         self.assertIn("oci:/ludos/flatpaks/browser:f44-x86_64", text)
 
