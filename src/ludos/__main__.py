@@ -633,6 +633,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show stale images without removing them.",
     )
     cleanup.add_argument(
+        "--purge",
+        action="store_true",
+        help="Remove all local Ludos images in the selected local prefix without resolving manifests.",
+    )
+    cleanup.add_argument(
         "manifests",
         nargs="*",
         type=Path,
@@ -765,6 +770,7 @@ def cleanup_command(args: argparse.Namespace) -> int:
         local_prefix=args.local_prefix,
         manifests=tuple(args.manifests),
         dry_run=args.dry_run,
+        purge=args.purge,
     )
 
 

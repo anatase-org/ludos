@@ -1,11 +1,54 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ludos.cleanup import _keep_named_image, _manifest_cleanup_targets
+from ludos.__main__ import build_parser, cleanup_command
+from ludos.cleanup import (
+    CleanupTarget,
+    _keep_named_image,
+    _manifest_cleanup_targets,
+    _purge_local_images,
+    cleanup_local_images,
+)
+
+
+class CleanupCommandTests(unittest.TestCase):
+    def test_parser_accepts_purge(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "cleanup",
+                "--purge",
+                "--dry-run",
+                "--local-prefix",
+                "test-",
+                "anatase.yml",
+            ]
+        )
+
+        self.assertEqual(args.command, "cleanup")
+        self.assertTrue(args.purge)
+        self.assertTrue(args.dry_run)
+        self.assertEqual(args.local_prefix, "test-")
+        self.assertEqual(args.manifests, [Path("anatase.yml")])
+
+    def test_cleanup_command_passes_purge(self) -> None:
+        args = build_parser().parse_args(["cleanup", "--purge", "anatase.yml"])
+
+        with patch("ludos.__main__.cleanup_local_images", return_value=0) as cleanup:
+            self.assertEqual(cleanup_command(args), 0)
+
+        cleanup.assert_called_once_with(
+            version=None,
+            local_prefix="",
+            manifests=(Path("anatase.yml"),),
+            dry_run=False,
+            purge=True,
+        )
 
 
 class CleanupImageKeepTests(unittest.TestCase):
@@ -141,3 +184,120 @@ class CleanupImageKeepTests(unittest.TestCase):
         self.assertIn("localhost/builds:f44-x86_64-flatpak-browser-jkl012", targets)
         self.assertIn("localhost/builders:f44-x86_64-flatpak-browser-mno345", targets)
         self.assertIn("localhost/flatpaks:f44-x86_64-browser", targets)
+
+
+class CleanupPurgeTests(unittest.TestCase):
+    def test_purge_collects_all_ludos_managed_images(self) -> None:
+        images = [
+            {
+                "Id": "image1",
+                "Names": ["localhost/images:anatase", "localhost/other:keep"],
+                "Size": 1024,
+            },
+            {
+                "Id": "image2",
+                "Names": ["localhost/flatpaks:browser"],
+                "Size": 2048,
+            },
+            {
+                "Id": "image3",
+                "Names": ["docker.io/library/fedora:latest"],
+                "Size": 4096,
+            },
+            {
+                "Id": "image4",
+                "Names": [],
+                "Dangling": True,
+                "History": ["localhost/builds:f44-x86_64-base-oldhash"],
+                "Size": 512,
+            },
+            {
+                "Id": "image5",
+                "Names": [],
+                "Dangling": True,
+                "History": ["docker.io/library/fedora:old"],
+                "Size": 512,
+            },
+        ]
+
+        with patch(
+            "ludos.cleanup.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["podman", "images", "--format", "json"],
+                0,
+                stdout=json.dumps(images),
+            ),
+        ):
+            targets = _purge_local_images("podman", "")
+
+        self.assertEqual(
+            tuple(target.ref for target in targets),
+            (
+                "localhost/images:anatase",
+                "localhost/flatpaks:browser",
+                "image4",
+            ),
+        )
+
+    def test_purge_uses_local_prefix(self) -> None:
+        images = [
+            {
+                "Id": "image1",
+                "Names": ["localhost/images:anatase"],
+                "Size": 1024,
+            },
+            {
+                "Id": "image2",
+                "Names": ["localhost/test-images:anatase"],
+                "Size": 1024,
+            },
+        ]
+
+        with patch(
+            "ludos.cleanup.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["podman", "images", "--format", "json"],
+                0,
+                stdout=json.dumps(images),
+            ),
+        ):
+            targets = _purge_local_images("podman", "test-")
+
+        self.assertEqual(
+            tuple(target.ref for target in targets),
+            ("localhost/test-images:anatase",),
+        )
+
+    def test_cleanup_purge_skips_manifest_resolution(self) -> None:
+        target = CleanupTarget(
+            "localhost/images:anatase",
+            "localhost/images:anatase",
+            1024,
+            "image1",
+        )
+
+        with (
+            patch(
+                "ludos.cleanup.shutil.which",
+                side_effect=lambda name: "podman" if name == "podman" else None,
+            ),
+            patch(
+                "ludos.cleanup._purge_local_images",
+                return_value=(target,),
+            ) as purge_images,
+            patch("ludos.cleanup.resolve_manifest_images") as resolve_manifest,
+            patch("ludos.cleanup.resolve_manifest_flatpak_images") as resolve_flatpaks,
+        ):
+            self.assertEqual(
+                cleanup_local_images(
+                    version="bad/name",
+                    manifests=(Path("anatase.yml"),),
+                    dry_run=True,
+                    purge=True,
+                ),
+                0,
+            )
+
+        purge_images.assert_called_once_with("podman", "")
+        resolve_manifest.assert_not_called()
+        resolve_flatpaks.assert_not_called()

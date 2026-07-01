@@ -46,13 +46,29 @@ def cleanup_local_images(
     local_prefix: str = "",
     manifests: tuple[Path, ...] = tuple(),
     dry_run: bool = False,
+    purge: bool = False,
 ) -> int:
     podman = shutil.which("podman")
     if not podman:
         raise ConfigError("podman must be installed to clean up local images")
 
-    clean_version = _cleanup_version(version)
     clean_local_prefix = _cleanup_local_prefix(local_prefix)
+    if purge:
+        stale_images = _purge_local_images(podman, clean_local_prefix)
+        if not stale_images:
+            log("No local Ludos images found to purge")
+            _log_intermediate_cleanup_hint()
+            return 0
+        _remove_cleanup_targets(
+            podman,
+            stale_images,
+            dry_run=dry_run,
+            subject="local Ludos images",
+        )
+        _log_intermediate_cleanup_hint()
+        return 0
+
+    clean_version = _cleanup_version(version)
     manifest_targets = tuple(
         target
         for manifest in manifests
@@ -66,11 +82,28 @@ def cleanup_local_images(
         _log_intermediate_cleanup_hint()
         return 0
 
+    _remove_cleanup_targets(
+        podman,
+        stale_images,
+        dry_run=dry_run,
+        subject="stale local cache images",
+    )
+    _log_intermediate_cleanup_hint()
+    return 0
+
+
+def _remove_cleanup_targets(
+    podman: str,
+    images: tuple[CleanupTarget, ...],
+    *,
+    dry_run: bool,
+    subject: str,
+) -> None:
     action = "Would remove" if dry_run else "Removing"
-    log(f"{action} {len(stale_images)} stale local cache images")
+    log(f"{action} {len(images)} {subject}")
     buildah = shutil.which("buildah")
     buildah_containers = _buildah_containers_by_image(buildah) if buildah else {}
-    stale_containers = _stale_buildah_containers(stale_images, buildah_containers)
+    stale_containers = _stale_buildah_containers(images, buildah_containers)
     if dry_run:
         for container in stale_containers:
             log(f"Would remove build container: {container.name}")
@@ -82,16 +115,13 @@ def cleanup_local_images(
                 "build container removal",
             )
 
-    for image in stale_images:
+    for image in images:
         display = f"{image.display} ({_format_bytes(image.size_bytes)})"
         if dry_run:
             log(f"Would remove image: {display}")
         else:
             log(f"Removing image: {display}")
             _run_logged_command([podman, "rmi", image.ref], "image removal")
-
-    _log_intermediate_cleanup_hint()
-    return 0
 
 
 def _log_intermediate_cleanup_hint() -> None:
@@ -224,6 +254,65 @@ def _stale_local_images(
                     )
                 )
                 seen.add(image_id)
+
+    return tuple(stale)
+
+
+def _purge_local_images(podman: str, local_prefix: str) -> tuple[CleanupTarget, ...]:
+    managed_repositories = {
+        f"localhost/{local_prefix}{repository}"
+        for repository in (
+            *CLEANUP_REPOSITORIES,
+            *FINAL_CLEANUP_REPOSITORIES,
+        )
+    }
+    result = subprocess.run(
+        [podman, "images", "--format", "json"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    images = json.loads(result.stdout or "[]")
+    stale: list[CleanupTarget] = []
+    seen: set[str] = set()
+
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        image_id = image.get("Id")
+        image_id = image_id if isinstance(image_id, str) else ""
+        image_size = _image_size(image)
+        names = _image_names(image)
+        for name in names:
+            parsed = _split_image_name(name)
+            if parsed is None:
+                continue
+            repository, _tag = parsed
+            if repository not in managed_repositories:
+                continue
+            if name not in seen:
+                stale.append(CleanupTarget(name, name, image_size, image_id))
+                seen.add(name)
+
+        if names or not image_id or not image.get("Dangling"):
+            continue
+        if not any(
+            (parsed := _split_image_name(history)) is not None
+            and parsed[0] in managed_repositories
+            for history in _image_history(image)
+        ):
+            continue
+        if image_id not in seen:
+            history = ", ".join(_image_history(image)) or "<unknown>"
+            stale.append(
+                CleanupTarget(
+                    image_id,
+                    f"{image_id[:12]} ({history})",
+                    image_size,
+                    image_id,
+                )
+            )
+            seen.add(image_id)
 
     return tuple(stale)
 
