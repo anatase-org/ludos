@@ -12,8 +12,9 @@ from types import SimpleNamespace
 from unittest.mock import call, patch
 
 from ludos.__main__ import build_parser
-from ludos.model import ConfigError
+from ludos.model import ConfigError, FlatpakImagesConfig, validate_manifest
 from ludos.upload.flatpaks import (
+    export_flatpak_oci_images,
     tree_shake_flatpaks,
     upload_dummy_runtime,
     upload_flatpaks,
@@ -299,6 +300,28 @@ class UploadFlatpaksTests(unittest.TestCase):
                 cache_only=True,
             )
 
+    def test_export_flatpak_oci_images_returns_refs_and_image_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+
+            with _mock_upload_deps() as deps:
+                exported = export_flatpak_oci_images(manifest, tuple())
+
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0].source_ref, "flatpaks/kate")
+        self.assertEqual(exported[0].name, "kate")
+        self.assertEqual(exported[0].image_id, "sha256:" + "a" * 64)
+        self.assertEqual(
+            exported[0].flatpak_ref,
+            "app/org.anatase.Kate/x86_64/stable",
+        )
+        self.assertEqual(
+            exported[0].export_dir,
+            root / "cache" / "flatpaks" / "kate-f44-x86_64",
+        )
+        deps.upload_oci.assert_not_called()
+
     def test_upload_flatpaks_uses_selected_flatpaks_and_cache_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -353,47 +376,107 @@ class UploadFlatpaksTests(unittest.TestCase):
             root = Path(temp)
             manifest = _write_manifest(root, ("flatpaks/kate", "flatpaks/ark"))
             cache_dir = root / "cache"
+            resolved = _resolved_context(manifest, root, cache_dir)
             results = (
                 SimpleNamespace(image="localhost/flatpaks:built-kate"),
                 SimpleNamespace(image="localhost/flatpaks:built-ark"),
             )
 
             with _mock_upload_deps() as deps:
-                with patch(
-                    "ludos.upload.flatpaks.build_flatpaks",
-                    return_value=results,
-                ) as build:
+                with (
+                    patch(
+                        "ludos.upload.flatpaks.resolve_manifest_context",
+                        return_value=resolved,
+                    ) as resolve,
+                    patch(
+                        "ludos.upload.flatpaks.build_flatpaks_with_context",
+                        return_value=results,
+                    ) as build,
+                    patch("ludos.upload.flatpaks.build_flatpaks") as build_public,
+                    patch("ludos.upload.flatpaks._remove_tree") as remove_tree,
+                ):
                     self.assertEqual(
                         upload_flatpaks(manifest, tuple(), True, cache_dir=cache_dir),
                         0,
                     )
 
-            build.assert_called_once_with(
+            resolve.assert_called_once_with(
                 manifest,
                 cache_dir=cache_dir,
                 cache_only=False,
+            )
+            build.assert_called_once_with(
+                resolved,
+                manifest_path=manifest,
+                cache_only=False,
+            )
+            build_public.assert_not_called()
+            remove_tree.assert_called_once_with(
+                resolved.dnf_workspace_dir,
+                podman=resolved.podman,
             )
             self.assertEqual(
                 [item.args[0][7] for item in deps.run_streamed.call_args_list],
                 ["localhost/flatpaks:built-kate", "localhost/flatpaks:built-ark"],
             )
 
+    def test_upload_flatpaks_builds_manifest_flatpaks_from_resolved_context_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate", "flatpaks/ark"))
+            cache_dir = root / "cache"
+            resolved = _resolved_context(manifest, root, cache_dir)
+            results = (
+                SimpleNamespace(image="localhost/flatpaks:built-kate"),
+                SimpleNamespace(image="localhost/flatpaks:built-ark"),
+            )
+
+            with _mock_upload_deps():
+                with (
+                    patch(
+                        "ludos.upload.flatpaks.resolve_manifest_context",
+                        return_value=resolved,
+                    ) as resolve,
+                    patch(
+                        "ludos.upload.flatpaks.build_flatpaks_with_context",
+                        return_value=results,
+                    ),
+                    patch("ludos.upload.flatpaks._resolve_flatpak_upload_context") as upload_resolve,
+                    patch("ludos.upload.flatpaks._remove_tree"),
+                ):
+                    self.assertEqual(
+                        upload_flatpaks(manifest, tuple(), True, cache_dir=cache_dir),
+                        0,
+                    )
+
+            resolve.assert_called_once()
+            upload_resolve.assert_not_called()
+
     def test_upload_flatpaks_builds_selected_flatpaks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             manifest = _write_manifest(root, ("flatpaks/kate", "flatpaks/ark"))
             cache_dir = root / "cache"
+            resolved = _resolved_context(manifest, root, cache_dir)
 
-            def build_one(_manifest: Path, flatpak: Path, **_kwargs: object) -> object:
+            def build_one(_context: object, flatpak: Path, **_kwargs: object) -> object:
                 return SimpleNamespace(
                     image=f"localhost/flatpaks:built-{flatpak.parent.name}"
                 )
 
             with _mock_upload_deps() as deps:
-                with patch(
-                    "ludos.upload.flatpaks.build_flatpak",
-                    side_effect=build_one,
-                ) as build:
+                with (
+                    patch(
+                        "ludos.upload.flatpaks.resolve_manifest_context",
+                        return_value=resolved,
+                    ),
+                    patch(
+                        "ludos.upload.flatpaks._build_flatpak_with_context",
+                        side_effect=build_one,
+                    ) as build,
+                    patch("ludos.upload.flatpaks.build_flatpak") as build_public,
+                    patch("ludos.upload.flatpaks._remove_tree"),
+                ):
                     self.assertEqual(
                         upload_flatpaks(
                             manifest,
@@ -405,11 +488,12 @@ class UploadFlatpaksTests(unittest.TestCase):
                     )
 
             build.assert_called_once_with(
-                manifest,
+                resolved,
                 (root / "flatpaks" / "ark" / "card.yaml").resolve(),
-                cache_dir=cache_dir,
                 cache_only=False,
+                force=False,
             )
+            build_public.assert_not_called()
             self.assertEqual(
                 deps.run_streamed.call_args.args[0][7],
                 "localhost/flatpaks:built-ark",
@@ -467,6 +551,10 @@ class UploadFlatpaksTests(unittest.TestCase):
                 patch(
                     "ludos.upload.flatpaks.resolve_manifest_flatpak_images",
                     side_effect=_mock_flatpak_resolution,
+                ),
+                patch(
+                    "ludos.upload.flatpaks._podman_image_id",
+                    return_value="sha256:" + "b" * 64,
                 ),
                 patch("ludos.upload.flatpaks.upload_oci", return_value=0) as upload_oci,
             ):
@@ -789,6 +877,20 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
     return manifest
 
 
+def _resolved_context(manifest: Path, root: Path, cache_dir: Path) -> object:
+    return SimpleNamespace(
+        validation=validate_manifest(manifest),
+        root_dir=root,
+        distro="f44-x86_64",
+        arch="x86_64",
+        local_prefix="",
+        cache_dir=cache_dir,
+        podman="/usr/bin/podman",
+        flatpak_images=FlatpakImagesConfig(),
+        dnf_workspace_dir=root / "dnf-workspace",
+    )
+
+
 def _write_exported_flatpak(export: Path, *, labels: dict[str, str]) -> None:
     blobs = export / "blobs" / "sha256"
     blobs.mkdir(parents=True, exist_ok=True)
@@ -883,10 +985,13 @@ class _mock_upload_deps:
                 side_effect=_mock_flatpak_resolution,
             )
         )
+        self.stack.enter_context(
+            patch("ludos.upload.flatpaks._podman_image_id", return_value="sha256:" + "a" * 64)
+        )
         run_streamed = self.stack.enter_context(
             patch(
                 "ludos.upload.flatpaks._run_streamed_command",
-                return_value=(0, ""),
+                side_effect=_mock_podman_push,
             )
         )
         upload_oci = self.stack.enter_context(
@@ -909,6 +1014,16 @@ def _mock_flatpak_resolution(manifest: Path, **_kwargs: object) -> object:
             f"localhost/flatpaks:f44-x86_64-{name}-hash" for name in names
         )
     )
+
+
+def _mock_podman_push(command: list[str]) -> tuple[int, str]:
+    export = Path(command[-1].removeprefix("oci:").rsplit(":", 1)[0])
+    name = export.name.split("-", 1)[0]
+    _write_exported_flatpak(
+        export,
+        labels={"org.flatpak.ref": f"app/org.anatase.{name.title()}/x86_64/stable"},
+    )
+    return 0, ""
 
 
 def _podman_push_call(export_dir: Path, image: str) -> object:

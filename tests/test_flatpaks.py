@@ -80,6 +80,14 @@ class FlatpakParserTests(unittest.TestCase):
         self.assertIsNone(args.flatpak)
         self.assertIsNone(args.card)
 
+    def test_build_parser_accepts_all_for_multiple_manifests(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(["build", "anatase.yml", "other.yml", "--all"])
+
+        self.assertTrue(args.all)
+        self.assertEqual(args.manifests, [Path("anatase.yml"), Path("other.yml")])
+
     def test_build_parser_rejects_card_and_flatpak_together(self) -> None:
         parser = build_parser()
 
@@ -152,6 +160,62 @@ class FlatpakParserTests(unittest.TestCase):
             log.call_args.args[0],
         )
         self.assertNotIn("latest:", log.call_args.args[0])
+
+    def test_build_command_all_builds_manifests_before_flatpaks(self) -> None:
+        args = build_parser().parse_args(
+            ["build", "anatase.yml", "other.yml", "--all"]
+        )
+        events = []
+
+        def build_manifest(manifest: Path, **_kwargs: object) -> object:
+            events.append(("manifest", manifest))
+            return SimpleNamespace(
+                output_image=f"localhost/{manifest.stem}:f44",
+                image=manifest.stem,
+                distro="f44-x86_64",
+                podman="/usr/bin/podman",
+                orchestrator="localhost/orchestrator:f44",
+                package_blocks=tuple(),
+                build_blocks=tuple(),
+            )
+
+        def build_flatpaks(manifest: Path, **_kwargs: object) -> tuple[object, ...]:
+            events.append(("flatpaks", manifest))
+            return (
+                SimpleNamespace(
+                    ref=f"app/org.anatase.{manifest.stem}/x86_64/stable",
+                    image=f"localhost/flatpaks:{manifest.stem}",
+                    latest_image=f"localhost/flatpaks:{manifest.stem}",
+                ),
+            )
+
+        with (
+            patch("ludos.__main__.show_logo"),
+            patch("ludos.__main__.build_manifest", side_effect=build_manifest),
+            patch("ludos.__main__.build_flatpaks", side_effect=build_flatpaks),
+            patch("ludos.__main__.log"),
+        ):
+            exit_code = build_command(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            events,
+            [
+                ("manifest", Path("anatase.yml")),
+                ("manifest", Path("other.yml")),
+                ("flatpaks", Path("anatase.yml")),
+                ("flatpaks", Path("other.yml")),
+            ],
+        )
+
+    def test_build_command_rejects_targeted_multiple_manifests(self) -> None:
+        args = build_parser().parse_args(
+            ["build", "--flatpaks", "anatase.yml", "other.yml"]
+        )
+
+        with patch("ludos.__main__.show_logo"):
+            with self.assertRaisesRegex(ConfigError, "exactly one manifest"):
+                build_command(args)
 
     def test_manifest_parser_accepts_flatpaks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

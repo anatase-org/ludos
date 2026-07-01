@@ -41,8 +41,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subcommands = parser.add_subparsers(dest="command")
 
-    build = subcommands.add_parser("build", help="Build a Ludos manifest.")
-    build.add_argument("manifest", type=Path, help="Path to a Ludos YAML file.")
+    build = subcommands.add_parser("build", help="Build Ludos manifests.")
+    build.add_argument(
+        "manifests",
+        nargs="+",
+        type=Path,
+        help="Paths to Ludos YAML manifests.",
+    )
     build.add_argument(
         "--cards-dir",
         type=Path,
@@ -96,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--flatpaks",
         action="store_true",
         help="Build every flatpak app declared by the manifest's flatpaks list.",
+    )
+    target.add_argument(
+        "--all",
+        action="store_true",
+        help="Build manifests first, then build their declared flatpaks.",
     )
     build.set_defaults(func=build_command)
 
@@ -692,10 +702,15 @@ def validate_command(args: argparse.Namespace) -> int:
 
 def build_command(args: argparse.Namespace) -> int:
     show_logo(args)
+    manifests = tuple(args.manifests)
+    targeted = args.card is not None or args.flatpak is not None or args.flatpaks
+    if targeted and len(manifests) != 1:
+        raise ConfigError("targeted builds require exactly one manifest")
+    manifest = manifests[0]
 
     if args.flatpak is not None:
         result = build_flatpak(
-            args.manifest,
+            manifest,
             args.flatpak,
             cards_dir=args.cards_dir,
             cache_dir=args.cache_dir,
@@ -709,7 +724,7 @@ def build_command(args: argparse.Namespace) -> int:
 
     if args.flatpaks:
         results = build_flatpaks(
-            args.manifest,
+            manifest,
             cards_dir=args.cards_dir,
             cache_dir=args.cache_dir,
             cache_version=args.version,
@@ -721,24 +736,43 @@ def build_command(args: argparse.Namespace) -> int:
             _log_flatpak_result(result)
         return 0
 
-    result = build_manifest(
-        args.manifest,
-        cards_dir=args.cards_dir,
-        cache_dir=args.cache_dir,
-        cache_version=args.version,
-        cache_only=args.cache,
-        ci=args.ci,
-        ccache=not args.no_ccache,
-        card=args.card,
-        force=args.force,
-    )
-    if args.card:
-        card_name = result.build_blocks[0] if result.build_blocks else str(args.card)
+    for manifest in manifests:
+        result = build_manifest(
+            manifest,
+            cards_dir=args.cards_dir,
+            cache_dir=args.cache_dir,
+            cache_version=args.version,
+            cache_only=args.cache,
+            ci=args.ci,
+            ccache=not args.no_ccache,
+            card=args.card,
+            force=args.force,
+        )
+        _log_build_result(result, args.card)
+    if args.all:
+        for manifest in manifests:
+            results = build_flatpaks(
+                manifest,
+                cards_dir=args.cards_dir,
+                cache_dir=args.cache_dir,
+                cache_version=args.version,
+                cache_only=args.cache,
+                ccache=not args.no_ccache,
+                force=args.force,
+            )
+            for result in results:
+                _log_flatpak_result(result)
+    return 0
+
+
+def _log_build_result(result: object, card: str | None = None) -> None:
+    if card:
+        card_name = result.build_blocks[0] if result.build_blocks else str(card)
         if result.build_images:
             log(f"Built card {card_name}: {result.build_images[0]}")
         else:
             log(f"Built card {card_name}: no build output image")
-        return 0
+        return
     log(
         f"Built {result.output_image} for {result.image} on {result.distro} "
         f"with {Path(result.podman).name} using {result.orchestrator}"
@@ -748,7 +782,6 @@ def build_command(args: argparse.Namespace) -> int:
         for block_name, block_packages in result.package_blocks
     )
     log(f"Package blocks: {blocks}")
-    return 0
 
 
 def _log_flatpak_result(result: object) -> None:

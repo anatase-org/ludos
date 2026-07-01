@@ -25,6 +25,7 @@ from .build import (
 )
 from .logging import log, stream
 from .model import ConfigError, InstallerConfig, Manifest
+from .upload.flatpaks import ExportedFlatpakImage, export_flatpak_oci_images
 
 
 DEFAULT_LABEL_BASE = "LUDOS"
@@ -38,6 +39,7 @@ EFI_BOOT_IMAGE = Path("images/efiboot.img")
 LIVE_ROOT_IMAGE = Path("LiveOS/squashfs.img")
 LUDOS_EFI_ASSET_DIR = Path("/usr/lib/ludos/efi")
 LUDOS_EFI_BOOT_ASSETS = Path("ludos-efi")
+FLATPAK_OCI_MOUNT = Path("/ludos/flatpaks")
 BIOS_GRUB_MODULES = (
     "biosdisk",
     "iso9660",
@@ -78,6 +80,7 @@ class InstallerContext:
     scratch: bool = False
     force: bool = False
     podman: str = "podman"
+    flatpaks: tuple[ExportedFlatpakImage, ...] = tuple()
 
     @property
     def boot_assets(self) -> Path:
@@ -140,6 +143,12 @@ def bootc_installer(
     if podman is None:
         raise ConfigError("podman must be installed to create an installer ISO")
 
+    installer_flatpaks = _export_installer_flatpaks(
+        manifest_path,
+        manifest,
+        cache_dir=cache_dir,
+    )
+
     prepare_ctx = InstallerContext(
         manifest=manifest,
         manifest_path=manifest_path,
@@ -149,6 +158,7 @@ def bootc_installer(
         scratch=scratch,
         force=force,
         podman=podman,
+        flatpaks=installer_flatpaks,
     )
 
     log(f"Preparing installer output directory: {prepare_ctx.output_dir}")
@@ -169,6 +179,7 @@ def bootc_installer(
         scratch=scratch,
         force=force,
         podman=podman,
+        flatpaks=installer_flatpaks,
     )
     log(f"Using installer tooling image: {ctx.orchestrator}")
     log("Creating EROFS root image")
@@ -213,6 +224,23 @@ def _prepare_output_dir(output_dir: Path) -> None:
     elif output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
+
+
+def _export_installer_flatpaks(
+    manifest_path: Path,
+    manifest: Manifest,
+    *,
+    cache_dir: Path | None,
+) -> tuple[ExportedFlatpakImage, ...]:
+    selected = manifest.installer.flatpaks.all
+    if not selected:
+        return tuple()
+    log(f"Exporting {len(selected)} installer flatpak OCI image(s)")
+    return export_flatpak_oci_images(
+        manifest_path,
+        tuple(Path(ref) for ref in selected),
+        cache_dir=cache_dir,
+    )
 
 
 def _create_root_erofs(ctx: InstallerContext, source_ref: str, run_ref: str) -> None:
@@ -295,6 +323,9 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
             has_files,
             ctx.manifest.installer.build,
             ostree=ctx.manifest.installer.ostree,
+            flatpaks=ctx.flatpaks,
+            preinstall=ctx.manifest.installer.flatpaks.preinstall,
+            installer=ctx.manifest.installer.flatpaks.installer,
         ),
         encoding="utf-8",
     )
@@ -310,6 +341,7 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
                 *_podman_storage_volume_options(ctx),
             ]
         )
+    build_options.extend(_flatpak_oci_volume_options(ctx.flatpaks))
     _run_host(
         [
             ctx.podman,
@@ -374,6 +406,16 @@ def _installer_hash(ctx: InstallerContext, source_image: str) -> str:
             "ostree": ctx.manifest.installer.ostree,
             "build": ctx.manifest.installer.build,
             "files": _installer_file_hash_inputs(ctx),
+            "flatpaks": tuple(
+                (
+                    flatpak.source_ref,
+                    flatpak.image,
+                    flatpak.image_id,
+                    flatpak.flatpak_ref,
+                    flatpak.tag,
+                )
+                for flatpak in ctx.flatpaks
+            ),
         },
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -425,6 +467,9 @@ def _installer_containerfile(
     build_script: str,
     *,
     ostree: bool = False,
+    flatpaks: tuple[ExportedFlatpakImage, ...] = tuple(),
+    preinstall: tuple[str, ...] = tuple(),
+    installer: tuple[str, ...] = tuple(),
 ) -> str:
     if "\n" in base_ref:
         raise ConfigError("installer base image ref must not contain newlines")
@@ -440,6 +485,8 @@ def _installer_containerfile(
                 "LUDOS_INSTALLER_OSTREE",
             ]
         )
+    if flatpaks:
+        lines.extend(_installer_flatpak_lines(flatpaks, preinstall, installer))
     lines.extend(
         [
             "RUN /bin/sh -ex <<'LUDOS_INSTALLER_BUILD'",
@@ -449,6 +496,72 @@ def _installer_containerfile(
         ]
     )
     return "\n".join(lines)
+
+
+def _flatpak_oci_volume_options(
+    flatpaks: tuple[ExportedFlatpakImage, ...],
+) -> list[str]:
+    options: list[str] = []
+    for flatpak in flatpaks:
+        options.extend(
+            [
+                "--volume",
+                f"{flatpak.export_dir}:{_flatpak_mount_path(flatpak)}:ro",
+            ]
+        )
+    return options
+
+
+def _flatpak_mount_path(flatpak: ExportedFlatpakImage) -> Path:
+    return FLATPAK_OCI_MOUNT / flatpak.name
+
+
+def _installer_flatpak_lines(
+    flatpaks: tuple[ExportedFlatpakImage, ...],
+    preinstall: tuple[str, ...],
+    installer: tuple[str, ...],
+) -> list[str]:
+    by_source = {flatpak.source_ref: flatpak for flatpak in flatpaks}
+    return [
+        *(
+            f"# {flatpak.source_ref} {flatpak.image_id}"
+            for flatpak in flatpaks
+        ),
+        "RUN /bin/sh -ex <<'LUDOS_INSTALL_FLATPAKS'",
+        _installer_flatpak_script(
+            tuple(by_source[ref] for ref in preinstall),
+            tuple(by_source[ref] for ref in installer),
+        ).rstrip(),
+        "LUDOS_INSTALL_FLATPAKS",
+    ]
+
+
+def _installer_flatpak_script(
+    preinstall: tuple[ExportedFlatpakImage, ...],
+    installer: tuple[ExportedFlatpakImage, ...],
+) -> str:
+    lines = [
+        "mkdir -p /var/lib/flatpak",
+        *_flatpak_install_lines(preinstall),
+        "rm -rf /var/lib/flatpak-installer",
+        "cp -alT /var/lib/flatpak /var/lib/flatpak-installer",
+        *_flatpak_install_lines(installer),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _flatpak_install_lines(flatpaks: tuple[ExportedFlatpakImage, ...]) -> list[str]:
+    lines = []
+    for flatpak in flatpaks:
+        image_ref = f"oci:{_flatpak_mount_path(flatpak)}:{flatpak.tag}"
+        lines.extend(
+            [
+                "flatpak install --system --noninteractive --assumeyes "
+                f"--or-update --image {shlex.quote(image_ref)} "
+                f"{shlex.quote(flatpak.flatpak_ref)}",
+            ]
+        )
+    return lines
 
 
 def _installer_ostree_script() -> str:

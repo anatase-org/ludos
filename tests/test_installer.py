@@ -27,9 +27,11 @@ from ludos.installer import (
     _grub_config,
     _grub_mkimage_command,
     _installer_containerfile,
+    _installer_flatpak_script,
     _installer_image_ref,
     _installer_latest_image_ref,
     _installer_build_script,
+    _flatpak_oci_volume_options,
     _pull_source_image,
     _fat_label_for_manifest,
     _label_base,
@@ -49,7 +51,8 @@ from ludos.installer import (
     _tool_path,
     _xorriso_command,
 )
-from ludos.model import ConfigError, InstallerConfig, Manifest
+from ludos.model import ConfigError, InstallerConfig, InstallerFlatpaksConfig, Manifest
+from ludos.upload.flatpaks import ExportedFlatpakImage
 
 
 def _manifest(installer: InstallerConfig = InstallerConfig()) -> Manifest:
@@ -82,6 +85,24 @@ def _context(
         orchestrator=orchestrator,
         scratch=scratch,
         podman="podman",
+    )
+
+
+def _exported_flatpak(
+    name: str,
+    *,
+    source_ref: str | None = None,
+    image_id: str | None = None,
+    flatpak_ref: str | None = None,
+) -> ExportedFlatpakImage:
+    return ExportedFlatpakImage(
+        source_ref=source_ref or f"flatpaks/{name}",
+        name=name,
+        image=f"localhost/flatpaks:f44-x86_64-{name}-hash",
+        image_id=image_id or "sha256:" + name[0] * 64,
+        export_dir=Path(f"/cache/flatpaks/{name}-f44-x86_64"),
+        flatpak_ref=flatpak_ref or f"app/org.anatase.{name.title()}/x86_64/stable",
+        tag="f44-x86_64",
     )
 
 
@@ -190,6 +211,74 @@ class InstallerManifestTests(unittest.TestCase):
         self.assertEqual(parsed.installer.build, "echo installer")
         self.assertTrue(parsed.installer.ostree)
         self.assertEqual(parsed.name, "Test OS")
+
+    def test_manifest_installer_parses_flatpaks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "anatase.yml"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "name: Test OS",
+                        "releasever: '44'",
+                        "distro: f44-$arch",
+                        "orchestrator: quay.io/fedora/fedora:44",
+                        "bootstrap: cards/bootstrap.yml",
+                        "repos: []",
+                        "cards:",
+                        "  - cards/base/kernel",
+                        "flatpaks:",
+                        "  - flatpaks/ark",
+                        "  - flatpaks/browser",
+                        "installer:",
+                        "  flatpaks:",
+                        "    preinstall:",
+                        "      - flatpaks/ark",
+                        "    installer:",
+                        "      - flatpaks/browser",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            parsed = Manifest.from_file(manifest)
+
+        self.assertEqual(
+            parsed.installer.flatpaks,
+            InstallerFlatpaksConfig(
+                preinstall=("flatpaks/ark",),
+                installer=("flatpaks/browser",),
+            ),
+        )
+
+    def test_manifest_installer_rejects_flatpak_not_declared_top_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "anatase.yml"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "name: Test OS",
+                        "releasever: '44'",
+                        "distro: f44-$arch",
+                        "orchestrator: quay.io/fedora/fedora:44",
+                        "bootstrap: cards/bootstrap.yml",
+                        "repos: []",
+                        "cards:",
+                        "  - cards/base/kernel",
+                        "flatpaks:",
+                        "  - flatpaks/ark",
+                        "installer:",
+                        "  flatpaks:",
+                        "    installer:",
+                        "      - flatpaks/browser",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "top-level flatpaks"):
+                Manifest.from_file(manifest)
 
     def test_manifest_installer_rejects_non_boolean_ostree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -470,6 +559,72 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertNotIn("LUDOS_INSTALLER_SOURCE_IMAGE=sha256:" + "c" * 64, build_command)
         self.assertIn(f"{graph_root}:/var/lib/containers/storage", build_command)
         self.assertIn(f"{run_root}:/run/containers/storage", build_command)
+
+    def test_installer_containerfile_places_flatpaks_after_ostree(self) -> None:
+        ark = _exported_flatpak("ark")
+        browser = _exported_flatpak("browser")
+
+        text = _installer_containerfile(
+            "sha256:" + "c" * 64,
+            False,
+            "echo build",
+            ostree=True,
+            flatpaks=(ark, browser),
+            preinstall=("flatpaks/ark",),
+            installer=("flatpaks/browser",),
+        )
+
+        ostree_index = text.index("LUDOS_INSTALLER_OSTREE")
+        comment_index = text.index("# flatpaks/ark sha256:")
+        flatpak_index = text.index("LUDOS_INSTALL_FLATPAKS")
+        build_index = text.index("LUDOS_INSTALLER_BUILD")
+        self.assertLess(ostree_index, comment_index)
+        self.assertLess(comment_index, flatpak_index)
+        self.assertLess(flatpak_index, build_index)
+        self.assertIn("# flatpaks/browser sha256:", text)
+        self.assertIn("cp -alT /var/lib/flatpak /var/lib/flatpak-installer", text)
+        self.assertIn("oci:/ludos/flatpaks/ark:f44-x86_64", text)
+        self.assertIn("oci:/ludos/flatpaks/browser:f44-x86_64", text)
+
+    def test_installer_containerfile_places_flatpaks_before_build_without_ostree(self) -> None:
+        ark = _exported_flatpak("ark")
+
+        text = _installer_containerfile(
+            "localhost/anatase:latest",
+            False,
+            "echo build",
+            flatpaks=(ark,),
+            preinstall=("flatpaks/ark",),
+        )
+
+        self.assertNotIn("LUDOS_INSTALLER_OSTREE", text)
+        self.assertLess(
+            text.index("LUDOS_INSTALL_FLATPAKS"),
+            text.index("LUDOS_INSTALLER_BUILD"),
+        )
+
+    def test_installer_flatpak_script_snapshots_preinstall_before_installer_apps(self) -> None:
+        ark = _exported_flatpak("ark")
+        browser = _exported_flatpak("browser")
+
+        script = _installer_flatpak_script((ark,), (browser,))
+
+        ark_index = script.index("org.anatase.Ark")
+        snapshot_index = script.index("cp -alT /var/lib/flatpak /var/lib/flatpak-installer")
+        browser_index = script.index("org.anatase.Browser")
+        self.assertLess(ark_index, snapshot_index)
+        self.assertLess(snapshot_index, browser_index)
+
+    def test_flatpak_oci_volume_options_mount_exported_layouts(self) -> None:
+        ark = _exported_flatpak("ark")
+
+        self.assertEqual(
+            _flatpak_oci_volume_options((ark,)),
+            [
+                "--volume",
+                "/cache/flatpaks/ark-f44-x86_64:/ludos/flatpaks/ark:ro",
+            ],
+        )
 
     def test_container_name_is_deterministic_for_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

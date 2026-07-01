@@ -127,10 +127,21 @@ class RepoRef:
 
 
 @dataclass(frozen=True)
+class InstallerFlatpaksConfig:
+    preinstall: tuple[str, ...] = tuple()
+    installer: tuple[str, ...] = tuple()
+
+    @property
+    def all(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((*self.preinstall, *self.installer)))
+
+
+@dataclass(frozen=True)
 class InstallerConfig:
     files: tuple[str, ...] = tuple()
     build: str = ""
     ostree: bool = False
+    flatpaks: InstallerFlatpaksConfig = InstallerFlatpaksConfig()
 
 
 @dataclass(frozen=True)
@@ -173,6 +184,9 @@ class Manifest:
     @classmethod
     def from_file(cls, path: Path) -> "Manifest":
         data = _load_mapping(path)
+        flatpaks = _string_tuple(data, "flatpaks", path)
+        installer = _installer_config(data, path)
+        _validate_installer_flatpaks(path, flatpaks, installer.flatpaks)
         return cls(
             version=_required_version(data, path),
             env=_env_dict(data, path),
@@ -183,11 +197,11 @@ class Manifest:
             bootstrap=_required_string(data, "bootstrap", path),
             repos=_repo_refs_tuple(data, "repos", path),
             cards=_required_string_tuple(data, "cards", path),
-            flatpaks=_string_tuple(data, "flatpaks", path),
+            flatpaks=flatpaks,
             name=_optional_string(data, "name", path),
             local_prefix=_optional_string(data, "local_prefix", path),
             labels=_string_dict(data, "labels", path),
-            installer=_installer_config(data, path),
+            installer=installer,
             runtime=_manifest_runtime(data, path),
             source=path,
         )
@@ -432,7 +446,7 @@ def _installer_config(data: dict[str, Any], path: Path) -> InstallerConfig:
     if not isinstance(value, dict):
         raise ConfigError(f"{path}: 'installer' must be a mapping")
 
-    allowed = {"files", "build", "ostree"}
+    allowed = {"files", "build", "ostree", "flatpaks"}
     for key in value:
         if key not in allowed:
             raise ConfigError(f"{path}: 'installer.{key}' is not supported")
@@ -440,7 +454,41 @@ def _installer_config(data: dict[str, Any], path: Path) -> InstallerConfig:
         files=_string_tuple(value, "files", path),
         build=_optional_string(value, "build", path),
         ostree=_optional_bool(value, "ostree", path, "installer"),
+        flatpaks=_installer_flatpaks_config(value, path),
     )
+
+
+def _installer_flatpaks_config(
+    data: dict[str, Any],
+    path: Path,
+) -> InstallerFlatpaksConfig:
+    value = data.get("flatpaks")
+    if value is None:
+        return InstallerFlatpaksConfig()
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path}: 'installer.flatpaks' must be a mapping")
+    allowed = {"preinstall", "installer"}
+    for key in value:
+        if key not in allowed:
+            raise ConfigError(f"{path}: 'installer.flatpaks.{key}' is not supported")
+    return InstallerFlatpaksConfig(
+        preinstall=_string_tuple(value, "preinstall", path),
+        installer=_string_tuple(value, "installer", path),
+    )
+
+
+def _validate_installer_flatpaks(
+    path: Path,
+    flatpaks: tuple[str, ...],
+    installer_flatpaks: InstallerFlatpaksConfig,
+) -> None:
+    declared = set(flatpaks)
+    missing = tuple(ref for ref in installer_flatpaks.all if ref not in declared)
+    if missing:
+        refs = ", ".join(missing)
+        raise ConfigError(
+            f"{path}: installer.flatpaks entries must also be listed in top-level flatpaks: {refs}"
+        )
 
 
 def _flatpak_images_config(data: dict[str, Any], path: Path) -> FlatpakImagesConfig:

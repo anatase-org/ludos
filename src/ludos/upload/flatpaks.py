@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import shutil
+import subprocess
 import struct
 import tarfile
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from typing import Any, Mapping
 from xml.sax.saxutils import escape
 
 from ..common import (
+    ResolvedManifestContext,
     _cache_name,
     _default_cache_version,
     _image_exists,
@@ -21,15 +23,19 @@ from ..common import (
     _local_prefix,
     _run_streamed_command,
     _substitute_variables,
+    resolve_manifest_context,
 )
 from ..flatpaks import (
     DEFAULT_FLATPAK_SDK,
     build_flatpak,
     build_flatpaks,
+    build_flatpaks_with_context,
     resolve_manifest_flatpak_images,
+    _build_flatpak_with_context,
     _flatpak_arch,
     _flatpak_appstream_labels_with_remote_icon,
 )
+from ..build import _remove_tree
 from ..logging import log
 from ..model import (
     ConfigError,
@@ -72,10 +78,22 @@ class FlatpakUploadContext:
 @dataclass(frozen=True)
 class FlatpakUploadTarget:
     path: Path
+    source_ref: str
     name: str
     image: str
     export_dir: Path
     ref: str
+    tag: str
+
+
+@dataclass(frozen=True)
+class ExportedFlatpakImage:
+    source_ref: str
+    name: str
+    image: str
+    image_id: str
+    export_dir: Path
+    flatpak_ref: str
     tag: str
 
 
@@ -89,30 +107,89 @@ def upload_flatpaks(
     environ: Mapping[str, str] | None = None,
     client: Any | None = None,
 ) -> int:
+    resolved_context: ResolvedManifestContext | None = None
+    try:
+        if build:
+            resolved_context = resolve_manifest_context(
+                manifest,
+                cache_dir=cache_dir,
+                cache_only=cache_only,
+            )
+            context = _upload_context_from_resolved(resolved_context)
+            _require_upload_context_flatpaks(context, manifest)
+            resolve_images = False
+        else:
+            context = _resolve_flatpak_upload_context(manifest, cache_dir=cache_dir)
+            resolve_images = True
+        targets = _upload_targets(
+            context,
+            flatpaks,
+            resolve_images=resolve_images,
+            cache_only=cache_only,
+        )
+        results = {}
+        if build:
+            results = _build_targets(
+                manifest,
+                targets,
+                cache_dir,
+                selected_all=not flatpaks,
+                cache_only=cache_only,
+                context=resolved_context,
+            )
+        for target in targets:
+            image = results.get(target.name, target.image)
+            export_flatpak_oci_target(context, target, image=image)
+            labels = _prepare_exported_flatpak_metadata(context, target)
+            upload_oci(target.export_dir, target.ref, (target.tag,))
+            _upload_flatpak_icon(context, labels, environ=environ, client=client)
+    finally:
+        if resolved_context is not None:
+            _remove_tree(
+                resolved_context.dnf_workspace_dir,
+                podman=resolved_context.podman,
+            )
+    return 0
+
+
+def export_flatpak_oci_images(
+    manifest: Path,
+    flatpaks: tuple[Path, ...],
+    *,
+    cache_dir: Path | None = None,
+    cache_only: bool = False,
+) -> tuple[ExportedFlatpakImage, ...]:
     context = _resolve_flatpak_upload_context(manifest, cache_dir=cache_dir)
     targets = _upload_targets(
         context,
         flatpaks,
-        resolve_images=not build,
+        resolve_images=True,
         cache_only=cache_only,
     )
-    results = _build_targets(
-        manifest,
-        targets,
-        build,
-        cache_dir,
-        selected_all=not flatpaks,
-        cache_only=cache_only,
+    return tuple(export_flatpak_oci_target(context, target) for target in targets)
+
+
+def export_flatpak_oci_target(
+    context: FlatpakUploadContext,
+    target: FlatpakUploadTarget,
+    *,
+    image: str | None = None,
+) -> ExportedFlatpakImage:
+    image = image or target.image
+    if not _image_exists(context.podman, image):
+        raise ConfigError(f"flatpak image is not cached: {image}")
+    image_id = _podman_image_id(context.podman, image)
+    _export_flatpak_image(context.podman, image, target)
+    flatpak_ref = _exported_flatpak_ref(target.export_dir)
+    return ExportedFlatpakImage(
+        source_ref=target.source_ref,
+        name=target.name,
+        image=image,
+        image_id=image_id,
+        export_dir=target.export_dir,
+        flatpak_ref=flatpak_ref,
+        tag=target.tag,
     )
-    for target in targets:
-        image = results.get(target.name, target.image)
-        if not build and not _image_exists(context.podman, image):
-            raise ConfigError(f"flatpak image is not cached: {image}")
-        _export_flatpak_image(context.podman, image, target)
-        labels = _prepare_exported_flatpak_metadata(context, target)
-        upload_oci(target.export_dir, target.ref, (target.tag,))
-        _upload_flatpak_icon(context, labels, environ=environ, client=client)
-    return 0
 
 
 def tree_shake_flatpaks(
@@ -187,8 +264,7 @@ def _resolve_flatpak_upload_context(
         missing = ", ".join(validation.missing_cards)
         raise ConfigError(f"{manifest}: missing card definitions: {missing}")
     if require_flatpaks and validation.missing_flatpaks:
-        missing = ", ".join(validation.missing_flatpaks)
-        raise ConfigError(f"{manifest}: missing flatpak definitions: {missing}")
+        _raise_missing_flatpaks(manifest, validation.missing_flatpaks)
 
     root_dir = manifest_path.parent
     flatpak_images = _project_flatpak_images(root_dir)
@@ -237,6 +313,37 @@ def _resolve_flatpak_upload_context(
     )
 
 
+def _upload_context_from_resolved(
+    context: ResolvedManifestContext,
+) -> FlatpakUploadContext:
+    return FlatpakUploadContext(
+        validation=context.validation,
+        root_dir=context.root_dir,
+        distro=context.distro,
+        arch=context.arch,
+        local_prefix=context.local_prefix,
+        cache_dir=context.cache_dir,
+        podman=context.podman,
+        flatpak_images=context.flatpak_images,
+    )
+
+
+def _require_upload_context_flatpaks(
+    context: FlatpakUploadContext,
+    manifest: Path,
+) -> None:
+    if context.validation.missing_flatpaks:
+        _raise_missing_flatpaks(manifest, context.validation.missing_flatpaks)
+
+
+def _raise_missing_flatpaks(
+    manifest: Path,
+    missing_flatpaks: tuple[str, ...],
+) -> None:
+    missing = ", ".join(missing_flatpaks)
+    raise ConfigError(f"{manifest}: missing flatpak definitions: {missing}")
+
+
 def _project_flatpak_images(root_dir: Path) -> FlatpakImagesConfig:
     project_config = root_dir / "ludos.yml"
     if not project_config.exists():
@@ -266,11 +373,13 @@ def _upload_targets(
     targets = []
     for flatpak in selected:
         path = _flatpak_card_path(_manifest_flatpak_path(flatpak, context.root_dir))
+        source_ref = _manifest_flatpak_ref(flatpak, context.root_dir)
         name = path.parent.resolve().name
         export_dir = context.cache_dir / "flatpaks" / f"{name}-{context.distro}"
         targets.append(
             FlatpakUploadTarget(
                 path=path,
+                source_ref=source_ref,
                 name=name,
                 image=resolved_images.get(
                     name,
@@ -286,6 +395,16 @@ def _upload_targets(
             )
         )
     return tuple(targets)
+
+
+def _manifest_flatpak_ref(flatpak: Path, root_dir: Path) -> str:
+    path = flatpak.expanduser()
+    if path.is_absolute():
+        try:
+            return path.resolve().relative_to(root_dir.resolve()).as_posix()
+        except ValueError:
+            return path.as_posix()
+    return path.as_posix()
 
 
 def _resolved_flatpak_images_by_name(
@@ -313,34 +432,47 @@ def _resolved_flatpak_images_by_name(
 def _build_targets(
     manifest: Path,
     targets: tuple[FlatpakUploadTarget, ...],
-    build: bool,
     cache_dir: Path | None,
     *,
     selected_all: bool,
     cache_only: bool,
+    context: ResolvedManifestContext | None = None,
 ) -> dict[str, str]:
-    if not build:
-        return {}
     if not targets:
         return {}
     if selected_all:
-        results = build_flatpaks(
-            manifest,
-            cache_dir=cache_dir,
-            cache_only=cache_only,
-        )
+        if context is None:
+            results = build_flatpaks(
+                manifest,
+                cache_dir=cache_dir,
+                cache_only=cache_only,
+            )
+        else:
+            results = build_flatpaks_with_context(
+                context,
+                manifest_path=manifest,
+                cache_only=cache_only,
+            )
         return {
             target.name: result.image
             for target, result in zip(targets, results, strict=True)
         }
     images = {}
     for target in targets:
-        result = build_flatpak(
-            manifest,
-            target.path,
-            cache_dir=cache_dir,
-            cache_only=cache_only,
-        )
+        if context is None:
+            result = build_flatpak(
+                manifest,
+                target.path,
+                cache_dir=cache_dir,
+                cache_only=cache_only,
+            )
+        else:
+            result = _build_flatpak_with_context(
+                context,
+                target.path,
+                cache_only=cache_only,
+                force=False,
+            )
         images[target.name] = result.image
     return images
 
@@ -367,6 +499,36 @@ def _export_flatpak_image(
     returncode, _output = _run_streamed_command(command)
     if returncode != 0:
         raise ConfigError(f"flatpak OCI export failed with exit status {returncode}")
+
+
+def _podman_image_id(podman: str, image: str) -> str:
+    result = subprocess.run(
+        [podman, "image", "inspect", image, "--format", "{{.Id}}"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ConfigError(f"failed to inspect flatpak image: {image}")
+    return _normalize_image_id(result.stdout.strip())
+
+
+def _normalize_image_id(value: str) -> str:
+    image_id = value.strip()
+    if image_id.startswith("sha256:"):
+        image_id = image_id.removeprefix("sha256:")
+    if len(image_id) != 64 or any(c not in "0123456789abcdefABCDEF" for c in image_id):
+        raise ConfigError(f"podman image inspect returned an invalid image ID: {value}")
+    return f"sha256:{image_id.lower()}"
+
+
+def _exported_flatpak_ref(export_dir: Path) -> str:
+    state = _read_exported_flatpak_state(export_dir)
+    ref = state["labels"].get("org.flatpak.ref", "")
+    if not ref:
+        raise ConfigError(f"{export_dir}: exported flatpak is missing org.flatpak.ref")
+    return ref
 
 
 def _prepare_exported_flatpak_metadata(

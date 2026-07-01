@@ -208,48 +208,63 @@ def build_flatpaks(
             cache_only=cache_only,
             ccache=ccache,
         )
-        if context.validation.missing_flatpaks:
-            missing = ", ".join(context.validation.missing_flatpaks)
-            raise ConfigError(
-                f"{manifest_path}: missing flatpak definitions: {missing}"
-            )
-        flatpak_refs = context.validation.manifest.flatpaks
-        if not flatpak_refs:
-            raise ConfigError(
-                f"{manifest_path}: 'flatpaks' must contain at least one item"
-            )
-        plans = _manifest_flatpak_build_plans(context, cache_only=cache_only)
-        if not force:
-            missing_plans = tuple(
-                plan
-                for plan in plans
-                if not hasattr(plan, "output_image")
-                or not _image_exists(context.podman, plan.output_image)
-            )
-        else:
-            missing_plans = plans
-        _ensure_flatpak_builders(context, missing_plans, cache_only=cache_only)
-        built_plans = _ensure_flatpak_rpm_builds(
-            context, missing_plans, cache_only=cache_only
-        )
-        if any(not hasattr(plan, "app_name") for plan in plans):
-            return _ensure_flatpak_images(
-                context,
-                built_plans,
-                cache_only=cache_only,
-                force=force,
-            )
-        built_by_name = {plan.app_name: plan for plan in built_plans}
-        final_plans = tuple(built_by_name.get(plan.app_name, plan) for plan in plans)
-        return _ensure_flatpak_images(
+        return build_flatpaks_with_context(
             context,
-            final_plans,
+            manifest_path=manifest_path,
             cache_only=cache_only,
             force=force,
         )
     finally:
         if context is not None:
             _remove_tree(context.dnf_workspace_dir, podman=context.podman)
+
+
+def build_flatpaks_with_context(
+    context: ResolvedManifestContext,
+    *,
+    manifest_path: Path,
+    cache_only: bool = False,
+    force: bool = False,
+) -> tuple[FlatpakBuildResult, ...]:
+    if context.validation.missing_flatpaks:
+        missing = ", ".join(context.validation.missing_flatpaks)
+        raise ConfigError(
+            f"{manifest_path}: missing flatpak definitions: {missing}"
+        )
+    flatpak_refs = context.validation.manifest.flatpaks
+    if not flatpak_refs:
+        raise ConfigError(
+            f"{manifest_path}: 'flatpaks' must contain at least one item"
+        )
+    plans = _manifest_flatpak_build_plans(context, cache_only=cache_only)
+    if not force:
+        missing_plans = tuple(
+            plan
+            for plan in plans
+            if not hasattr(plan, "output_image")
+            or not _image_exists(context.podman, plan.output_image)
+        )
+    else:
+        missing_plans = plans
+    _ensure_flatpak_builders(context, missing_plans, cache_only=cache_only)
+    built_plans = _ensure_flatpak_rpm_builds(
+        context, missing_plans, cache_only=cache_only
+    )
+    if any(not hasattr(plan, "app_name") for plan in plans):
+        return _ensure_flatpak_images(
+            context,
+            built_plans,
+            cache_only=cache_only,
+            force=force,
+        )
+    built_by_name = {plan.app_name: plan for plan in built_plans}
+    final_plans = tuple(built_by_name.get(plan.app_name, plan) for plan in plans)
+    return _ensure_flatpak_images(
+        context,
+        final_plans,
+        cache_only=cache_only,
+        force=force,
+    )
 
 
 def resolve_manifest_flatpak_images(
