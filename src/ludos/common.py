@@ -102,10 +102,8 @@ def resolve_manifest_context(
     manifest_env.update(local_values)
     if cache_version is None:
         cache_version = _default_cache_version()
-        load_only_version = False
     else:
         cache_version = _cache_name(cache_version, "version")
-        load_only_version = True
     manifest_env["version"] = cache_version
     releasever = _cache_name(
         _substitute_variables(validation.manifest.releasever, manifest_env),
@@ -190,7 +188,7 @@ def resolve_manifest_context(
     orchestrator_image = _local_image(local_prefix, "orchestrator", orchestrator_tag)
     if image_exists(podman, orchestrator_image):
         log(f"Reusing orchestrator image: {orchestrator_image}")
-    elif load_only_version or cache_only:
+    elif cache_only:
         raise ConfigError(f"orchestrator image is not cached: {orchestrator_image}")
     else:
         log(f"Creating orchestrator image: {orchestrator_image}")
@@ -238,7 +236,7 @@ def resolve_manifest_context(
             )
             apply_repo_priority(repo_dir / repo.source.name, repo.ref.priority)
             continue
-        if load_only_version or cache_only:
+        if cache_only:
             raise ConfigError(
                 f"repository metadata image is not cached: {repo_image}"
             )

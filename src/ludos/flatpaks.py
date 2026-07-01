@@ -257,6 +257,7 @@ def resolve_manifest_flatpak_images(
     cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
+    cache_only: bool = True,
 ) -> FlatpakImageResolution:
     context: ResolvedManifestContext | None = None
     dnf_workspace_dirs: list[Path] = []
@@ -266,7 +267,7 @@ def resolve_manifest_flatpak_images(
             cards_dir=cards_dir,
             cache_dir=cache_dir,
             cache_version=cache_version,
-            cache_only=True,
+            cache_only=cache_only,
             dnf_workspace_dirs=dnf_workspace_dirs,
         )
         if context.validation.missing_flatpaks:
@@ -274,7 +275,7 @@ def resolve_manifest_flatpak_images(
             raise ConfigError(
                 f"{manifest_path}: missing flatpak definitions: {missing}"
             )
-        plans = _manifest_flatpak_build_plans(context, cache_only=True)
+        plans = _manifest_flatpak_build_plans(context, cache_only=cache_only)
         return FlatpakImageResolution(
             output_images=tuple(plan.output_image for plan in plans),
             latest_images=tuple(plan.latest_image for plan in plans),

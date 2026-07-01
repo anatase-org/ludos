@@ -1055,6 +1055,7 @@ def resolve_manifest_images(
     cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
+    cache_only: bool = True,
 ) -> BuildResult:
     metadata: tuple[ResolvedBuildMetadata, ...] = tuple()
     try:
@@ -1063,7 +1064,7 @@ def resolve_manifest_images(
             cards_dir=cards_dir,
             cache_dir=cache_dir,
             cache_version=cache_version,
-            cache_only=True,
+            cache_only=cache_only,
         )
         metadata = _resolve_final_manifest_metadata(metadata, mode="separated")
         return _metadata_build_result(metadata[0])

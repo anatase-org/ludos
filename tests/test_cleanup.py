@@ -36,6 +36,12 @@ class CleanupCommandTests(unittest.TestCase):
         self.assertEqual(args.local_prefix, "test-")
         self.assertEqual(args.manifests, [Path("anatase.yml")])
 
+    def test_parser_accepts_cache(self) -> None:
+        args = build_parser().parse_args(["cleanup", "--cache", "anatase.yml"])
+
+        self.assertTrue(args.cache)
+        self.assertEqual(args.manifests, [Path("anatase.yml")])
+
     def test_cleanup_command_passes_purge(self) -> None:
         args = build_parser().parse_args(["cleanup", "--purge", "anatase.yml"])
 
@@ -48,6 +54,22 @@ class CleanupCommandTests(unittest.TestCase):
             manifests=(Path("anatase.yml"),),
             dry_run=False,
             purge=True,
+            cache_only=False,
+        )
+
+    def test_cleanup_command_passes_cache_only(self) -> None:
+        args = build_parser().parse_args(["cleanup", "--cache", "anatase.yml"])
+
+        with patch("ludos.__main__.cleanup_local_images", return_value=0) as cleanup:
+            self.assertEqual(cleanup_command(args), 0)
+
+        cleanup.assert_called_once_with(
+            version=None,
+            local_prefix="",
+            manifests=(Path("anatase.yml"),),
+            dry_run=False,
+            purge=False,
+            cache_only=True,
         )
 
 
@@ -184,6 +206,84 @@ class CleanupImageKeepTests(unittest.TestCase):
         self.assertIn("localhost/builds:f44-x86_64-flatpak-browser-jkl012", targets)
         self.assertIn("localhost/builders:f44-x86_64-flatpak-browser-mno345", targets)
         self.assertIn("localhost/flatpaks:f44-x86_64-browser", targets)
+
+    def test_manifest_targets_allow_cache_creation_by_default(self) -> None:
+        build_result = SimpleNamespace(
+            output_image="localhost/images:f44-anatase-abc12345",
+            latest_image="localhost/images:anatase",
+            orchestrator="localhost/orchestrator:f44-x86_64-base-2026.27",
+            repo_images=(),
+            package_images=(),
+            build_images=(),
+            builder_images=(),
+        )
+        flatpak_result = SimpleNamespace(
+            output_images=(),
+            latest_images=(),
+            build_images=(),
+            builder_images=(),
+        )
+
+        with (
+            patch("ludos.cleanup.resolve_manifest_images", return_value=build_result) as resolve_images,
+            patch(
+                "ludos.cleanup.resolve_manifest_flatpak_images",
+                return_value=flatpak_result,
+            ) as resolve_flatpaks,
+        ):
+            _manifest_cleanup_targets(Path("anatase.yml"), "2026.27")
+
+        resolve_images.assert_called_once_with(
+            Path("anatase.yml"),
+            cache_version="2026.27",
+            cache_only=False,
+        )
+        resolve_flatpaks.assert_called_once_with(
+            Path("anatase.yml"),
+            cache_version="2026.27",
+            cache_only=False,
+        )
+
+    def test_manifest_targets_can_require_cache(self) -> None:
+        build_result = SimpleNamespace(
+            output_image="localhost/images:f44-anatase-abc12345",
+            latest_image="localhost/images:anatase",
+            orchestrator="localhost/orchestrator:f44-x86_64-base-2026.27",
+            repo_images=(),
+            package_images=(),
+            build_images=(),
+            builder_images=(),
+        )
+        flatpak_result = SimpleNamespace(
+            output_images=(),
+            latest_images=(),
+            build_images=(),
+            builder_images=(),
+        )
+
+        with (
+            patch("ludos.cleanup.resolve_manifest_images", return_value=build_result) as resolve_images,
+            patch(
+                "ludos.cleanup.resolve_manifest_flatpak_images",
+                return_value=flatpak_result,
+            ) as resolve_flatpaks,
+        ):
+            _manifest_cleanup_targets(
+                Path("anatase.yml"),
+                "2026.27",
+                cache_only=True,
+            )
+
+        resolve_images.assert_called_once_with(
+            Path("anatase.yml"),
+            cache_version="2026.27",
+            cache_only=True,
+        )
+        resolve_flatpaks.assert_called_once_with(
+            Path("anatase.yml"),
+            cache_version="2026.27",
+            cache_only=True,
+        )
 
 
 class CleanupPurgeTests(unittest.TestCase):

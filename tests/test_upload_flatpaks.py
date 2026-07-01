@@ -36,6 +36,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                 "--build",
                 "--cache-dir",
                 "out/cache",
+                "--cache",
                 "--refresh",
             ]
         )
@@ -46,6 +47,7 @@ class UploadFlatpaksTests(unittest.TestCase):
         self.assertEqual(args.flatpaks, [Path("flatpaks/ark"), Path("flatpaks/kate")])
         self.assertTrue(args.build)
         self.assertEqual(args.cache_dir, Path("out/cache"))
+        self.assertTrue(args.cache)
         self.assertTrue(args.refresh)
 
     def test_registry_flatpak_upload_command_dispatches(self) -> None:
@@ -74,6 +76,7 @@ class UploadFlatpaksTests(unittest.TestCase):
             (Path("flatpaks/ark"),),
             build=True,
             cache_dir=Path("out/cache"),
+            cache_only=False,
         )
         update.assert_not_called()
 
@@ -101,6 +104,7 @@ class UploadFlatpaksTests(unittest.TestCase):
             (Path("flatpaks/ark"),),
             build=False,
             cache_dir=None,
+            cache_only=False,
         )
         update.assert_called_once_with(Path("anatase.yml"))
 
@@ -120,8 +124,28 @@ class UploadFlatpaksTests(unittest.TestCase):
             tuple(),
             build=False,
             cache_dir=None,
+            cache_only=False,
         )
         update.assert_not_called()
+
+    def test_registry_flatpak_upload_command_passes_cache_only(self) -> None:
+        args = build_parser().parse_args(
+            ["registry", "flatpak", "upload", "anatase.yml", "--cache"]
+        )
+
+        with (
+            patch("ludos.__main__.upload_flatpaks", return_value=0) as upload,
+            patch("ludos.__main__.update_flatpak_index", return_value=0),
+        ):
+            self.assertEqual(args.func(args), 0)
+
+        upload.assert_called_once_with(
+            Path("anatase.yml"),
+            tuple(),
+            build=False,
+            cache_dir=None,
+            cache_only=True,
+        )
 
     def test_registry_flatpak_init_dummy_runtime_parser(self) -> None:
         args = build_parser().parse_args(
@@ -247,6 +271,33 @@ class UploadFlatpaksTests(unittest.TestCase):
                     ),
                 ],
             )
+            deps.resolve_flatpaks.assert_called_once_with(
+                manifest,
+                cache_dir=root / "cache",
+                cache_only=False,
+            )
+
+    def test_upload_flatpaks_can_require_cached_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+
+            with _mock_upload_deps() as deps:
+                self.assertEqual(
+                    upload_flatpaks(
+                        manifest,
+                        tuple(),
+                        False,
+                        cache_only=True,
+                    ),
+                    0,
+                )
+
+            deps.resolve_flatpaks.assert_called_once_with(
+                manifest,
+                cache_dir=root / "cache",
+                cache_only=True,
+            )
 
     def test_upload_flatpaks_uses_selected_flatpaks_and_cache_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -317,7 +368,11 @@ class UploadFlatpaksTests(unittest.TestCase):
                         0,
                     )
 
-            build.assert_called_once_with(manifest, cache_dir=cache_dir)
+            build.assert_called_once_with(
+                manifest,
+                cache_dir=cache_dir,
+                cache_only=False,
+            )
             self.assertEqual(
                 [item.args[0][7] for item in deps.run_streamed.call_args_list],
                 ["localhost/flatpaks:built-kate", "localhost/flatpaks:built-ark"],
@@ -353,6 +408,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                 manifest,
                 (root / "flatpaks" / "ark" / "card.yaml").resolve(),
                 cache_dir=cache_dir,
+                cache_only=False,
             )
             self.assertEqual(
                 deps.run_streamed.call_args.args[0][7],
@@ -798,9 +854,15 @@ def _uint64_variant_label(value: str) -> int:
 
 
 class _MockUploadDeps:
-    def __init__(self, run_streamed: object, upload_oci: object) -> None:
+    def __init__(
+        self,
+        run_streamed: object,
+        upload_oci: object,
+        resolve_flatpaks: object,
+    ) -> None:
         self.run_streamed = run_streamed
         self.upload_oci = upload_oci
+        self.resolve_flatpaks = resolve_flatpaks
 
 
 class _mock_upload_deps:
@@ -815,7 +877,7 @@ class _mock_upload_deps:
         self.stack.enter_context(
             patch("ludos.upload.flatpaks._image_exists", return_value=self.image_exists)
         )
-        self.stack.enter_context(
+        resolve_flatpaks = self.stack.enter_context(
             patch(
                 "ludos.upload.flatpaks.resolve_manifest_flatpak_images",
                 side_effect=_mock_flatpak_resolution,
@@ -830,7 +892,7 @@ class _mock_upload_deps:
         upload_oci = self.stack.enter_context(
             patch("ludos.upload.flatpaks.upload_oci", return_value=0)
         )
-        return _MockUploadDeps(run_streamed, upload_oci)
+        return _MockUploadDeps(run_streamed, upload_oci, resolve_flatpaks)
 
     def __exit__(self, *exc: object) -> None:
         self.stack.close()

@@ -320,6 +320,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for flatpak export caches. Defaults to ./cache next to the manifest.",
     )
     registry_flatpak_upload.add_argument(
+        "--cache",
+        action="store_true",
+        help="Only use cached repository and orchestrator images while resolving flatpak images.",
+    )
+    registry_flatpak_upload.add_argument(
         "--refresh",
         action="store_true",
         help="Refresh the static flatpak index after uploading.",
@@ -633,6 +638,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show stale images without removing them.",
     )
     cleanup.add_argument(
+        "--cache",
+        action="store_true",
+        help="Only use cached repository and orchestrator images while resolving manifests.",
+    )
+    cleanup.add_argument(
         "--purge",
         action="store_true",
         help="Remove all local Ludos images in the selected local prefix without resolving manifests.",
@@ -771,6 +781,7 @@ def cleanup_command(args: argparse.Namespace) -> int:
         manifests=tuple(args.manifests),
         dry_run=args.dry_run,
         purge=args.purge,
+        cache_only=args.cache,
     )
 
 
@@ -824,6 +835,7 @@ def registry_command(args: argparse.Namespace) -> int:
                 tuple(args.flatpaks or ()),
                 build=args.build,
                 cache_dir=args.cache_dir,
+                cache_only=args.cache,
             )
             if result != 0:
                 return result

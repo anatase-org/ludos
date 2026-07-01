@@ -47,6 +47,7 @@ def cleanup_local_images(
     manifests: tuple[Path, ...] = tuple(),
     dry_run: bool = False,
     purge: bool = False,
+    cache_only: bool = False,
 ) -> int:
     podman = shutil.which("podman")
     if not podman:
@@ -72,7 +73,11 @@ def cleanup_local_images(
     manifest_targets = tuple(
         target
         for manifest in manifests
-        for target in _manifest_cleanup_targets(manifest, clean_version)
+        for target in _manifest_cleanup_targets(
+            manifest,
+            clean_version,
+            cache_only=cache_only,
+        )
     )
     stale_images = _stale_local_images(
         podman, clean_version, clean_local_prefix, manifest_targets
@@ -142,9 +147,22 @@ def _cleanup_local_prefix(value: str) -> str:
     return value
 
 
-def _manifest_cleanup_targets(manifest_path: Path, version: str) -> tuple[str, ...]:
-    result = resolve_manifest_images(manifest_path, cache_version=version)
-    flatpaks = resolve_manifest_flatpak_images(manifest_path, cache_version=version)
+def _manifest_cleanup_targets(
+    manifest_path: Path,
+    version: str,
+    *,
+    cache_only: bool = False,
+) -> tuple[str, ...]:
+    result = resolve_manifest_images(
+        manifest_path,
+        cache_version=version,
+        cache_only=cache_only,
+    )
+    flatpaks = resolve_manifest_flatpak_images(
+        manifest_path,
+        cache_version=version,
+        cache_only=cache_only,
+    )
     targets = (
         result.output_image,
         getattr(result, "latest_image", ""),

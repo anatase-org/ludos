@@ -85,17 +85,24 @@ def upload_flatpaks(
     build: bool,
     cache_dir: Path | None = None,
     *,
+    cache_only: bool = False,
     environ: Mapping[str, str] | None = None,
     client: Any | None = None,
 ) -> int:
     context = _resolve_flatpak_upload_context(manifest, cache_dir=cache_dir)
-    targets = _upload_targets(context, flatpaks, resolve_images=not build)
+    targets = _upload_targets(
+        context,
+        flatpaks,
+        resolve_images=not build,
+        cache_only=cache_only,
+    )
     results = _build_targets(
         manifest,
         targets,
         build,
         cache_dir,
         selected_all=not flatpaks,
+        cache_only=cache_only,
     )
     for target in targets:
         image = results.get(target.name, target.image)
@@ -242,6 +249,7 @@ def _upload_targets(
     flatpaks: tuple[Path, ...],
     *,
     resolve_images: bool = True,
+    cache_only: bool = False,
 ) -> tuple[FlatpakUploadTarget, ...]:
     selected = (
         flatpaks
@@ -250,7 +258,11 @@ def _upload_targets(
     )
     if not selected:
         raise ConfigError("manifest 'flatpaks' must contain at least one item")
-    resolved_images = _resolved_flatpak_images_by_name(context) if resolve_images else {}
+    resolved_images = (
+        _resolved_flatpak_images_by_name(context, cache_only=cache_only)
+        if resolve_images
+        else {}
+    )
     targets = []
     for flatpak in selected:
         path = _flatpak_card_path(_manifest_flatpak_path(flatpak, context.root_dir))
@@ -278,10 +290,13 @@ def _upload_targets(
 
 def _resolved_flatpak_images_by_name(
     context: FlatpakUploadContext,
+    *,
+    cache_only: bool,
 ) -> dict[str, str]:
     resolution = resolve_manifest_flatpak_images(
         context.validation.manifest.source or context.root_dir / "manifest.yml",
         cache_dir=context.cache_dir,
+        cache_only=cache_only,
     )
     return {
         _flatpak_card_path(
@@ -302,20 +317,30 @@ def _build_targets(
     cache_dir: Path | None,
     *,
     selected_all: bool,
+    cache_only: bool,
 ) -> dict[str, str]:
     if not build:
         return {}
     if not targets:
         return {}
     if selected_all:
-        results = build_flatpaks(manifest, cache_dir=cache_dir)
+        results = build_flatpaks(
+            manifest,
+            cache_dir=cache_dir,
+            cache_only=cache_only,
+        )
         return {
             target.name: result.image
             for target, result in zip(targets, results, strict=True)
         }
     images = {}
     for target in targets:
-        result = build_flatpak(manifest, target.path, cache_dir=cache_dir)
+        result = build_flatpak(
+            manifest,
+            target.path,
+            cache_dir=cache_dir,
+            cache_only=cache_only,
+        )
         images[target.name] = result.image
     return images
 
