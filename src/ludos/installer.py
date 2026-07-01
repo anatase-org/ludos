@@ -556,7 +556,7 @@ def _flatpak_install_lines(flatpaks: tuple[ExportedFlatpakImage, ...]) -> list[s
         lines.extend(
             [
                 "flatpak install --system --noninteractive --assumeyes "
-                f"--or-update --image {shlex.quote(image_ref)}",
+                f"--or-update --no-deps --image {shlex.quote(image_ref)}",
             ]
         )
     return lines
