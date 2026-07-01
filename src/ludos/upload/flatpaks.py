@@ -97,6 +97,10 @@ class ExportedFlatpakImage:
     tag: str
 
 
+def flatpak_oci_layout_path(cache_dir: Path, name: str, tag: str) -> Path:
+    return cache_dir / "flatpaks" / f"{name}-{tag}"
+
+
 def upload_flatpaks(
     manifest: Path,
     flatpaks: tuple[Path, ...],
@@ -230,7 +234,11 @@ def upload_dummy_runtime(
     runtime = _require_runtime_config(context.validation.manifest.runtime, manifest)
     flatpak_arch = _flatpak_arch(context.arch)
     runtime_ref = f"runtime/{runtime.id}/{flatpak_arch}/{runtime.branch}"
-    layout_dir = context.cache_dir / "flatpaks" / f"{runtime.repo}-{context.distro}"
+    layout_dir = flatpak_oci_layout_path(
+        context.cache_dir,
+        runtime.repo,
+        context.distro,
+    )
     _write_dummy_runtime_oci_layout(
         layout_dir,
         runtime=runtime,
@@ -375,7 +383,7 @@ def _upload_targets(
         path = _flatpak_card_path(_manifest_flatpak_path(flatpak, context.root_dir))
         source_ref = _manifest_flatpak_ref(flatpak, context.root_dir)
         name = path.parent.resolve().name
-        export_dir = context.cache_dir / "flatpaks" / f"{name}-{context.distro}"
+        export_dir = flatpak_oci_layout_path(context.cache_dir, name, context.distro)
         targets.append(
             FlatpakUploadTarget(
                 path=path,

@@ -264,10 +264,11 @@ class InstallerManifestTests(unittest.TestCase):
                         "  - flatpaks/browser",
                         "installer:",
                         "  flatpaks:",
-                        "    preinstall:",
-                        "      - flatpaks/ark",
-                        "    installer:",
-                        "      - flatpaks/browser",
+                        "    - repo: anatase",
+                        "      preinstall:",
+                        "        - flatpaks/ark",
+                        "      installer:",
+                        "        - flatpaks/browser",
                     ]
                 ),
                 encoding="utf-8",
@@ -277,9 +278,12 @@ class InstallerManifestTests(unittest.TestCase):
 
         self.assertEqual(
             parsed.installer.flatpaks,
-            InstallerFlatpaksConfig(
-                preinstall=("flatpaks/ark",),
-                installer=("flatpaks/browser",),
+            (
+                InstallerFlatpaksConfig(
+                    repo="anatase",
+                    preinstall=("flatpaks/ark",),
+                    installer=("flatpaks/browser",),
+                ),
             ),
         )
 
@@ -302,8 +306,9 @@ class InstallerManifestTests(unittest.TestCase):
                         "  - flatpaks/ark",
                         "installer:",
                         "  flatpaks:",
-                        "    installer:",
-                        "      - flatpaks/browser",
+                        "    - repo: anatase",
+                        "      installer:",
+                        "        - flatpaks/browser",
                     ]
                 ),
                 encoding="utf-8",
@@ -468,7 +473,12 @@ class InstallerHelperTests(unittest.TestCase):
     def test_export_installer_flatpaks_honors_cache_only(self) -> None:
         manifest = _manifest(
             InstallerConfig(
-                flatpaks=InstallerFlatpaksConfig(preinstall=("flatpaks/ark",))
+                flatpaks=(
+                    InstallerFlatpaksConfig(
+                        repo="anatase",
+                        preinstall=("flatpaks/ark",),
+                    ),
+                )
             )
         )
 
@@ -628,8 +638,13 @@ class InstallerHelperTests(unittest.TestCase):
             "echo build",
             ostree=True,
             flatpaks=(ark, browser),
-            preinstall=("flatpaks/ark",),
-            installer=("flatpaks/browser",),
+            flatpak_groups=(
+                InstallerFlatpaksConfig(
+                    repo="anatase",
+                    preinstall=("flatpaks/ark",),
+                    installer=("flatpaks/browser",),
+                ),
+            ),
         )
 
         ostree_index = text.index("LUDOS_INSTALLER_OSTREE")
@@ -640,10 +655,15 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertLess(comment_index, flatpak_index)
         self.assertLess(flatpak_index, build_index)
         self.assertIn("# flatpaks/browser sha256:", text)
+        self.assertIn(
+            "flatpak remote-add --system --if-not-exists --title Anatase "
+            "--prio=10 anatase oci+http://localhost",
+            text,
+        )
         self.assertIn("cp -alT /var/lib/flatpak /var/lib/flatpak-installer", text)
-        self.assertIn("--or-update --no-deps --image", text)
-        self.assertIn("oci:/ludos/flatpaks/ark:f44-x86_64", text)
-        self.assertIn("oci:/ludos/flatpaks/browser:f44-x86_64", text)
+        self.assertIn("--or-update --no-deps --sideload-repo=oci:/ludos/flatpaks/ark-f44-x86_64", text)
+        self.assertIn("anatase app/org.anatase.Ark/x86_64/stable", text)
+        self.assertIn("--sideload-repo=oci:/ludos/flatpaks/browser-f44-x86_64", text)
 
     def test_installer_containerfile_places_flatpaks_before_build_without_ostree(self) -> None:
         ark = _exported_flatpak("ark")
@@ -653,7 +673,12 @@ class InstallerHelperTests(unittest.TestCase):
             False,
             "echo build",
             flatpaks=(ark,),
-            preinstall=("flatpaks/ark",),
+            flatpak_groups=(
+                InstallerFlatpaksConfig(
+                    repo="anatase",
+                    preinstall=("flatpaks/ark",),
+                ),
+            ),
         )
 
         self.assertNotIn("LUDOS_INSTALLER_OSTREE", text)
@@ -666,11 +691,25 @@ class InstallerHelperTests(unittest.TestCase):
         ark = _exported_flatpak("ark")
         browser = _exported_flatpak("browser")
 
-        script = _installer_flatpak_script((ark,), (browser,))
+        script = _installer_flatpak_script(
+            (
+                InstallerFlatpaksConfig(
+                    repo="anatase",
+                    preinstall=("flatpaks/ark",),
+                    installer=("flatpaks/browser",),
+                ),
+            ),
+            {
+                "flatpaks/ark": ark,
+                "flatpaks/browser": browser,
+            },
+        )
 
-        ark_index = script.index("oci:/ludos/flatpaks/ark:f44-x86_64")
+        remote_index = script.index("flatpak remote-add")
+        ark_index = script.index("--sideload-repo=oci:/ludos/flatpaks/ark-f44-x86_64")
         snapshot_index = script.index("cp -alT /var/lib/flatpak /var/lib/flatpak-installer")
-        browser_index = script.index("oci:/ludos/flatpaks/browser:f44-x86_64")
+        browser_index = script.index("--sideload-repo=oci:/ludos/flatpaks/browser-f44-x86_64")
+        self.assertLess(remote_index, ark_index)
         self.assertLess(ark_index, snapshot_index)
         self.assertLess(snapshot_index, browser_index)
 
@@ -681,7 +720,7 @@ class InstallerHelperTests(unittest.TestCase):
             _flatpak_oci_volume_options((ark,)),
             [
                 "--volume",
-                "/cache/flatpaks/ark-f44-x86_64:/ludos/flatpaks/ark:ro",
+                "/cache/flatpaks/ark-f44-x86_64:/ludos/flatpaks/ark-f44-x86_64:ro",
             ],
         )
 

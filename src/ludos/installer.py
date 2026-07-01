@@ -24,8 +24,11 @@ from .build import (
     _validate_relative_file_path,
 )
 from .logging import log, stream
-from .model import ConfigError, InstallerConfig, Manifest
-from .upload.flatpaks import ExportedFlatpakImage, export_flatpak_oci_images
+from .model import ConfigError, InstallerConfig, InstallerFlatpaksConfig, Manifest
+from .upload.flatpaks import (
+    ExportedFlatpakImage,
+    export_flatpak_oci_images,
+)
 
 
 DEFAULT_LABEL_BASE = "LUDOS"
@@ -235,7 +238,13 @@ def _export_installer_flatpaks(
     cache_dir: Path | None,
     cache_only: bool = False,
 ) -> tuple[ExportedFlatpakImage, ...]:
-    selected = manifest.installer.flatpaks.all
+    selected = tuple(
+        dict.fromkeys(
+            ref
+            for group in manifest.installer.flatpaks
+            for ref in group.all
+        )
+    )
     if not selected:
         return tuple()
     log(f"Exporting {len(selected)} installer flatpak OCI image(s)")
@@ -328,8 +337,7 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
             ctx.manifest.installer.build,
             ostree=ctx.manifest.installer.ostree,
             flatpaks=ctx.flatpaks,
-            preinstall=ctx.manifest.installer.flatpaks.preinstall,
-            installer=ctx.manifest.installer.flatpaks.installer,
+            flatpak_groups=ctx.manifest.installer.flatpaks,
         ),
         encoding="utf-8",
     )
@@ -412,6 +420,15 @@ def _installer_hash(ctx: InstallerContext, source_image: str) -> str:
             "files": _installer_file_hash_inputs(ctx),
             "flatpaks": tuple(
                 (
+                    "remote",
+                    group.repo,
+                    group.preinstall,
+                    group.installer,
+                )
+                for group in ctx.manifest.installer.flatpaks
+            )
+            + tuple(
+                (
                     flatpak.source_ref,
                     flatpak.image,
                     flatpak.image_id,
@@ -471,8 +488,7 @@ def _installer_containerfile(
     *,
     ostree: bool = False,
     flatpaks: tuple[ExportedFlatpakImage, ...] = tuple(),
-    preinstall: tuple[str, ...] = tuple(),
-    installer: tuple[str, ...] = tuple(),
+    flatpak_groups: tuple[InstallerFlatpaksConfig, ...] = tuple(),
 ) -> str:
     if "\n" in base_ref:
         raise ConfigError("installer base image ref must not contain newlines")
@@ -489,7 +505,7 @@ def _installer_containerfile(
             ]
         )
     if flatpaks:
-        lines.extend(_installer_flatpak_lines(flatpaks, preinstall, installer))
+        lines.extend(_installer_flatpak_lines(flatpaks, flatpak_groups))
     lines.extend(
         [
             "RUN /bin/sh -ex <<'LUDOS_INSTALLER_BUILD'",
@@ -516,13 +532,12 @@ def _flatpak_oci_volume_options(
 
 
 def _flatpak_mount_path(flatpak: ExportedFlatpakImage) -> Path:
-    return FLATPAK_OCI_MOUNT / flatpak.name
+    return FLATPAK_OCI_MOUNT / flatpak.export_dir.name
 
 
 def _installer_flatpak_lines(
     flatpaks: tuple[ExportedFlatpakImage, ...],
-    preinstall: tuple[str, ...],
-    installer: tuple[str, ...],
+    flatpak_groups: tuple[InstallerFlatpaksConfig, ...],
 ) -> list[str]:
     by_source = {flatpak.source_ref: flatpak for flatpak in flatpaks}
     return [
@@ -532,35 +547,73 @@ def _installer_flatpak_lines(
         ),
         "RUN /bin/sh -ex <<'LUDOS_INSTALL_FLATPAKS'",
         _installer_flatpak_script(
-            tuple(by_source[ref] for ref in preinstall),
-            tuple(by_source[ref] for ref in installer),
+            flatpak_groups,
+            by_source,
         ).rstrip(),
         "LUDOS_INSTALL_FLATPAKS",
     ]
 
 
 def _installer_flatpak_script(
-    preinstall: tuple[ExportedFlatpakImage, ...],
-    installer: tuple[ExportedFlatpakImage, ...],
+    flatpak_groups: tuple[InstallerFlatpaksConfig, ...],
+    flatpaks_by_source: dict[str, ExportedFlatpakImage],
 ) -> str:
     lines = [
         "mkdir -p /var/lib/flatpak",
-        *_flatpak_install_lines(preinstall),
+        *_flatpak_remote_lines(flatpak_groups),
+        *(
+            line
+            for group in flatpak_groups
+            for line in _flatpak_install_lines(
+                group.repo,
+                tuple(flatpaks_by_source[ref] for ref in group.preinstall),
+            )
+        ),
         "rm -rf /var/lib/flatpak-installer",
         "cp -alT /var/lib/flatpak /var/lib/flatpak-installer",
-        *_flatpak_install_lines(installer),
+        *(
+            line
+            for group in flatpak_groups
+            for line in _flatpak_install_lines(
+                group.repo,
+                tuple(flatpaks_by_source[ref] for ref in group.installer),
+            )
+        ),
     ]
     return "\n".join(lines) + "\n"
 
 
-def _flatpak_install_lines(flatpaks: tuple[ExportedFlatpakImage, ...]) -> list[str]:
+def _flatpak_remote_lines(
+    flatpak_groups: tuple[InstallerFlatpaksConfig, ...],
+) -> list[str]:
+    lines = []
+    for repo in dict.fromkeys(group.repo for group in flatpak_groups):
+        repo_arg = shlex.quote(repo)
+        remote_url = shlex.quote("oci+http://localhost")
+        title = shlex.quote(repo.title())
+        lines.extend(
+            [
+                "flatpak remote-add --system --if-not-exists "
+                f"--title {title} --prio=10 {repo_arg} {remote_url}",
+                "flatpak remote-modify --system "
+                f"--title {title} --prio=10 --url {remote_url} {repo_arg}",
+            ]
+        )
+    return lines
+
+
+def _flatpak_install_lines(
+    repo: str,
+    flatpaks: tuple[ExportedFlatpakImage, ...],
+) -> list[str]:
     lines = []
     for flatpak in flatpaks:
-        image_ref = f"oci:{_flatpak_mount_path(flatpak)}:{flatpak.tag}"
+        sideload_ref = f"oci:{_flatpak_mount_path(flatpak)}"
         lines.extend(
             [
                 "flatpak install --system --noninteractive --assumeyes "
-                f"--or-update --no-deps --image {shlex.quote(image_ref)}",
+                f"--or-update --no-deps --sideload-repo={shlex.quote(sideload_ref)} "
+                f"{shlex.quote(repo)} {shlex.quote(flatpak.flatpak_ref)}",
             ]
         )
     return lines

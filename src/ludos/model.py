@@ -128,6 +128,7 @@ class RepoRef:
 
 @dataclass(frozen=True)
 class InstallerFlatpaksConfig:
+    repo: str
     preinstall: tuple[str, ...] = tuple()
     installer: tuple[str, ...] = tuple()
 
@@ -141,7 +142,7 @@ class InstallerConfig:
     files: tuple[str, ...] = tuple()
     build: str = ""
     ostree: bool = False
-    flatpaks: InstallerFlatpaksConfig = InstallerFlatpaksConfig()
+    flatpaks: tuple[InstallerFlatpaksConfig, ...] = tuple()
 
 
 @dataclass(frozen=True)
@@ -461,29 +462,46 @@ def _installer_config(data: dict[str, Any], path: Path) -> InstallerConfig:
 def _installer_flatpaks_config(
     data: dict[str, Any],
     path: Path,
-) -> InstallerFlatpaksConfig:
+) -> tuple[InstallerFlatpaksConfig, ...]:
     value = data.get("flatpaks")
     if value is None:
-        return InstallerFlatpaksConfig()
-    if not isinstance(value, dict):
-        raise ConfigError(f"{path}: 'installer.flatpaks' must be a mapping")
-    allowed = {"preinstall", "installer"}
-    for key in value:
-        if key not in allowed:
-            raise ConfigError(f"{path}: 'installer.flatpaks.{key}' is not supported")
-    return InstallerFlatpaksConfig(
-        preinstall=_string_tuple(value, "preinstall", path),
-        installer=_string_tuple(value, "installer", path),
-    )
+        return tuple()
+    if not isinstance(value, list):
+        raise ConfigError(f"{path}: 'installer.flatpaks' must be a list")
+    configs = []
+    allowed = {"repo", "preinstall", "installer"}
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ConfigError(
+                f"{path}: 'installer.flatpaks[{index}]' must be a mapping"
+            )
+        for key in item:
+            if key not in allowed:
+                raise ConfigError(
+                    f"{path}: 'installer.flatpaks[{index}].{key}' is not supported"
+                )
+        configs.append(
+            InstallerFlatpaksConfig(
+                repo=_required_string(item, "repo", path),
+                preinstall=_string_tuple(item, "preinstall", path),
+                installer=_string_tuple(item, "installer", path),
+            )
+        )
+    return tuple(configs)
 
 
 def _validate_installer_flatpaks(
     path: Path,
     flatpaks: tuple[str, ...],
-    installer_flatpaks: InstallerFlatpaksConfig,
+    installer_flatpaks: tuple[InstallerFlatpaksConfig, ...],
 ) -> None:
     declared = set(flatpaks)
-    missing = tuple(ref for ref in installer_flatpaks.all if ref not in declared)
+    missing = tuple(
+        ref
+        for group in installer_flatpaks
+        for ref in group.all
+        if ref not in declared
+    )
     if missing:
         refs = ", ".join(missing)
         raise ConfigError(
