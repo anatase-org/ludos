@@ -480,30 +480,34 @@ def _installer_flatpak_script(
 ) -> str:
     lines = [
         "mkdir -p /var/lib/flatpak",
-        *(
-            line
-            for group in flatpak_groups
-            for line in _flatpak_install_lines(
-                group.repo,
-                group.preinstall,
-                nodeps=group.nodeps,
-            )
-        ),
-        *_flatpak_refresh_lines(),
+        "dbus-uuidgen > /etc/machine-id",
+        "dbus-run-session -- /bin/sh -ex <<'LUDOS_FLATPAK_DBUS_SESSION'",
+        "flatpak_arch=$(uname -m)",
+        *_flatpak_phase_install_lines(flatpak_groups, "preinstall"),
+        "flatpak update --system --appstream -y --noninteractive",
         "rm -rf /var/lib/flatpak-installer",
         "cp -alT /var/lib/flatpak /var/lib/flatpak-installer",
-        *(
-            line
-            for group in flatpak_groups
-            for line in _flatpak_install_lines(
-                group.repo,
-                group.installer,
-                nodeps=group.nodeps,
-            )
-        ),
-        *_flatpak_refresh_lines(),
+        *_flatpak_phase_install_lines(flatpak_groups, "installer"),
+        "flatpak update --system --appstream -y --noninteractive",
+        "LUDOS_FLATPAK_DBUS_SESSION",
+        "rm -rf /var/lib/dbus/machine-id /etc/machine-id",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _flatpak_phase_install_lines(
+    flatpak_groups: tuple[InstallerFlatpaksConfig, ...],
+    phase: str,
+) -> list[str]:
+    grouped: dict[tuple[str, bool], list[str]] = {}
+    for group in flatpak_groups:
+        key = (group.repo, group.nodeps)
+        grouped.setdefault(key, []).extend(getattr(group, phase))
+    return [
+        line
+        for (repo, nodeps), flatpaks in grouped.items()
+        for line in _flatpak_install_lines(repo, tuple(dict.fromkeys(flatpaks)), nodeps=nodeps)
+    ]
 
 
 def _flatpak_install_lines(
@@ -512,24 +516,22 @@ def _flatpak_install_lines(
     *,
     nodeps: bool = False,
 ) -> list[str]:
-    lines = []
-    deps_arg = " --no-deps" if nodeps else ""
-    for flatpak_id in flatpaks:
-        lines.extend(
-            [
-                "flatpak install --system --noninteractive --assumeyes "
-                f"--or-update{deps_arg} "
-                f"{shlex.quote(repo)} {shlex.quote(flatpak_id)}",
-            ]
-        )
+    if not flatpaks:
+        return []
+    options = ["--system", "-y", "--noninteractive"]
+    if nodeps:
+        options.append("--no-deps")
+    lines = [
+        f"flatpak install {' '.join(options)} {shlex.quote(repo)} \\",
+    ]
+    for index, ref in enumerate(flatpaks):
+        suffix = " \\" if index < len(flatpaks) - 1 else ""
+        lines.append(f'    "{_shell_double_quoted(ref)}"{suffix}')
     return lines
 
 
-def _flatpak_refresh_lines() -> list[str]:
-    return [
-        "flatpak --system update --appstream",
-        "appstreamcli refresh --force",
-    ]
+def _shell_double_quoted(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`")
 
 
 def _installer_ostree_script() -> str:
