@@ -30,6 +30,8 @@ OCI_IMMUTABLE_CACHE_CONTROL = REGISTRY_IMMUTABLE_CACHE_CONTROL
 OCI_MUTABLE_CACHE_CONTROL = REGISTRY_SHORT_CACHE_CONTROL
 REGISTRY_PING_BODY = b"{}"
 FLATPAK_INDEX_REGISTRY = "../../../"
+# This avoids flatpak trying to launch dbus in the installer container
+FLATPAK_NO_TOKEN_TYPE_VARIANT = "AAAAAABp"
 
 _REF_COMPONENT_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
 _TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
@@ -676,6 +678,10 @@ def _flatpak_index_image(
     )
     if "org.flatpak.ref" not in labels:
         raise ConfigError(f"flatpak manifest {manifest_key} is missing org.flatpak.ref")
+    labels.setdefault(
+        "org.flatpak.commit-metadata.xa.token-type",
+        FLATPAK_NO_TOKEN_TYPE_VARIANT,
+    )
     return {
         "Digest": f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}",
         "MediaType": media_type,

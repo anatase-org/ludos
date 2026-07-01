@@ -1094,6 +1094,10 @@ class UploadRegistryTests(unittest.TestCase):
             ark_image["Labels"]["org.flatpak.ref"],
             "app/org.kde.ark/x86_64/stable",
         )
+        self.assertEqual(
+            ark_image["Labels"]["org.flatpak.commit-metadata.xa.token-type"],
+            "AAAAAABp",
+        )
         self.assertEqual(ark_image["Annotations"], {})
         self.assertEqual(ark_image["Tags"], ["f44-x86_64"])
 

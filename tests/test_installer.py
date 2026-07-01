@@ -596,12 +596,11 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertLess(ostree_index, flatpak_index)
         self.assertLess(flatpak_index, build_index)
         self.assertIn("cp -alT /var/lib/flatpak /var/lib/flatpak-installer", text)
-        self.assertIn("dbus-uuidgen > /etc/machine-id", text)
-        self.assertIn("dbus-run-session -- /bin/sh -ex <<'LUDOS_FLATPAK_DBUS_SESSION'", text)
         self.assertIn("flatpak install --system -y --noninteractive --no-deps anatase \\", text)
-        self.assertIn('"app/org.anatase.ArchiveManager/${flatpak_arch}/stable"', text)
-        self.assertIn('"app/org.anatase.Browser/${flatpak_arch}/stable"', text)
+        self.assertIn('"org.anatase.ArchiveManager"', text)
+        self.assertIn('"org.anatase.Browser"', text)
         self.assertIn("flatpak update --system --appstream -y --noninteractive", text)
+        self.assertNotIn("dbus-run-session", text)
 
     def test_installer_containerfile_places_flatpaks_before_build_without_ostree(self) -> None:
         text = _installer_containerfile(
@@ -636,25 +635,19 @@ class InstallerHelperTests(unittest.TestCase):
             ),
         )
 
-        session_index = script.index("dbus-run-session -- /bin/sh -ex <<'LUDOS_FLATPAK_DBUS_SESSION'")
         arch_index = script.index("flatpak_arch=$(uname -m)")
-        ark_index = script.index('"app/org.anatase.ArchiveManager/${flatpak_arch}/stable"')
-        calculator_index = script.index('"app/org.anatase.Calculator/${flatpak_arch}/stable"')
+        ark_index = script.index('"org.anatase.ArchiveManager"')
+        calculator_index = script.index('"org.anatase.Calculator"')
         refresh_index = script.index("flatpak update --system --appstream -y --noninteractive")
         snapshot_index = script.index("cp -alT /var/lib/flatpak /var/lib/flatpak-installer")
-        browser_index = script.index('"app/org.anatase.Browser/${flatpak_arch}/stable"')
-        session_end_index = script.rindex("LUDOS_FLATPAK_DBUS_SESSION")
-        cleanup_index = script.index("rm -rf /var/lib/dbus/machine-id /etc/machine-id")
-        self.assertLess(session_index, arch_index)
+        browser_index = script.index('"org.anatase.Browser"')
         self.assertLess(arch_index, ark_index)
         self.assertLess(ark_index, refresh_index)
         self.assertLess(calculator_index, refresh_index)
         self.assertLess(refresh_index, snapshot_index)
         self.assertLess(snapshot_index, browser_index)
-        self.assertLess(browser_index, session_end_index)
-        self.assertLess(session_end_index, cleanup_index)
-        self.assertIn("dbus-uuidgen > /etc/machine-id", script)
-        self.assertEqual(script.count("dbus-run-session"), 1)
+        self.assertNotIn("machine-id", script)
+        self.assertNotIn("dbus-run-session", script)
         self.assertEqual(script.count("flatpak install"), 2)
 
     def test_installer_flatpak_script_omits_no_deps_by_default(self) -> None:
@@ -667,9 +660,8 @@ class InstallerHelperTests(unittest.TestCase):
             ),
         )
 
-        self.assertIn("dbus-run-session -- /bin/sh -ex <<'LUDOS_FLATPAK_DBUS_SESSION'", script)
         self.assertIn("flatpak install --system -y --noninteractive flathub \\", script)
-        self.assertIn('"app/org.example.App/${flatpak_arch}/stable"', script)
+        self.assertIn('"org.example.App"', script)
         self.assertNotIn("--no-deps", script)
 
     def test_container_name_is_deterministic_for_ref(self) -> None:

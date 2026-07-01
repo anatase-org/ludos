@@ -480,8 +480,6 @@ def _installer_flatpak_script(
 ) -> str:
     lines = [
         "mkdir -p /var/lib/flatpak",
-        "dbus-uuidgen > /etc/machine-id",
-        "dbus-run-session -- /bin/sh -ex <<'LUDOS_FLATPAK_DBUS_SESSION'",
         "flatpak_arch=$(uname -m)",
         *_flatpak_phase_install_lines(flatpak_groups, "preinstall"),
         "flatpak update --system --appstream -y --noninteractive",
@@ -489,8 +487,6 @@ def _installer_flatpak_script(
         "cp -alT /var/lib/flatpak /var/lib/flatpak-installer",
         *_flatpak_phase_install_lines(flatpak_groups, "installer"),
         "flatpak update --system --appstream -y --noninteractive",
-        "LUDOS_FLATPAK_DBUS_SESSION",
-        "rm -rf /var/lib/dbus/machine-id /etc/machine-id",
     ]
     return "\n".join(lines) + "\n"
 
