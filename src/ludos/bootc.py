@@ -9,6 +9,7 @@ import subprocess
 import threading
 from pathlib import Path
 
+from . import build as build_module
 from .build import (
     _cache_name,
     _cleanup_dnf_workspaces,
@@ -50,6 +51,7 @@ def bootc_create(
     ci: bool = False,
     ccache: bool = True,
     writers: int = DEFAULT_OCI_WRITERS,
+    force: bool = False,
 ) -> int:
     if not manifests:
         raise ConfigError("at least one manifest is required")
@@ -69,14 +71,38 @@ def bootc_create(
             cache_only=cache_only,
             ccache=ccache,
         )
-        build_package_card_images(metadata, cache_only=cache_only)
-        build_outputs = build_build_images(metadata, cache_only=cache_only)
-        results = build_final_manifest_images(
-            metadata,
-            build_outputs=build_outputs,
-            mode="combined" if ci else "separated",
-            cache_only=cache_only,
+        mode = "combined" if ci else "separated"
+        final_metadata = (
+            build_module._resolve_final_manifest_metadata(metadata, mode=mode)
+            if all(hasattr(item, "releasever") for item in metadata)
+            else metadata
         )
+        can_reuse_final = all(
+            hasattr(item, "podman") and hasattr(item, "output_image")
+            for item in final_metadata
+        )
+        if not force and can_reuse_final and all(
+            build_module._image_exists(item.podman, item.output_image)
+            for item in final_metadata
+        ):
+            for item in final_metadata:
+                build_module._tag_image(item.podman, item.output_image, item.latest_image)
+            metadata = final_metadata
+            results = tuple(
+                build_module._metadata_build_result(item)
+                for item in metadata
+            )
+        else:
+            metadata = final_metadata
+            build_package_card_images(metadata, cache_only=cache_only)
+            build_outputs = build_build_images(metadata, cache_only=cache_only)
+            results = build_final_manifest_images(
+                metadata,
+                build_outputs=build_outputs,
+                mode=mode,
+                cache_only=cache_only,
+                force=force,
+            )
     finally:
         _cleanup_dnf_workspaces(metadata)
 

@@ -100,6 +100,7 @@ class InstallerParserTests(unittest.TestCase):
                 "--orchestrator",
                 "localhost/tools:latest",
                 "--scratch",
+                "--force",
             ]
         )
 
@@ -111,6 +112,7 @@ class InstallerParserTests(unittest.TestCase):
         self.assertEqual(args.cache_dir, Path("cache"))
         self.assertEqual(args.orchestrator, "localhost/tools:latest")
         self.assertTrue(args.scratch)
+        self.assertTrue(args.force)
 
     def test_parser_requires_installer_ref(self) -> None:
         with self.assertRaises(SystemExit):
@@ -346,11 +348,11 @@ class InstallerHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _context(Path(tmp))
 
-            self.assertEqual(
+            self.assertRegex(
                 _installer_image_ref(ctx),
-                f"localhost/installer:{_safe_ref_name(ctx.ref)}",
+                r"^localhost/installers:f44-x86_64-anatase-[0-9a-f]{8}$",
             )
-            self.assertEqual(_installer_latest_image_ref(), "localhost/installer:latest")
+            self.assertEqual(_installer_latest_image_ref(ctx), "localhost/installers:anatase")
 
     def test_installer_containerfile_runs_build_steps_in_image(self) -> None:
         containerfile = _installer_containerfile(
@@ -414,7 +416,10 @@ class InstallerHelperTests(unittest.TestCase):
             containerfile = ctx.build_context / "Containerfile"
             self.assertTrue(containerfile.is_file())
 
-        self.assertEqual(image, f"localhost/installer:{_safe_ref_name(ctx.ref)}")
+        self.assertRegex(
+            image,
+            r"^localhost/installers:f44-x86_64-anatase-[0-9a-f]{8}$",
+        )
         run.assert_called_once_with(
             [
                 "podman",
@@ -422,7 +427,7 @@ class InstallerHelperTests(unittest.TestCase):
                 "--tag",
                 image,
                 "--tag",
-                "localhost/installer:latest",
+                "localhost/installers:anatase",
                 "--file",
                 str(containerfile),
                 str(ctx.build_context),
@@ -453,7 +458,10 @@ class InstallerHelperTests(unittest.TestCase):
             )
             build_command = run_mock.call_args_list[-1].args[0]
 
-        self.assertEqual(image, f"localhost/installer:{_safe_ref_name(ctx.ref)}")
+        self.assertRegex(
+            image,
+            r"^localhost/installers:f44-x86_64-anatase-[0-9a-f]{8}$",
+        )
         self.assertIn("FROM sha256:" + "c" * 64, containerfile_text)
         self.assertIn("--cap-add", build_command)
         self.assertIn("SYS_ADMIN", build_command)

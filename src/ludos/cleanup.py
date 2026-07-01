@@ -8,12 +8,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .build import _run_logged_command, resolve_manifest_images
+from .flatpaks import resolve_manifest_flatpak_images
 from .logging import log
 from .model import ConfigError
 
 
 VERSIONED_CLEANUP_REPOSITORIES = ("orchestrator", "repos")
 RESOLVED_CLEANUP_REPOSITORIES = ("cards", "builds", "builders", "installer")
+FINAL_CLEANUP_REPOSITORIES = ("images", "flatpaks", "installers")
 CLEANUP_REPOSITORIES = (*VERSIONED_CLEANUP_REPOSITORIES, *RESOLVED_CLEANUP_REPOSITORIES)
 LATEST_CLEANUP_REPOSITORIES = ("orchestrator", "installer")
 INTERMEDIATE_CLEANUP_HINT = (
@@ -112,13 +114,19 @@ def _cleanup_local_prefix(value: str) -> str:
 
 def _manifest_cleanup_targets(manifest_path: Path, version: str) -> tuple[str, ...]:
     result = resolve_manifest_images(manifest_path, cache_version=version)
+    flatpaks = resolve_manifest_flatpak_images(manifest_path, cache_version=version)
     targets = (
         result.output_image,
+        getattr(result, "latest_image", ""),
         result.orchestrator,
         *result.repo_images,
         *result.package_images,
         *result.build_images,
         *result.builder_images,
+        *flatpaks.output_images,
+        *getattr(flatpaks, "latest_images", tuple()),
+        *flatpaks.build_images,
+        *flatpaks.builder_images,
     )
     log(f"Keeping manifest image: {result.output_image}")
     if result.package_images or result.build_images or result.builder_images:
@@ -128,7 +136,13 @@ def _manifest_cleanup_targets(manifest_path: Path, version: str) -> tuple[str, .
             f"{len(result.build_images)} builds, "
             f"{len(result.builder_images)} builders"
         )
-    return targets
+    if flatpaks.build_images or flatpaks.builder_images:
+        log(
+            f"Keeping resolved flatpak cache images: "
+            f"{len(flatpaks.build_images)} builds, "
+            f"{len(flatpaks.builder_images)} builders"
+        )
+    return tuple(target for target in targets if target)
 
 
 def _stale_local_images(
@@ -150,6 +164,7 @@ def _stale_local_images(
         for repository in RESOLVED_CLEANUP_REPOSITORIES
     }
     manifest_keep_refs = set(manifest_targets)
+    final_aliases = _final_aliases(manifest_keep_refs)
     manifest_repositories = {
         repository
         for target in manifest_targets
@@ -164,6 +179,7 @@ def _stale_local_images(
         capture_output=True,
     )
     images = json.loads(result.stdout or "[]")
+    image_ids_by_name = _image_ids_by_name(images)
     stale: list[CleanupTarget] = []
     seen: set[str] = set()
 
@@ -187,6 +203,8 @@ def _stale_local_images(
                 manifest_repositories,
                 manifest_keep_refs,
                 current_suffix,
+                final_aliases,
+                image_ids_by_name,
             ):
                 continue
             if name not in seen:
@@ -304,8 +322,20 @@ def _keep_named_image(
     manifest_repositories: set[str],
     manifest_keep_refs: set[str],
     current_suffix: str,
+    final_aliases: dict[str, str] | None = None,
+    image_ids_by_name: dict[str, str] | None = None,
 ) -> bool:
     if name in manifest_keep_refs:
+        if final_aliases and name in final_aliases:
+            hash_ref = final_aliases[name]
+            if hash_ref not in manifest_keep_refs:
+                return False
+            if image_ids_by_name is None:
+                return True
+            return (
+                image_ids_by_name.get(name)
+                and image_ids_by_name.get(name) == image_ids_by_name.get(hash_ref)
+            )
         return True
     if repository in latest_cache_repositories and tag == "latest":
         return True
@@ -316,6 +346,55 @@ def _keep_named_image(
     if repository in manifest_repositories:
         return name in manifest_keep_refs
     return True
+
+
+def _image_ids_by_name(images: list[object]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        image_id = image.get("Id")
+        if not isinstance(image_id, str) or not image_id:
+            continue
+        for name in _image_names(image):
+            result[name] = image_id
+    return result
+
+
+def _final_aliases(manifest_keep_refs: set[str]) -> dict[str, str]:
+    parsed_refs = []
+    for ref in manifest_keep_refs:
+        parsed = _split_image_name(ref)
+        if parsed is None:
+            continue
+        repository, tag = parsed
+        if repository.rsplit("/", 1)[-1] not in FINAL_CLEANUP_REPOSITORIES:
+            continue
+        parsed_refs.append((ref, repository, tag))
+
+    aliases: dict[str, str] = {}
+    hash_refs = [
+        (ref, repository, tag)
+        for ref, repository, tag in parsed_refs
+        if _tag_has_hash_suffix(tag)
+    ]
+    for alias_ref, alias_repository, alias_tag in parsed_refs:
+        if _tag_has_hash_suffix(alias_tag):
+            continue
+        for hash_ref, hash_repository, hash_tag in hash_refs:
+            if alias_repository != hash_repository:
+                continue
+            if hash_tag.rsplit("-", 1)[0].endswith(f"-{alias_tag}"):
+                aliases[alias_ref] = hash_ref
+                break
+    return aliases
+
+
+def _tag_has_hash_suffix(tag: str) -> bool:
+    _prefix, separator, suffix = tag.rpartition("-")
+    return bool(separator) and len(suffix) == 8 and all(
+        character in "0123456789abcdef" for character in suffix
+    )
 
 
 def _is_manifest_dangling_image(

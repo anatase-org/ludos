@@ -120,6 +120,7 @@ class FlatpakParserTests(unittest.TestCase):
                 "--version",
                 "20260629",
                 "--no-ccache",
+                "--force",
                 "anatase.yml",
             ]
         )
@@ -144,6 +145,7 @@ class FlatpakParserTests(unittest.TestCase):
             cache_version="20260629",
             cache_only=True,
             ccache=False,
+            force=True,
         )
         self.assertIn(
             "Built flatpak app/org.anatase.TextEditor/x86_64/stable",
@@ -368,8 +370,11 @@ class FlatpakParserTests(unittest.TestCase):
         self.assertEqual(plan.app_ref, "app/org.anatase.TextEditor/x86_64/beta")
         self.assertIn("runtime=org.anatase.Platform/x86_64/beta", plan.metadata)
         self.assertIn("sdk=org.anatase.ludos.Sdk/x86_64/beta", plan.metadata)
-        self.assertEqual(plan.output_image, "localhost/flatpaks:f44-x86_64-kate")
-        self.assertEqual(plan.latest_image, plan.output_image)
+        self.assertRegex(
+            plan.output_image,
+            r"^localhost/flatpaks:f44-x86_64-kate-[0-9a-f]{8}$",
+        )
+        self.assertEqual(plan.latest_image, "localhost/flatpaks:kate")
 
     def test_prepare_flatpak_build_plan_hashes_only_scoped_env(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -486,12 +491,17 @@ specs:
                     ),
                 )
 
+        self.assertRegex(
+            plans[0].output_image,
+            r"^localhost/flatpaks:f44-x86_64-kate-[0-9a-f]{8}$",
+        )
+        self.assertRegex(
+            plans[1].output_image,
+            r"^localhost/flatpaks:f44-x86_64-ark-[0-9a-f]{8}$",
+        )
         self.assertEqual(
-            tuple(plan.output_image for plan in plans),
-            (
-                "localhost/flatpaks:f44-x86_64-kate",
-                "localhost/flatpaks:f44-x86_64-ark",
-            ),
+            tuple(plan.latest_image for plan in plans),
+            ("localhost/flatpaks:kate", "localhost/flatpaks:ark"),
         )
         self.assertEqual(tuple(plan.branch for plan in plans), ("stable", "stable"))
         self.assertTrue(
@@ -551,6 +561,8 @@ specs:
             with (
                 patch("ludos.flatpaks._write_flatpak_containerfile") as write,
                 patch("ludos.flatpaks._run_flatpak_image_build") as run,
+                patch("ludos.flatpaks._image_exists", return_value=False),
+                patch("ludos.flatpaks._tag_image") as tag,
             ):
                 results = _ensure_flatpak_images(
                     context,
@@ -567,6 +579,11 @@ specs:
             "[Application]\nname=org.anatase.TextEditor\n",
             "org.anatase.TextEditor",
             flatpak_images=context.flatpak_images,
+        )
+        tag.assert_called_once_with(
+            "podman",
+            "localhost/flatpaks:f44-x86_64-kate",
+            "localhost/flatpaks:f44-x86_64-kate",
         )
         self.assertEqual(results[0].image, "localhost/flatpaks:f44-x86_64-kate")
 
@@ -1277,8 +1294,8 @@ specs:
                 "podman",
                 "build",
                 "--pull=false",
-                "--tag",
-                "localhost/flatpaks:f44-x86_64-kate-unlabeled",
+                "--iidfile",
+                str(build_dir / "final-image.id"),
                 "--file",
                 str(build_dir / "Containerfile.final"),
                 str(build_dir),
@@ -1290,7 +1307,7 @@ specs:
                 "buildah",
                 "from",
                 "--quiet",
-                "localhost/flatpaks:f44-x86_64-kate-unlabeled",
+                "sha256:buildimageid",
             ],
         )
         self.assertIn(
@@ -1396,7 +1413,7 @@ specs:
                 "rmi",
                 "localhost/flatpaks:f44-x86_64-kate-build-stage",
                 "sha256:buildimageid",
-                "localhost/flatpaks:f44-x86_64-kate-unlabeled",
+                "sha256:buildimageid",
             ],
         )
         self.assertTrue(all("--label" not in command for command in streamed))

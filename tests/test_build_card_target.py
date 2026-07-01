@@ -460,6 +460,7 @@ class TargetCardBuildTests(unittest.TestCase):
         Path(metadata.build_dir).mkdir(parents=True)
 
         with (
+            patch("ludos.build._image_exists", return_value=False),
             patch("ludos.build._run_container_build") as container_build,
             patch("ludos.build.subprocess.run") as run,
         ):
@@ -475,12 +476,16 @@ class TargetCardBuildTests(unittest.TestCase):
             [
                 "podman",
                 "tag",
-                "localhost/anatase:f44-x86_64",
-                "localhost/anatase:latest",
+                result.output_image,
+                "localhost/images:anatase",
             ],
             check=True,
         )
-        self.assertEqual(result.output_image, "localhost/anatase:f44-x86_64")
+        self.assertRegex(
+            result.output_image,
+            r"^localhost/images:f44-x86_64-anatase-[0-9a-f]{8}$",
+        )
+        self.assertEqual(result.latest_image, "localhost/images:anatase")
 
     def test_install_heredocs_include_build_image_refs_for_cache(self) -> None:
         metadata = self._metadata()

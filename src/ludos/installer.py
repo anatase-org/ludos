@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import signal
@@ -11,7 +12,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .bootc import DEFAULT_CACHE_DIR, _manifest_artifact_path, _safe_oci_name
-from .build import FileRef, _parse_file_ref, _validate_relative_file_path
+from .build import (
+    HASH_LENGTH,
+    FileRef,
+    _cache_name,
+    _image_exists,
+    _local_image,
+    _parse_file_ref,
+    _substitute_variables,
+    _tag_image,
+    _validate_relative_file_path,
+)
 from .logging import log, stream
 from .model import ConfigError, InstallerConfig, Manifest
 
@@ -65,6 +76,7 @@ class InstallerContext:
     output_dir: Path
     orchestrator: str
     scratch: bool = False
+    force: bool = False
     podman: str = "podman"
 
     @property
@@ -113,6 +125,7 @@ def bootc_installer(
     cache_dir: Path | None = None,
     orchestrator: str | None = None,
     scratch: bool = False,
+    force: bool = False,
 ) -> int:
     manifest_path = manifest_path.expanduser().resolve()
     manifest = Manifest.from_file(manifest_path)
@@ -134,6 +147,7 @@ def bootc_installer(
         output_dir=output_dir,
         orchestrator=orchestrator or ref,
         scratch=scratch,
+        force=force,
         podman=podman,
     )
 
@@ -153,6 +167,7 @@ def bootc_installer(
         output_dir=output_dir,
         orchestrator=orchestrator or installer_image,
         scratch=scratch,
+        force=force,
         podman=podman,
     )
     log(f"Using installer tooling image: {ctx.orchestrator}")
@@ -265,7 +280,13 @@ def _prepare_installer_build_context(ctx: InstallerContext) -> None:
 
 
 def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
-    image = _installer_image_ref(ctx)
+    image = _installer_image_ref(ctx, base_ref)
+    latest_image = _installer_latest_image_ref(ctx)
+    if not ctx.force and _image_exists(ctx.podman, image):
+        log(f"Reusing installer image: {image}")
+        _tag_image(ctx.podman, image, latest_image)
+        return image
+
     containerfile = ctx.build_context / "Containerfile"
     has_files = (ctx.build_context / "files").is_dir()
     containerfile.write_text(
@@ -297,7 +318,7 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
             "--tag",
             image,
             "--tag",
-            _installer_latest_image_ref(),
+            latest_image,
             "--file",
             str(containerfile),
             str(ctx.build_context),
@@ -306,12 +327,96 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
     return image
 
 
-def _installer_image_ref(ctx: InstallerContext) -> str:
-    return f"localhost/installer:{_safe_ref_name(ctx.ref)}"
+def _installer_image_ref(ctx: InstallerContext, source_image: str = "") -> str:
+    image, distro, local_prefix = _installer_manifest_identity(ctx)
+    installer_hash = _installer_hash(ctx, source_image)
+    return _local_image(local_prefix, "installers", f"{distro}-{image}-{installer_hash}")
 
 
-def _installer_latest_image_ref() -> str:
-    return "localhost/installer:latest"
+def _installer_latest_image_ref(ctx: InstallerContext | None = None) -> str:
+    if ctx is None:
+        return "localhost/installers:latest"
+    image, _distro, local_prefix = _installer_manifest_identity(ctx)
+    return _local_image(local_prefix, "installers", image)
+
+
+def _installer_manifest_identity(ctx: InstallerContext) -> tuple[str, str, str]:
+    manifest_env = {key: str(value) for key, value in ctx.manifest.env.items()}
+    manifest_env["releasever"] = _cache_name(
+        _substitute_variables(ctx.manifest.releasever, manifest_env),
+        "releasever",
+    )
+    arch = _cache_name(
+        _substitute_variables(str(manifest_env.get("arch", "")), manifest_env),
+        "arch",
+    )
+    manifest_env["arch"] = arch
+    manifest_env = {
+        key: _substitute_variables(value, manifest_env)
+        for key, value in manifest_env.items()
+    }
+    distro = _cache_name(
+        _substitute_variables(ctx.manifest.distro, manifest_env),
+        "distro",
+    )
+    image = _cache_name(ctx.manifest_path.resolve().stem, "image")
+    local_prefix = ctx.manifest.local_prefix
+    if "/" in local_prefix or ":" in local_prefix:
+        raise ConfigError(f"invalid local_prefix '{local_prefix}'")
+    return image, distro, local_prefix
+
+
+def _installer_hash(ctx: InstallerContext, source_image: str) -> str:
+    payload = {
+        "source_image": source_image,
+        "scratch": ctx.scratch,
+        "installer": {
+            "ostree": ctx.manifest.installer.ostree,
+            "build": ctx.manifest.installer.build,
+            "files": _installer_file_hash_inputs(ctx),
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:HASH_LENGTH]
+
+
+def _installer_file_hash_inputs(ctx: InstallerContext) -> tuple[tuple[str, str, str], ...]:
+    entries = []
+    manifest_root = ctx.manifest_path.parent
+    for value in ctx.manifest.installer.files:
+        file_ref = _parse_file_ref(value)
+        if _is_remote_file_ref(file_ref.source):
+            entries.append((file_ref.target, file_ref.source, file_ref.source))
+            continue
+        target_relpath = _validate_relative_file_path(
+            file_ref.target,
+            ctx.manifest_path,
+            "installer files destination",
+        )
+        source_relpath = _validate_relative_file_path(
+            file_ref.source,
+            ctx.manifest_path,
+            "installer files source",
+        )
+        source_path = (manifest_root / source_relpath).resolve()
+        try:
+            source_path.relative_to(manifest_root.resolve())
+        except ValueError as exc:
+            raise ConfigError(
+                f"{manifest_root}: installer files entry '{file_ref.original}' escapes the manifest directory"
+            ) from exc
+        if not source_path.is_file():
+            raise ConfigError(
+                f"{manifest_root}: installer files entry '{file_ref.original}' is missing"
+            )
+        entries.append((target_relpath.as_posix(), file_ref.source, _hash_path(source_path)))
+    return tuple(entries)
+
+
+def _hash_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _installer_containerfile(

@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -51,6 +51,7 @@ class BuildResult:
     distro: str
     orchestrator: str
     output_image: str
+    latest_image: str
     requested_packages: tuple[str, ...]
     resolved_packages: tuple[str, ...]
     package_blocks: tuple[tuple[str, tuple[str, ...]], ...]
@@ -148,6 +149,7 @@ class ResolvedBuildMetadata:
     card_builds: tuple[tuple[str, str], ...]
     card_specs: tuple[tuple[str, tuple[SpecBuild, ...]], ...]
     spec_source_revisions: tuple[tuple[str, str, str], ...]
+    latest_image: str = ""
 
 
 @dataclass(frozen=True)
@@ -248,6 +250,7 @@ def build_manifest(
     ci: bool = False,
     ccache: bool = True,
     card: str | None = None,
+    force: bool = False,
 ) -> BuildResult:
     metadata: tuple[ResolvedBuildMetadata, ...] = tuple()
     try:
@@ -275,13 +278,21 @@ def build_manifest(
             )
             return _target_card_build_result(metadata[0], target, build_outputs)
 
+        mode = "combined" if ci else "separated"
+        metadata = _resolve_final_manifest_metadata(metadata, mode=mode)
+        if not force and _image_exists(metadata[0].podman, metadata[0].output_image):
+            log(f"Reusing final image: {metadata[0].output_image}")
+            _tag_image(metadata[0].podman, metadata[0].output_image, metadata[0].latest_image)
+            return _metadata_build_result(metadata[0])
+
         build_package_card_images(metadata, cache_only=cache_only)
         build_outputs = build_build_images(metadata, cache_only=cache_only)
         return build_final_manifest_images(
             metadata,
             build_outputs=build_outputs,
-            mode="combined" if ci else "separated",
+            mode=mode,
             cache_only=cache_only,
+            force=force,
         )[0]
     finally:
         _cleanup_dnf_workspaces(metadata)
@@ -377,7 +388,6 @@ def _resolve_manifest_metadata(
     releasever = context.releasever
     arch = context.arch
     distro = context.distro
-    output_image = context.output_image
     distro_cache_dir = context.distro_cache_dir
     package_dir = context.package_dir
     build_dir = context.build_dir
@@ -937,7 +947,7 @@ def _resolve_manifest_metadata(
         for key, value in validation.manifest.labels.items()
     )
 
-    return ResolvedBuildMetadata(
+    metadata = ResolvedBuildMetadata(
         image=image,
         distro=distro,
         releasever=releasever,
@@ -945,7 +955,8 @@ def _resolve_manifest_metadata(
         root_dir=str(root_dir),
         local_prefix=local_prefix,
         orchestrator=orchestrator,
-        output_image=output_image,
+        output_image=_local_image(local_prefix, "images", f"{distro}-{image}"),
+        latest_image=_local_image(local_prefix, "images", image),
         manifest_labels=manifest_labels,
         manifest_env=tuple(sorted(manifest_env.items())),
         requested_packages=requested_packages,
@@ -1036,6 +1047,7 @@ def _resolve_manifest_metadata(
             for spec_source, revision in revisions
         ),
     )
+    return _metadata_with_final_image(metadata, mode="separated")
 
 
 def resolve_manifest_images(
@@ -1053,6 +1065,7 @@ def resolve_manifest_images(
             cache_version=cache_version,
             cache_only=True,
         )
+        metadata = _resolve_final_manifest_metadata(metadata, mode="separated")
         return _metadata_build_result(metadata[0])
     finally:
         _cleanup_dnf_workspaces(metadata)
@@ -1287,10 +1300,12 @@ def build_final_manifest_images(
     build_outputs: BuildImageOutputs | None = None,
     mode: str = "separated",
     cache_only: bool = False,
+    force: bool = False,
 ) -> tuple[BuildResult, ...]:
     if mode not in ("separated", "combined"):
         raise ConfigError(f"unknown final image build mode: {mode}")
     build_outputs = build_outputs or BuildImageOutputs()
+    metadata = _resolve_final_manifest_metadata(metadata, mode=mode)
     results = []
     for manifest in metadata:
         results.append(
@@ -1299,6 +1314,7 @@ def build_final_manifest_images(
                 build_outputs=build_outputs,
                 mode=mode,
                 cache_only=cache_only,
+                force=force,
             )
         )
     return tuple(results)
@@ -1310,7 +1326,17 @@ def _build_final_manifest_image(
     build_outputs: BuildImageOutputs,
     mode: str,
     cache_only: bool,
+    force: bool = False,
 ) -> BuildResult:
+    metadata = _metadata_with_final_image(metadata, mode=mode)
+    if not force and _image_exists(metadata.podman, metadata.output_image):
+        log(f"Reusing final image: {metadata.output_image}")
+        _tag_image(metadata.podman, metadata.output_image, metadata.latest_image)
+        return _metadata_build_result(
+            metadata,
+            build_outputs=build_outputs,
+        )
+
     build_dir = Path(metadata.build_dir)
     card_files_dir = build_dir / "files"
     log("Staging card files")
@@ -1429,10 +1455,7 @@ def _build_final_manifest_image(
         ],
         containerfile,
     )
-    subprocess.run(
-        [metadata.podman, "tag", metadata.output_image, _latest_image(metadata.output_image)],
-        check=True,
-    )
+    _tag_image(metadata.podman, metadata.output_image, metadata.latest_image)
 
     return _metadata_build_result(
         metadata,
@@ -2209,6 +2232,7 @@ def _metadata_build_result(
         distro=metadata.distro,
         orchestrator=metadata.orchestrator,
         output_image=metadata.output_image,
+        latest_image=metadata.latest_image,
         requested_packages=metadata.requested_packages,
         resolved_packages=tuple(
             package
@@ -2228,6 +2252,107 @@ def _metadata_build_result(
     )
 
 
+def _resolve_final_manifest_metadata(
+    metadata: tuple[ResolvedBuildMetadata, ...],
+    *,
+    mode: str,
+) -> tuple[ResolvedBuildMetadata, ...]:
+    return tuple(_metadata_with_final_image(item, mode=mode) for item in metadata)
+
+
+def _metadata_with_final_image(
+    metadata: ResolvedBuildMetadata,
+    *,
+    mode: str,
+) -> ResolvedBuildMetadata:
+    final_hash = _final_manifest_hash(metadata, mode=mode)
+    return replace(
+        metadata,
+        output_image=_local_image(
+            metadata.local_prefix,
+            "images",
+            f"{metadata.distro}-{metadata.image}-{final_hash}",
+        ),
+        latest_image=_local_image(metadata.local_prefix, "images", metadata.image),
+    )
+
+
+def _final_manifest_hash(metadata: ResolvedBuildMetadata, *, mode: str) -> str:
+    payload = {
+        "mode": mode,
+        "image": metadata.image,
+        "distro": metadata.distro,
+        "releasever": metadata.releasever,
+        "arch": metadata.arch,
+        "local_prefix": metadata.local_prefix,
+        "orchestrator": metadata.orchestrator,
+        "manifest_labels": metadata.manifest_labels,
+        "common_packages": metadata.common_packages,
+        "bootstrap_packages": metadata.bootstrap_packages,
+        "card_order": metadata.card_order,
+        "card_packages": metadata.card_packages,
+        "card_resolutions": metadata.card_resolutions,
+        "package_ids": metadata.package_ids,
+        "package_images": tuple(
+            (plan.block, _image_tag(plan.image))
+            for plan in metadata.package_images
+        ),
+        "build_images": tuple(
+            (plan.block, _image_tag(plan.image), plan.declared_package_ids)
+            for plan in metadata.build_images
+        ),
+        "oci_images": tuple(
+            (
+                plan.block,
+                plan.name,
+                plan.digest,
+                plan.packages,
+                plan.declared_package_ids,
+            )
+            for plan in metadata.oci_images
+        ),
+        "card_file_sets": _card_file_set_hash_inputs(metadata.card_file_sets),
+        "postprocess_blocks": metadata.postprocess_blocks,
+        "card_envs": metadata.card_envs,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:HASH_LENGTH]
+
+
+def _card_file_set_hash_inputs(
+    card_file_sets: tuple[tuple[str, str, tuple[FileRef, ...]], ...],
+) -> tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...]:
+    result = []
+    for card_name, card_source_text, file_refs in card_file_sets:
+        card_source = Path(card_source_text)
+        card_source_dir = card_source.parent.resolve()
+        entries = []
+        for file_ref in file_refs:
+            if _is_http_source(file_ref.source) or _is_git_source(file_ref.source):
+                source_hash = file_ref.source
+            else:
+                source_relpath = _validate_relative_file_path(
+                    file_ref.source,
+                    card_source,
+                    "files source",
+                )
+                source_path = (card_source_dir / source_relpath).resolve()
+                try:
+                    source_path.relative_to(card_source_dir)
+                except ValueError as exc:
+                    raise ConfigError(
+                        f"{card_source}: files entry '{file_ref.original}' escapes the card directory"
+                    ) from exc
+                if not source_path.is_file():
+                    raise ConfigError(
+                        f"{card_source}: files entry '{file_ref.original}' is missing"
+                    )
+                source_hash = _hash_file(source_path)
+            entries.append((file_ref.target, file_ref.source, source_hash))
+        result.append((card_name, tuple(entries)))
+    return tuple(result)
+
+
 def _target_card_build_result(
     metadata: ResolvedBuildMetadata,
     target: str,
@@ -2245,6 +2370,7 @@ def _target_card_build_result(
         distro=metadata.distro,
         orchestrator=metadata.orchestrator,
         output_image=metadata.output_image,
+        latest_image=metadata.latest_image,
         requested_packages=metadata.requested_packages,
         resolved_packages=tuple(
             package
@@ -2309,8 +2435,15 @@ def _latest_image(image: str) -> str:
     return f"{repository}:latest"
 
 
+def _tag_image(podman: str, image: str, target: str) -> None:
+    subprocess.run([podman, "tag", image, target], check=True)
+
+
 def _image_exists(podman: str, image: str) -> bool:
-    return subprocess.run([podman, "image", "exists", image], check=False).returncode == 0
+    try:
+        return subprocess.run([podman, "image", "exists", image], check=False).returncode == 0
+    except FileNotFoundError:
+        return False
 
 
 def _remove_image(podman: str, image: str) -> None:

@@ -224,11 +224,11 @@ class UploadFlatpaksTests(unittest.TestCase):
                 [
                     _podman_push_call(
                         root / "cache" / "flatpaks" / "kate-f44-x86_64",
-                        "localhost/flatpaks:f44-x86_64-kate",
+                        "localhost/flatpaks:f44-x86_64-kate-hash",
                     ),
                     _podman_push_call(
                         root / "cache" / "flatpaks" / "ark-f44-x86_64",
-                        "localhost/flatpaks:f44-x86_64-ark",
+                        "localhost/flatpaks:f44-x86_64-ark-hash",
                     ),
                 ],
             )
@@ -275,7 +275,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                     "--compression-format",
                     "gzip",
                     "--force-compression",
-                    "localhost/flatpaks:f44-x86_64-ark",
+                    "localhost/flatpaks:f44-x86_64-ark-hash",
                     f"oci:{export_dir}:f44-x86_64",
                 ]
             )
@@ -407,6 +407,10 @@ class UploadFlatpaksTests(unittest.TestCase):
                 patch(
                     "ludos.upload.flatpaks._run_streamed_command",
                     side_effect=run_streamed,
+                ),
+                patch(
+                    "ludos.upload.flatpaks.resolve_manifest_flatpak_images",
+                    side_effect=_mock_flatpak_resolution,
                 ),
                 patch("ludos.upload.flatpaks.upload_oci", return_value=0) as upload_oci,
             ):
@@ -811,6 +815,12 @@ class _mock_upload_deps:
         self.stack.enter_context(
             patch("ludos.upload.flatpaks._image_exists", return_value=self.image_exists)
         )
+        self.stack.enter_context(
+            patch(
+                "ludos.upload.flatpaks.resolve_manifest_flatpak_images",
+                side_effect=_mock_flatpak_resolution,
+            )
+        )
         run_streamed = self.stack.enter_context(
             patch(
                 "ludos.upload.flatpaks._run_streamed_command",
@@ -824,6 +834,19 @@ class _mock_upload_deps:
 
     def __exit__(self, *exc: object) -> None:
         self.stack.close()
+
+
+def _mock_flatpak_resolution(manifest: Path, **_kwargs: object) -> object:
+    names = []
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- flatpaks/"):
+            names.append(Path(stripped.removeprefix("- ")).name)
+    return SimpleNamespace(
+        output_images=tuple(
+            f"localhost/flatpaks:f44-x86_64-{name}-hash" for name in names
+        )
+    )
 
 
 def _podman_push_call(export_dir: Path, image: str) -> object:

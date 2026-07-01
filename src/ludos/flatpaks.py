@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 import json
 import shlex
 import shutil
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .build import (
+    HASH_LENGTH,
     _card_specs_hash,
     _build_specs_output_image,
     _create_builder_image,
@@ -28,6 +30,7 @@ from .build import (
     _resolve_staged_spec_builder_packages,
     _stage_card_specs,
     _substitute_variables,
+    _tag_image,
     _unique_packages,
 )
 from .common import (
@@ -70,6 +73,14 @@ class FlatpakBuildResult:
     builder_image: str
     podman: str
     orchestrator: str
+
+
+@dataclass(frozen=True)
+class FlatpakImageResolution:
+    output_images: tuple[str, ...]
+    latest_images: tuple[str, ...]
+    build_images: tuple[str, ...]
+    builder_images: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -155,6 +166,7 @@ def build_flatpak(
     cache_version: str | None = None,
     cache_only: bool = False,
     ccache: bool = True,
+    force: bool = False,
 ) -> FlatpakBuildResult:
     context: ResolvedManifestContext | None = None
     try:
@@ -170,6 +182,7 @@ def build_flatpak(
             context,
             flatpak_path,
             cache_only=cache_only,
+            force=force,
         )
     finally:
         if context is not None:
@@ -183,6 +196,7 @@ def build_flatpaks(
     cache_version: str | None = None,
     cache_only: bool = False,
     ccache: bool = True,
+    force: bool = False,
 ) -> tuple[FlatpakBuildResult, ...]:
     context: ResolvedManifestContext | None = None
     try:
@@ -204,20 +218,93 @@ def build_flatpaks(
             raise ConfigError(
                 f"{manifest_path}: 'flatpaks' must contain at least one item"
             )
-        plans = tuple(
-            _prepare_flatpak_build_plan(
-                context,
-                _manifest_flatpak_path(flatpak_ref, context.root_dir),
-                cache_only=cache_only,
+        plans = _manifest_flatpak_build_plans(context, cache_only=cache_only)
+        if not force:
+            missing_plans = tuple(
+                plan
+                for plan in plans
+                if not hasattr(plan, "output_image")
+                or not _image_exists(context.podman, plan.output_image)
             )
-            for flatpak_ref in flatpak_refs
+        else:
+            missing_plans = plans
+        _ensure_flatpak_builders(context, missing_plans, cache_only=cache_only)
+        built_plans = _ensure_flatpak_rpm_builds(
+            context, missing_plans, cache_only=cache_only
         )
-        _ensure_flatpak_builders(context, plans, cache_only=cache_only)
-        plans = _ensure_flatpak_rpm_builds(context, plans, cache_only=cache_only)
-        return _ensure_flatpak_images(context, plans, cache_only=cache_only)
+        if any(not hasattr(plan, "app_name") for plan in plans):
+            return _ensure_flatpak_images(
+                context,
+                built_plans,
+                cache_only=cache_only,
+                force=force,
+            )
+        built_by_name = {plan.app_name: plan for plan in built_plans}
+        final_plans = tuple(built_by_name.get(plan.app_name, plan) for plan in plans)
+        return _ensure_flatpak_images(
+            context,
+            final_plans,
+            cache_only=cache_only,
+            force=force,
+        )
     finally:
         if context is not None:
             _remove_tree(context.dnf_workspace_dir, podman=context.podman)
+
+
+def resolve_manifest_flatpak_images(
+    manifest_path: Path,
+    cards_dir: Path | None = None,
+    cache_dir: Path | None = None,
+    cache_version: str | None = None,
+) -> FlatpakImageResolution:
+    context: ResolvedManifestContext | None = None
+    dnf_workspace_dirs: list[Path] = []
+    try:
+        context = resolve_manifest_context(
+            manifest_path,
+            cards_dir=cards_dir,
+            cache_dir=cache_dir,
+            cache_version=cache_version,
+            cache_only=True,
+            dnf_workspace_dirs=dnf_workspace_dirs,
+        )
+        if context.validation.missing_flatpaks:
+            missing = ", ".join(context.validation.missing_flatpaks)
+            raise ConfigError(
+                f"{manifest_path}: missing flatpak definitions: {missing}"
+            )
+        plans = _manifest_flatpak_build_plans(context, cache_only=True)
+        return FlatpakImageResolution(
+            output_images=tuple(plan.output_image for plan in plans),
+            latest_images=tuple(plan.latest_image for plan in plans),
+            build_images=tuple(plan.build_image for plan in plans),
+            builder_images=tuple(plan.builder_image for plan in plans),
+        )
+    finally:
+        if context is not None:
+            _remove_tree(context.dnf_workspace_dir, podman=context.podman)
+        else:
+            for dnf_workspace_dir in dnf_workspace_dirs:
+                _remove_tree(dnf_workspace_dir)
+
+
+def _manifest_flatpak_build_plans(
+    context: ResolvedManifestContext,
+    *,
+    cache_only: bool,
+) -> tuple[FlatpakBuildPlan, ...]:
+    flatpak_refs = context.validation.manifest.flatpaks
+    if not flatpak_refs:
+        return tuple()
+    return tuple(
+        _prepare_flatpak_build_plan(
+            context,
+            _manifest_flatpak_path(flatpak_ref, context.root_dir),
+            cache_only=cache_only,
+        )
+        for flatpak_ref in flatpak_refs
+    )
 
 
 def _build_flatpak_with_context(
@@ -225,11 +312,18 @@ def _build_flatpak_with_context(
     flatpak_path: Path,
     *,
     cache_only: bool,
+    force: bool,
 ) -> FlatpakBuildResult:
     plan = _prepare_flatpak_build_plan(context, flatpak_path, cache_only=cache_only)
-    _ensure_flatpak_builders(context, (plan,), cache_only=cache_only)
-    plan = _ensure_flatpak_rpm_builds(context, (plan,), cache_only=cache_only)[0]
-    return _ensure_flatpak_images(context, (plan,), cache_only=cache_only)[0]
+    if force or not _image_exists(context.podman, plan.output_image):
+        _ensure_flatpak_builders(context, (plan,), cache_only=cache_only)
+        plan = _ensure_flatpak_rpm_builds(context, (plan,), cache_only=cache_only)[0]
+    return _ensure_flatpak_images(
+        context,
+        (plan,),
+        cache_only=cache_only,
+        force=force,
+    )[0]
 
 
 def _prepare_flatpak_build_plan(
@@ -247,13 +341,6 @@ def _prepare_flatpak_build_plan(
     branch = runtime.branch
     flatpak_arch = _flatpak_arch(context.arch)
     app_ref = f"app/{card.flatpak.app_id}/{flatpak_arch}/{branch}"
-    output_image = _local_image(
-        context.local_prefix,
-        "flatpaks",
-        f"{context.distro}-{app_name}",
-    )
-    latest_image = output_image
-
     log(f"Building flatpak {card.flatpak.app_id} for {context.distro}")
     substitution_env = _flatpak_build_env(context.manifest_env, card.env)
     build_env = dict(substitution_env)
@@ -280,12 +367,6 @@ def _prepare_flatpak_build_plan(
         hash_expression="",
         cache_only=cache_only,
     )
-    if build_env:
-        build_env_hash = _hash_lines(
-            tuple(f"{key}={value}" for key, value in sorted(build_env.items()))
-        )
-        spec_hash = f"{spec_hash}-{build_env_hash}"
-
     package_id_by_nevra: dict[str, tuple[str, str]] = {}
     orchestrator_dnf_base = _orchestrator_dnf_base(context)
     staged_specs = _stage_card_specs(
@@ -337,6 +418,24 @@ def _prepare_flatpak_build_plan(
         flatpak_arch=flatpak_arch,
         runtime_id=runtime.id,
     )
+    final_hash = _flatpak_final_hash(
+        app_name=app_name,
+        app_ref=app_ref,
+        branch=branch,
+        flatpak_arch=flatpak_arch,
+        card=card,
+        flatpak_dir=flatpak_dir,
+        substitution_env=substitution_env,
+        build_image=build_image,
+        metadata=metadata,
+        flatpak_images=getattr(context, "flatpak_images", FlatpakImagesConfig()),
+    )
+    output_image = _local_image(
+        context.local_prefix,
+        "flatpaks",
+        f"{context.distro}-{app_name}-{final_hash}",
+    )
+    latest_image = _local_image(context.local_prefix, "flatpaks", app_name)
 
     return FlatpakBuildPlan(
         card_path=card_path,
@@ -464,9 +563,15 @@ def _ensure_flatpak_images(
     plans: tuple[FlatpakBuildPlan, ...],
     *,
     cache_only: bool,
+    force: bool = False,
 ) -> tuple[FlatpakBuildResult, ...]:
     results = []
     for plan in plans:
+        if not force and _image_exists(context.podman, plan.output_image):
+            log(f"Reusing flatpak image: {plan.output_image}")
+            _tag_image(context.podman, plan.output_image, plan.latest_image)
+            results.append(_flatpak_build_result(context, plan))
+            continue
         _write_flatpak_containerfile(
             final_build_dir=plan.final_build_dir,
             flatpak_dir=plan.flatpak_dir,
@@ -491,20 +596,26 @@ def _ensure_flatpak_images(
                 FlatpakImagesConfig(),
             ),
         )
-        results.append(
-            FlatpakBuildResult(
-                app_id=plan.card.flatpak.app_id,
-                branch=plan.branch,
-                ref=plan.app_ref,
-                image=plan.output_image,
-                latest_image=plan.latest_image,
-                build_image=plan.build_image,
-                builder_image=plan.builder_image,
-                podman=context.podman,
-                orchestrator=context.orchestrator,
-            )
-        )
+        _tag_image(context.podman, plan.output_image, plan.latest_image)
+        results.append(_flatpak_build_result(context, plan))
     return tuple(results)
+
+
+def _flatpak_build_result(
+    context: ResolvedManifestContext,
+    plan: FlatpakBuildPlan,
+) -> FlatpakBuildResult:
+    return FlatpakBuildResult(
+        app_id=plan.card.flatpak.app_id,
+        branch=plan.branch,
+        ref=plan.app_ref,
+        image=plan.output_image,
+        latest_image=plan.latest_image,
+        build_image=plan.build_image,
+        builder_image=plan.builder_image,
+        podman=context.podman,
+        orchestrator=context.orchestrator,
+    )
 
 
 def _reject_unknown_keys(path: Path, data: dict[str, Any], allowed: set[str], prefix: str = "") -> None:
@@ -1346,11 +1457,13 @@ def _run_flatpak_image_build(
     containerfile = build_dir / "Containerfile"
     final_containerfile = build_dir / "Containerfile.final"
     build_iidfile = build_dir / "build-image.id"
+    final_iidfile = build_dir / "final-image.id"
     build_stage_image = f"{image}-build-stage"
-    unlabeled_image = f"{image}-unlabeled"
     build_image_id = ""
+    final_image_id = ""
     try:
         build_iidfile.unlink(missing_ok=True)
+        final_iidfile.unlink(missing_ok=True)
         command = _flatpak_build_stage_command(
             podman,
             containerfile,
@@ -1404,21 +1517,27 @@ def _run_flatpak_image_build(
             podman,
             final_containerfile,
             build_dir,
-            unlabeled_image,
+            final_iidfile,
         )
         returncode, _output = _run_streamed_command(command)
         if returncode != 0:
             raise ConfigError(f"flatpak image build failed with exit status {returncode}")
+        final_image_id = final_iidfile.read_text(encoding="utf-8").strip()
+        if not final_image_id:
+            raise ConfigError("flatpak image build did not write an image ID")
         _label_flatpak_image(
             buildah,
-            source_image=unlabeled_image,
+            source_image=final_image_id,
             image=image,
             labels=labels,
         )
     finally:
         if build_image_id:
+            images = [build_stage_image, build_image_id]
+            if final_image_id:
+                images.append(final_image_id)
             subprocess.run(
-                [podman, "rmi", build_stage_image, build_image_id, unlabeled_image],
+                [podman, "rmi", *images],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1468,14 +1587,14 @@ def _flatpak_final_image_build_command(
     podman: str,
     containerfile: Path,
     build_dir: Path,
-    image: str,
+    iidfile: Path,
 ) -> list[str]:
     return [
         podman,
         "build",
         "--pull=false",
-        "--tag",
-        image,
+        "--iidfile",
+        str(iidfile),
         "--file",
         str(containerfile),
         str(build_dir),
@@ -1693,7 +1812,91 @@ def _podman_cp(podman: str, container: str, source: str, target: Path) -> bool:
 
 
 def _hash_lines(values: tuple[str, ...]) -> str:
-    import hashlib
-
     payload = "\n".join(sorted(values)) + "\n"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:HASH_LENGTH]
+
+
+def _flatpak_final_hash(
+    *,
+    app_name: str,
+    app_ref: str,
+    branch: str,
+    flatpak_arch: str,
+    card: FlatpakCard,
+    flatpak_dir: Path,
+    substitution_env: dict[str, str],
+    build_image: str,
+    metadata: str,
+    flatpak_images: FlatpakImagesConfig,
+) -> str:
+    payload = {
+        "app_name": app_name,
+        "app_ref": app_ref,
+        "branch": branch,
+        "flatpak_arch": flatpak_arch,
+        "flatpak": {
+            "app_id": card.flatpak.app_id,
+            "command": card.flatpak.command,
+            "finish_args": card.flatpak.finish_args,
+            "rename": card.flatpak.rename,
+            "rename_author": card.flatpak.rename_author,
+            "rename_icon": card.flatpak.rename_icon,
+            "rename_desktop_file": card.flatpak.rename_desktop_file,
+            "rename_appdata_file": card.flatpak.rename_appdata_file,
+            "add_extensions": card.flatpak.add_extensions,
+        },
+        "substitution_env": tuple(sorted(substitution_env.items())),
+        "build_image": _image_tag(build_image),
+        "metadata": metadata,
+        "files": _flatpak_file_hash_inputs(card, flatpak_dir),
+        "postprocess": card.postprocess,
+        "flatpak_images": {
+            "uri": flatpak_images.uri,
+            "s3": flatpak_images.s3,
+            "overlay": flatpak_images.overlay,
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:HASH_LENGTH]
+
+
+def _flatpak_file_hash_inputs(
+    card: FlatpakCard,
+    flatpak_dir: Path,
+) -> tuple[tuple[str, str, str], ...]:
+    entries = []
+    for entry in card.files:
+        target, source = _parse_file_entry(entry)
+        source_relpath = _relative_path(source, card.source or flatpak_dir, "files source")
+        source_path = (flatpak_dir / source_relpath).resolve()
+        try:
+            source_path.relative_to(flatpak_dir.resolve())
+        except ValueError as exc:
+            raise ConfigError(
+                f"{card.source}: files entry '{entry}' escapes the flatpak directory"
+            ) from exc
+        if source_path.is_file():
+            entries.append((target, source, _hash_path_contents(source_path)))
+        elif source_path.is_dir():
+            for file_path in sorted(path for path in source_path.rglob("*") if path.is_file()):
+                relative = file_path.relative_to(source_path).as_posix()
+                entries.append(
+                    (
+                        f"{target.rstrip('/')}/{relative}",
+                        f"{source.rstrip('/')}/{relative}",
+                        _hash_path_contents(file_path),
+                    )
+                )
+        else:
+            raise ConfigError(f"{card.source}: files entry '{entry}' is missing")
+    return tuple(entries)
+
+
+def _hash_path_contents(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _image_tag(image: str) -> str:
+    return image.rsplit(":", 1)[-1]

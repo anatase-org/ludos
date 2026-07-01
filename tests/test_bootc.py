@@ -52,6 +52,7 @@ class BootcCommandTests(unittest.TestCase):
                 "--writers",
                 "8",
                 "--no-ccache",
+                "--force",
                 "anatase.yml",
                 "other.yml",
             ]
@@ -67,6 +68,7 @@ class BootcCommandTests(unittest.TestCase):
         self.assertTrue(args.ci)
         self.assertEqual(args.writers, 8)
         self.assertTrue(args.no_ccache)
+        self.assertTrue(args.force)
         self.assertEqual(args.manifests, [Path("anatase.yml"), Path("other.yml")])
 
     def test_parser_defaults_bootc_create_writers(self) -> None:

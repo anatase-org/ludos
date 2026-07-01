@@ -26,6 +26,7 @@ from ..flatpaks import (
     DEFAULT_FLATPAK_SDK,
     build_flatpak,
     build_flatpaks,
+    resolve_manifest_flatpak_images,
     _flatpak_arch,
     _flatpak_appstream_labels_with_remote_icon,
 )
@@ -88,7 +89,7 @@ def upload_flatpaks(
     client: Any | None = None,
 ) -> int:
     context = _resolve_flatpak_upload_context(manifest, cache_dir=cache_dir)
-    targets = _upload_targets(context, flatpaks)
+    targets = _upload_targets(context, flatpaks, resolve_images=not build)
     results = _build_targets(
         manifest,
         targets,
@@ -118,7 +119,7 @@ def tree_shake_flatpaks(
         cache_dir=None,
         require_podman=False,
     )
-    for target in _upload_targets(context, flatpaks):
+    for target in _upload_targets(context, flatpaks, resolve_images=False):
         tree_shake_oci(target.ref, dry_run=dry_run)
     return 0
 
@@ -239,6 +240,8 @@ def _project_flatpak_images(root_dir: Path) -> FlatpakImagesConfig:
 def _upload_targets(
     context: FlatpakUploadContext,
     flatpaks: tuple[Path, ...],
+    *,
+    resolve_images: bool = True,
 ) -> tuple[FlatpakUploadTarget, ...]:
     selected = (
         flatpaks
@@ -247,6 +250,7 @@ def _upload_targets(
     )
     if not selected:
         raise ConfigError("manifest 'flatpaks' must contain at least one item")
+    resolved_images = _resolved_flatpak_images_by_name(context) if resolve_images else {}
     targets = []
     for flatpak in selected:
         path = _flatpak_card_path(_manifest_flatpak_path(flatpak, context.root_dir))
@@ -256,10 +260,13 @@ def _upload_targets(
             FlatpakUploadTarget(
                 path=path,
                 name=name,
-                image=_local_image(
-                    context.local_prefix,
-                    "flatpaks",
-                    f"{context.distro}-{name}",
+                image=resolved_images.get(
+                    name,
+                    _local_image(
+                        context.local_prefix,
+                        "flatpaks",
+                        f"{context.distro}-{name}",
+                    ),
                 ),
                 export_dir=export_dir,
                 ref=f"flatpaks/{name}",
@@ -267,6 +274,25 @@ def _upload_targets(
             )
         )
     return tuple(targets)
+
+
+def _resolved_flatpak_images_by_name(
+    context: FlatpakUploadContext,
+) -> dict[str, str]:
+    resolution = resolve_manifest_flatpak_images(
+        context.validation.manifest.source or context.root_dir / "manifest.yml",
+        cache_dir=context.cache_dir,
+    )
+    return {
+        _flatpak_card_path(
+            _manifest_flatpak_path(Path(flatpak_ref), context.root_dir)
+        ).parent.resolve().name: image
+        for flatpak_ref, image in zip(
+            context.validation.manifest.flatpaks,
+            resolution.output_images,
+            strict=True,
+        )
+    }
 
 
 def _build_targets(

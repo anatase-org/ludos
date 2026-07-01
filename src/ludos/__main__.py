@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not mount or enable shared ccache/sccache directories for builder runs.",
     )
+    build.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild final images even when the hash-addressed image already exists.",
+    )
     target = build.add_mutually_exclusive_group()
     target.add_argument(
         "--card",
@@ -528,6 +533,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not mount or enable shared ccache/sccache directories for builder runs.",
     )
+    create_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild final images even when the hash-addressed image already exists.",
+    )
     create_parser.set_defaults(func=bootc_command)
 
     ostree_import_parser = bootc_subcommands.add_parser(
@@ -595,6 +605,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--scratch",
         action="store_true",
         help="Use a faster scratch EROFS profile for installer root creation.",
+    )
+    installer_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild the installer image even when the hash-addressed image already exists.",
     )
     installer_parser.set_defaults(func=bootc_command)
 
@@ -672,6 +687,7 @@ def build_command(args: argparse.Namespace) -> int:
             cache_version=args.version,
             cache_only=args.cache,
             ccache=not args.no_ccache,
+            force=args.force,
         )
         _log_flatpak_result(result)
         return 0
@@ -684,6 +700,7 @@ def build_command(args: argparse.Namespace) -> int:
             cache_version=args.version,
             cache_only=args.cache,
             ccache=not args.no_ccache,
+            force=args.force,
         )
         for result in results:
             _log_flatpak_result(result)
@@ -698,6 +715,7 @@ def build_command(args: argparse.Namespace) -> int:
         ci=args.ci,
         ccache=not args.no_ccache,
         card=args.card,
+        force=args.force,
     )
     if args.card:
         card_name = result.build_blocks[0] if result.build_blocks else str(args.card)
@@ -852,6 +870,7 @@ def bootc_command(args: argparse.Namespace) -> int:
             ci=args.ci,
             ccache=not args.no_ccache,
             writers=args.writers,
+            force=args.force,
         )
     if args.bootc_action == "ostree-import":
         return ostree_import(
@@ -869,6 +888,7 @@ def bootc_command(args: argparse.Namespace) -> int:
             cache_dir=args.cache_dir,
             orchestrator=args.orchestrator,
             scratch=args.scratch,
+            force=args.force,
         )
     raise ConfigError(f"unknown bootc action: {args.bootc_action}")
 
