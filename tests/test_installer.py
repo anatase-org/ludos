@@ -93,7 +93,6 @@ def _exported_flatpak(
     *,
     source_ref: str | None = None,
     image_id: str | None = None,
-    flatpak_ref: str | None = None,
 ) -> ExportedFlatpakImage:
     return ExportedFlatpakImage(
         source_ref=source_ref or f"flatpaks/{name}",
@@ -101,7 +100,7 @@ def _exported_flatpak(
         image=f"localhost/flatpaks:f44-x86_64-{name}-hash",
         image_id=image_id or "sha256:" + name[0] * 64,
         export_dir=Path(f"/cache/flatpaks/{name}-f44-x86_64"),
-        flatpak_ref=flatpak_ref or f"app/org.anatase.{name.title()}/x86_64/stable",
+        flatpak_ref=f"app/org.anatase.{name.title()}/x86_64/stable",
         tag="f44-x86_64",
     )
 
@@ -609,9 +608,9 @@ class InstallerHelperTests(unittest.TestCase):
 
         script = _installer_flatpak_script((ark,), (browser,))
 
-        ark_index = script.index("org.anatase.Ark")
+        ark_index = script.index("oci:/ludos/flatpaks/ark:f44-x86_64")
         snapshot_index = script.index("cp -alT /var/lib/flatpak /var/lib/flatpak-installer")
-        browser_index = script.index("org.anatase.Browser")
+        browser_index = script.index("oci:/ludos/flatpaks/browser:f44-x86_64")
         self.assertLess(ark_index, snapshot_index)
         self.assertLess(snapshot_index, browser_index)
 

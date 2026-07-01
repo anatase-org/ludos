@@ -411,7 +411,6 @@ def _installer_hash(ctx: InstallerContext, source_image: str) -> str:
                     flatpak.source_ref,
                     flatpak.image,
                     flatpak.image_id,
-                    flatpak.flatpak_ref,
                     flatpak.tag,
                 )
                 for flatpak in ctx.flatpaks
@@ -557,8 +556,7 @@ def _flatpak_install_lines(flatpaks: tuple[ExportedFlatpakImage, ...]) -> list[s
         lines.extend(
             [
                 "flatpak install --system --noninteractive --assumeyes "
-                f"--or-update --image {shlex.quote(image_ref)} "
-                f"{shlex.quote(flatpak.flatpak_ref)}",
+                f"--or-update --image {shlex.quote(image_ref)}",
             ]
         )
     return lines
