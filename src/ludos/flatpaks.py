@@ -47,6 +47,7 @@ from .model import (
     _env_dict,
     _load_mapping,
     _optional_string,
+    _optional_bool,
     _required_string,
     _required_string_tuple,
     _required_version,
@@ -86,7 +87,9 @@ class FlatpakImageResolution:
 @dataclass(frozen=True)
 class FlatpakConfig:
     app_id: str
-    command: str
+    command: str = ""
+    runtime: bool = False
+    version: str = "stable"
     finish_args: str = ""
     rename: str = ""
     rename_author: str = ""
@@ -353,10 +356,11 @@ def _prepare_flatpak_build_plan(
     flatpak_dir = card_path.parent
     app_name = _flatpak_name(flatpak_dir)
     block = f"flatpak-{app_name}"
-    runtime = _require_manifest_runtime(context)
-    branch = runtime.branch
+    manifest_runtime = _require_manifest_runtime(context)
+    branch = card.flatpak.version if card.flatpak.runtime else manifest_runtime.branch
     flatpak_arch = _flatpak_arch(context.arch)
-    app_ref = f"app/{card.flatpak.app_id}/{flatpak_arch}/{branch}"
+    ref_kind = "runtime" if card.flatpak.runtime else "app"
+    app_ref = f"{ref_kind}/{card.flatpak.app_id}/{flatpak_arch}/{branch}"
     log(f"Building flatpak {card.flatpak.app_id} for {context.distro}")
     substitution_env = _flatpak_build_env(context.manifest_env, card.env)
     build_env = dict(substitution_env)
@@ -432,7 +436,7 @@ def _prepare_flatpak_build_plan(
         card.flatpak,
         branch=branch,
         flatpak_arch=flatpak_arch,
-        runtime_id=runtime.id,
+        runtime_id=manifest_runtime.id,
     )
     final_hash = _flatpak_final_hash(
         app_name=app_name,
@@ -648,6 +652,8 @@ def _flatpak_config(data: dict[str, Any], path: Path) -> FlatpakConfig:
     allowed = {
         "id",
         "command",
+        "runtime",
+        "version",
         "finish-args",
         "rename",
         "rename-author",
@@ -658,11 +664,18 @@ def _flatpak_config(data: dict[str, Any], path: Path) -> FlatpakConfig:
     }
     _reject_unknown_keys(path, value, allowed, "flatpak")
     app_id = _required_string(value, "id", path).strip()
-    command = _required_string(value, "command", path).strip()
+    runtime = _optional_bool(value, "runtime", path, "flatpak")
+    if runtime:
+        command = _optional_string(value, "command", path).strip()
+    else:
+        command = _required_string(value, "command", path).strip()
+    version = _optional_string(value, "version", path).strip() or "stable"
     finish_args = _optional_string(value, "finish-args", path)
     return FlatpakConfig(
         app_id=app_id,
         command=command,
+        runtime=runtime,
+        version=version,
         finish_args=finish_args,
         rename=_optional_string(value, "rename", path),
         rename_author=_optional_string(value, "rename-author", path),
@@ -832,6 +845,9 @@ def _flatpak_metadata(
     sdk_id: str = DEFAULT_FLATPAK_SDK,
 ) -> str:
     editor = _MetadataEditor()
+    if config.runtime:
+        editor.set("Runtime", "name", config.app_id)
+        return editor.render()
     editor.set("Application", "name", config.app_id)
     editor.set("Application", "runtime", f"{runtime_id}/{flatpak_arch}/{branch}")
     editor.set("Application", "sdk", f"{sdk_id}/{flatpak_arch}/{branch}")
@@ -995,33 +1011,41 @@ def _write_flatpak_containerfile(
                 "WORKDIR /",
             ]
         )
-    lines.extend(
+    prettify_lines = [
+        "RUN <<'LUDOS_PRETTIFY_FLATPAK'",
+        "set -eux",
+        "if [ -d /flatpak/usr ]; then",
+        "  usr_entries=\"$(find /flatpak/usr -mindepth 1 \\( -type f -o -type l \\) -print | sort || true)\"",
+        "  if [ -n \"$usr_entries\" ]; then",
+        "    echo 'warning: removing /usr entries from flatpak payload:' >&2",
+        "    printf '%s\\n' \"$usr_entries\" >&2",
+        "  fi",
+        "  rm -rf /flatpak/usr",
+        "fi",
+        "if [ ! -d /flatpak/app ]; then echo 'flatpak payload did not create /app' >&2; exit 1; fi",
+        "rm -rf /out",
+        "mkdir -p /out/files /out/export",
+        "cp -a /flatpak/app/. /out/files/",
+    ]
+    if not card.flatpak.runtime:
+        prettify_lines.extend(
+            [
+                *_rename_lines(card.flatpak),
+                *_rename_display_lines(card.flatpak),
+                *_appdata_lines(card.flatpak),
+                *_appstream_compose_lines(card.flatpak, app_ref),
+                *_export_lines(card.flatpak),
+            ]
+        )
+    prettify_lines.extend(
         [
-            "RUN <<'LUDOS_PRETTIFY_FLATPAK'",
-            "set -eux",
-            "if [ -d /flatpak/usr ]; then",
-            "  usr_entries=\"$(find /flatpak/usr -mindepth 1 \\( -type f -o -type l \\) -print | sort || true)\"",
-            "  if [ -n \"$usr_entries\" ]; then",
-            "    echo 'warning: removing /usr entries from app flatpak payload:' >&2",
-            "    printf '%s\\n' \"$usr_entries\" >&2",
-            "  fi",
-            "  rm -rf /flatpak/usr",
-            "fi",
-            "if [ ! -d /flatpak/app ]; then echo 'flatpak payload did not create /app' >&2; exit 1; fi",
-            "rm -rf /out",
-            "mkdir -p /out/files /out/export",
-            "cp -a /flatpak/app/. /out/files/",
-            *_rename_lines(card.flatpak),
-            *_rename_display_lines(card.flatpak),
-            *_appdata_lines(card.flatpak),
-            *_appstream_compose_lines(card.flatpak, app_ref),
-            *_export_lines(card.flatpak),
             "cat > /out/metadata <<'LUDOS_FLATPAK_METADATA'",
             metadata.rstrip(),
             "LUDOS_FLATPAK_METADATA",
             "LUDOS_PRETTIFY_FLATPAK",
         ]
     )
+    lines.extend(prettify_lines)
     containerfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _write_flatpak_label_file(
         final_build_dir,
@@ -1845,22 +1869,26 @@ def _flatpak_final_hash(
     metadata: str,
     flatpak_images: FlatpakImagesConfig,
 ) -> str:
+    flatpak_payload = {
+        "app_id": card.flatpak.app_id,
+        "command": card.flatpak.command,
+        "finish_args": card.flatpak.finish_args,
+        "rename": card.flatpak.rename,
+        "rename_author": card.flatpak.rename_author,
+        "rename_icon": card.flatpak.rename_icon,
+        "rename_desktop_file": card.flatpak.rename_desktop_file,
+        "rename_appdata_file": card.flatpak.rename_appdata_file,
+        "add_extensions": card.flatpak.add_extensions,
+    }
+    if card.flatpak.runtime:
+        flatpak_payload["runtime"] = card.flatpak.runtime
+        flatpak_payload["version"] = card.flatpak.version
     payload = {
         "app_name": app_name,
         "app_ref": app_ref,
         "branch": branch,
         "flatpak_arch": flatpak_arch,
-        "flatpak": {
-            "app_id": card.flatpak.app_id,
-            "command": card.flatpak.command,
-            "finish_args": card.flatpak.finish_args,
-            "rename": card.flatpak.rename,
-            "rename_author": card.flatpak.rename_author,
-            "rename_icon": card.flatpak.rename_icon,
-            "rename_desktop_file": card.flatpak.rename_desktop_file,
-            "rename_appdata_file": card.flatpak.rename_appdata_file,
-            "add_extensions": card.flatpak.add_extensions,
-        },
+        "flatpak": flatpak_payload,
         "substitution_env": tuple(sorted(substitution_env.items())),
         "build_image": _image_tag(build_image),
         "metadata": metadata,

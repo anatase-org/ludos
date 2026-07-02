@@ -695,6 +695,32 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn('"org.example.App"', script)
         self.assertNotIn("--no-deps", script)
 
+    def test_installer_flatpak_script_can_install_browser_with_dependencies(self) -> None:
+        script = _installer_flatpak_script(
+            (
+                InstallerFlatpaksConfig(
+                    repo="anatase",
+                    nodeps=True,
+                    preinstall=("org.anatase.ArchiveManager",),
+                ),
+                InstallerFlatpaksConfig(
+                    repo="anatase",
+                    installer=("org.anatase.Browser",),
+                ),
+            ),
+        )
+
+        self.assertIn(
+            "flatpak install --system -y --noninteractive --no-deps anatase \\\n"
+            '    "org.anatase.ArchiveManager"',
+            script,
+        )
+        self.assertIn(
+            "flatpak install --system -y --noninteractive anatase \\\n"
+            '    "org.anatase.Browser"',
+            script,
+        )
+
     def test_container_name_is_deterministic_for_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _context(Path(tmp))

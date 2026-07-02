@@ -16,6 +16,7 @@ from ludos.flatpaks import (
     _flatpak_build_env,
     _flatpak_commit_metadata_labels,
     _flatpak_metadata,
+    _read_flatpak_label_file,
     _ensure_flatpak_images,
     _prepare_flatpak_build_plan,
     _flatpak_rpmbuild_defines,
@@ -440,6 +441,50 @@ class FlatpakParserTests(unittest.TestCase):
         )
         self.assertEqual(plan.latest_image, "localhost/flatpaks:kate")
 
+    def test_prepare_flatpak_runtime_build_plan_uses_configured_version(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            flatpak_dir = root / "flatpaks" / "adblocker"
+            flatpak_dir.mkdir(parents=True)
+            card_path = flatpak_dir / "card.yaml"
+            card_path.write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.Browser.Adblocker
+  runtime: true
+  version: "1"
+build-deps:
+  - rpm-build
+specs:
+  - spec: adblocker.spec
+    packages: [anatase-browser-adblocker]
+""",
+                encoding="utf-8",
+            )
+            context = self._flatpak_context(root, runtime_branch="stable")
+
+            with self._mock_plan_dependencies():
+                plan = _prepare_flatpak_build_plan(
+                    context,
+                    card_path.parent,
+                    cache_only=False,
+                )
+
+        self.assertEqual(plan.branch, "1")
+        self.assertEqual(
+            plan.app_ref,
+            "runtime/org.anatase.Browser.Adblocker/x86_64/1",
+        )
+        self.assertIn("[Runtime]", plan.metadata)
+        self.assertIn("name=org.anatase.Browser.Adblocker", plan.metadata)
+        self.assertNotIn("[Application]", plan.metadata)
+        self.assertNotIn("runtime=org.anatase.Platform", plan.metadata)
+        self.assertNotIn("sdk=org.anatase.ludos.Sdk", plan.metadata)
+        self.assertNotIn("command=", plan.metadata)
+
     def test_prepare_flatpak_build_plan_hashes_only_scoped_env(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -694,6 +739,54 @@ postprocess: |
         self.assertEqual(card.specs[0].spec, "git+https://example.test/kate:kate.spec#branch=f$releasever")
         self.assertEqual(card.files, ("app/share/test.txt",))
         self.assertEqual(card.postprocess.strip(), "true")
+
+    def test_card_parser_accepts_runtime_version_without_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            card_path = Path(temp) / "card.yaml"
+            card_path.write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.Browser.Adblocker
+  runtime: true
+  version: "1"
+build-deps:
+  - rpm-build
+specs:
+  - spec: adblocker.spec
+    packages: [anatase-browser-adblocker]
+""",
+                encoding="utf-8",
+            )
+
+            card = FlatpakCard.from_file(card_path)
+
+        self.assertTrue(card.flatpak.runtime)
+        self.assertEqual(card.flatpak.version, "1")
+        self.assertEqual(card.flatpak.command, "")
+
+    def test_card_parser_defaults_runtime_version_to_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            card_path = Path(temp) / "card.yaml"
+            card_path.write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.RuntimeThing
+  runtime: true
+build-deps:
+  - rpm-build
+specs:
+  - spec: thing.spec
+    packages: [thing]
+""",
+                encoding="utf-8",
+            )
+
+            card = FlatpakCard.from_file(card_path)
+
+        self.assertTrue(card.flatpak.runtime)
+        self.assertEqual(card.flatpak.version, "stable")
 
     def test_card_parser_rejects_fedora_cleanup_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1058,7 +1151,7 @@ postprocess: |
             "rpm --root /flatpak -Uvh --allfiles --nodeps --noscripts --notriggers /rpms/*.rpm",
             containerfile,
         )
-        self.assertIn("warning: removing /usr entries from app flatpak payload", containerfile)
+        self.assertIn("warning: removing /usr entries from flatpak payload", containerfile)
         self.assertIn("rm -rf /flatpak/usr", containerfile)
         self.assertIn("WORKDIR /flatpak", containerfile)
         self.assertIn("touch postprocessed", containerfile)
@@ -1079,6 +1172,54 @@ postprocess: |
         self.assertEqual(labels["org.flatpak.subject"], "Export org.kde.kate")
         self.assertIn("Name: org.kde.kate", labels["org.flatpak.body"])
         self.assertIn("org.flatpak.timestamp", labels)
+
+    def test_containerfile_skips_app_exports_for_runtime_flatpaks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            flatpak_dir = root / "adblocker"
+            flatpak_dir.mkdir()
+            card_path = flatpak_dir / "card.yaml"
+            card_path.write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.Browser.Adblocker
+  runtime: true
+  version: "1"
+build-deps:
+  - rpm-build
+specs:
+  - spec: adblocker.spec
+    packages: [anatase-browser-adblocker]
+""",
+                encoding="utf-8",
+            )
+            card = FlatpakCard.from_file(card_path)
+            build_dir = root / "build"
+
+            _write_flatpak_containerfile(
+                final_build_dir=build_dir,
+                flatpak_dir=flatpak_dir,
+                card=card,
+                build_image="localhost/builds:f44-flatpak-adblocker",
+                orchestrator="localhost/orchestrator:f44",
+                metadata="[Runtime]\nname=org.anatase.Browser.Adblocker\n",
+                app_ref="runtime/org.anatase.Browser.Adblocker/x86_64/1",
+                branch="1",
+                flatpak_arch="x86_64",
+            )
+
+            containerfile = (build_dir / "Containerfile").read_text(encoding="utf-8")
+            labels = dict(_read_flatpak_label_file(build_dir))
+
+        self.assertEqual(
+            labels["org.flatpak.ref"],
+            "runtime/org.anatase.Browser.Adblocker/x86_64/1",
+        )
+        self.assertIn("cp -a /flatpak/app/. /out/files/", containerfile)
+        self.assertNotIn("appstreamcli compose", containerfile)
+        self.assertNotIn("/out/export/share/applications", containerfile)
+        self.assertNotIn("LUDOS_RENAME_DESKTOP", containerfile)
 
     def test_commit_metadata_labels_match_flatpak_oci_shape(self) -> None:
         labels = _flatpak_commit_metadata_labels(
