@@ -441,8 +441,6 @@ def _installer_containerfile(
     if "\n" in base_ref:
         raise ConfigError("installer base image ref must not contain newlines")
     lines = [f"FROM {base_ref}"]
-    if has_files:
-        lines.append("COPY files/ /files/")
     if ostree:
         lines.extend(
             [
@@ -454,6 +452,8 @@ def _installer_containerfile(
         )
     if any(group.all for group in flatpak_groups):
         lines.extend(_installer_flatpak_lines(flatpak_groups))
+    if has_files:
+        lines.append("COPY files/ /files/")
     lines.extend(
         [
             "RUN /bin/sh -ex <<'LUDOS_INSTALLER_BUILD'",

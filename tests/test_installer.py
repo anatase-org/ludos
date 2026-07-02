@@ -470,6 +470,10 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn("echo installer", containerfile)
         self.assertIn("rm -rf /files", containerfile)
         self.assertNotIn("LUDOS_INSTALLER_OSTREE", containerfile)
+        self.assertLess(
+            containerfile.index("COPY files/ /files/"),
+            containerfile.index("LUDOS_INSTALLER_BUILD"),
+        )
 
     def test_installer_containerfile_adds_ostree_step_before_build(self) -> None:
         containerfile = _installer_containerfile(
@@ -488,6 +492,10 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertNotIn("--write-ref os", containerfile)
         self.assertLess(
             containerfile.index("LUDOS_INSTALLER_OSTREE"),
+            containerfile.index("COPY files/ /files/"),
+        )
+        self.assertLess(
+            containerfile.index("COPY files/ /files/"),
             containerfile.index("LUDOS_INSTALLER_BUILD"),
         )
 
@@ -601,6 +609,29 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn('"org.anatase.Browser"', text)
         self.assertIn("flatpak update --system --appstream -y --noninteractive", text)
         self.assertNotIn("dbus-run-session", text)
+
+    def test_installer_containerfile_copies_files_after_cacheable_steps(self) -> None:
+        text = _installer_containerfile(
+            "sha256:" + "c" * 64,
+            True,
+            "echo build",
+            ostree=True,
+            flatpak_groups=(
+                InstallerFlatpaksConfig(
+                    repo="anatase",
+                    nodeps=True,
+                    installer=("org.anatase.Browser",),
+                ),
+            ),
+        )
+
+        ostree_index = text.index("LUDOS_INSTALLER_OSTREE")
+        flatpak_index = text.index("LUDOS_INSTALL_FLATPAKS")
+        copy_index = text.index("COPY files/ /files/")
+        build_index = text.index("LUDOS_INSTALLER_BUILD")
+        self.assertLess(ostree_index, flatpak_index)
+        self.assertLess(flatpak_index, copy_index)
+        self.assertLess(copy_index, build_index)
 
     def test_installer_containerfile_places_flatpaks_before_build_without_ostree(self) -> None:
         text = _installer_containerfile(
