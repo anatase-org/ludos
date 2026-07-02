@@ -444,6 +444,7 @@ def _installer_containerfile(
     if ostree:
         lines.extend(
             [
+                "",
                 "ARG LUDOS_INSTALLER_SOURCE_IMAGE",
                 "RUN /bin/sh -ex <<'LUDOS_INSTALLER_OSTREE'",
                 _installer_ostree_script().rstrip(),
@@ -451,11 +452,13 @@ def _installer_containerfile(
             ]
         )
     if any(group.all for group in flatpak_groups):
+        lines.append("")
         lines.extend(_installer_flatpak_lines(flatpak_groups))
     if has_files:
         lines.append("COPY files/ /files/")
     lines.extend(
         [
+            "",
             "RUN /bin/sh -ex <<'LUDOS_INSTALLER_BUILD'",
             _installer_build_script(build_script).rstrip(),
             "LUDOS_INSTALLER_BUILD",
