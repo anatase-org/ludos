@@ -1040,25 +1040,16 @@ def _write_flatpak_containerfile(
         "rm -rf /out",
         "mkdir -p /out/files /out/export",
         "cp -a /flatpak/app/. /out/files/",
+        *_rename_lines(card.flatpak),
+        *_rename_display_lines(card.flatpak),
+        *_appdata_lines(card.flatpak),
+        *_appstream_compose_lines(card.flatpak, app_ref),
+        *_export_lines(card.flatpak),
+        "cat > /out/metadata <<'LUDOS_FLATPAK_METADATA'",
+        metadata.rstrip(),
+        "LUDOS_FLATPAK_METADATA",
+        "LUDOS_PRETTIFY_FLATPAK",
     ]
-    if not card.flatpak.runtime:
-        prettify_lines.extend(
-            [
-                *_rename_lines(card.flatpak),
-                *_rename_display_lines(card.flatpak),
-                *_appdata_lines(card.flatpak),
-                *_appstream_compose_lines(card.flatpak, app_ref),
-                *_export_lines(card.flatpak),
-            ]
-        )
-    prettify_lines.extend(
-        [
-            "cat > /out/metadata <<'LUDOS_FLATPAK_METADATA'",
-            metadata.rstrip(),
-            "LUDOS_FLATPAK_METADATA",
-            "LUDOS_PRETTIFY_FLATPAK",
-        ]
-    )
     lines.extend(prettify_lines)
     containerfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _write_flatpak_label_file(
@@ -1343,6 +1334,7 @@ def _appdata_lines(config: FlatpakConfig) -> list[str]:
         "LUDOS_REWRITE_APPDATA",
         "  mkdir -p /out/files/share/metainfo",
         '  cp -a "/out/files/share/appdata/$app_id.appdata.xml" "/out/files/share/metainfo/$app_id.appdata.xml"',
+        '  rm -rf "/out/files/share/metainfo/$app_id.metainfo.xml"',
         "fi",
     ]
 
