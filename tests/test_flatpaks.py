@@ -11,6 +11,7 @@ from unittest.mock import patch
 from ludos.__main__ import build_command, build_parser
 from ludos.flatpaks import (
     FlatpakCard,
+    FlatpakBuildPlan,
     build_flatpaks,
     _flatpak_appstream_labels_with_remote_icon,
     _flatpak_build_env,
@@ -18,6 +19,7 @@ from ludos.flatpaks import (
     _flatpak_metadata,
     _read_flatpak_label_file,
     _ensure_flatpak_images,
+    _ensure_flatpak_rpm_builds,
     _prepare_flatpak_build_plan,
     _flatpak_rpmbuild_defines,
     _run_flatpak_image_build,
@@ -696,6 +698,66 @@ specs:
         )
         self.assertEqual(results[0].image, "localhost/flatpaks:f44-x86_64-kate")
 
+    def test_flatpak_rpm_build_passes_prepare_script(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            card_path = self._write_flatpak_card(
+                root,
+                "kate",
+                app_id="org.anatase.TextEditor",
+                command="kate",
+            )
+            card = FlatpakCard.from_file(card_path)
+            context = self._flatpak_context(root)
+            plan = FlatpakBuildPlan(
+                card_path=card_path,
+                card=card,
+                flatpak_dir=card_path.parent,
+                app_name="kate",
+                block="flatpak-kate",
+                branch="stable",
+                flatpak_arch="x86_64",
+                app_ref="app/org.anatase.TextEditor/x86_64/stable",
+                output_image="localhost/flatpaks:f44-x86_64-kate",
+                latest_image="localhost/flatpaks:kate",
+                substitution_env={"releasever": "44", "arch": "x86_64"},
+                build_env={"releasever": "44", "arch": "x86_64"},
+                specs=(SpecBuild(spec="kate.spec", packages={"*": ("kate",)}),),
+                prepare_script="touch generated-source.tar.gz",
+                spec_revisions=tuple(),
+                spec_build_dir=root / "spec-build",
+                artifact_cache_dir=root / "artifacts",
+                final_build_dir=root / "final",
+                rpmbuild_defines=("flatpak 1",),
+                builder_packages=("rpm-build",),
+                builder_image="localhost/builders:f44-x86_64-flatpak-kate",
+                build_image="localhost/builds:f44-x86_64-flatpak-kate",
+                metadata="[Application]\nname=org.anatase.TextEditor\n",
+            )
+
+            with (
+                patch("ludos.flatpaks._image_exists", return_value=False),
+                patch(
+                    "ludos.flatpaks._build_specs_output_image",
+                    return_value=SimpleNamespace(rpm_files=("kate.rpm",)),
+                ) as build_specs,
+                patch(
+                    "ludos.flatpaks._output_metadata_in_image",
+                    return_value=(("kate.rpm",), False),
+                ),
+            ):
+                results = _ensure_flatpak_rpm_builds(
+                    context,
+                    (plan,),
+                    cache_only=False,
+                )
+
+        self.assertEqual(results[0].rpm_files, ("kate.rpm",))
+        self.assertEqual(
+            build_specs.call_args.kwargs["prepare_script"],
+            "touch generated-source.tar.gz",
+        )
+
     def test_card_parser_accepts_metadata_hooks_and_specs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             card_path = Path(temp) / "card.yaml"
@@ -721,6 +783,8 @@ specs:
       - kate
 files:
   - app/share/test.txt
+prepare: |
+  touch generated-source.tar.gz
 postprocess: |
   true
 """,
@@ -738,6 +802,7 @@ postprocess: |
         self.assertEqual(card.build_deps, ("rpm-build", "flatpak-rpm-macros"))
         self.assertEqual(card.specs[0].spec, "git+https://example.test/kate:kate.spec#branch=f$releasever")
         self.assertEqual(card.files, ("app/share/test.txt",))
+        self.assertEqual(card.prepare.strip(), "touch generated-source.tar.gz")
         self.assertEqual(card.postprocess.strip(), "true")
 
     def test_card_parser_accepts_runtime_version_without_command(self) -> None:
@@ -933,6 +998,7 @@ specs:
         return SimpleNamespace(
             arch="x86_64",
             build_artifact_cache_dir=root / "build-artifacts",
+            ccache_dir=None,
             distro="f44-x86_64",
             distro_cache_dir=root / "cache" / "f44-x86_64",
             dnf_cache_dir=root / "dnf" / "cache",

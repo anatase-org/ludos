@@ -107,13 +107,23 @@ class FlatpakCard:
     build_deps: tuple[str, ...]
     specs: tuple[SpecBuild, ...]
     files: tuple[str, ...] = tuple()
+    prepare: str = ""
     postprocess: str = ""
     source: Path | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> "FlatpakCard":
         data = _load_mapping(path)
-        allowed = {"version", "flatpak", "env", "build-deps", "specs", "files", "postprocess"}
+        allowed = {
+            "version",
+            "flatpak",
+            "env",
+            "build-deps",
+            "specs",
+            "files",
+            "prepare",
+            "postprocess",
+        }
         _reject_unknown_keys(path, data, allowed)
         version = _required_version(data, path)
         flatpak = _flatpak_config(data, path)
@@ -121,6 +131,7 @@ class FlatpakCard:
         build_deps = _required_string_tuple(data, "build-deps", path)
         specs = _required_spec_builds_tuple(data, "specs", path)
         files = _string_tuple(data, "files", path)
+        prepare = _optional_string(data, "prepare", path)
         postprocess = _optional_string(data, "postprocess", path)
         return cls(
             version=version,
@@ -129,6 +140,7 @@ class FlatpakCard:
             build_deps=build_deps,
             specs=specs,
             files=files,
+            prepare=prepare,
             postprocess=postprocess,
             source=path,
         )
@@ -149,7 +161,8 @@ class FlatpakBuildPlan:
     substitution_env: dict[str, str]
     build_env: dict[str, str]
     specs: tuple[SpecBuild, ...]
-    spec_revisions: dict[str, str]
+    prepare_script: str
+    spec_revisions: tuple[tuple[str, str], ...]
     spec_build_dir: Path
     artifact_cache_dir: Path
     final_build_dir: Path
@@ -382,7 +395,7 @@ def _prepare_flatpak_build_plan(
         card_path,
         specs,
         substitution_env,
-        "",
+        card.prepare.rstrip(),
         context.spec_source_cache_dir,
         hash_expression="",
         cache_only=cache_only,
@@ -471,6 +484,7 @@ def _prepare_flatpak_build_plan(
         substitution_env=substitution_env,
         build_env=build_env,
         specs=specs,
+        prepare_script=card.prepare.rstrip(),
         spec_revisions=spec_revisions,
         spec_build_dir=spec_build_dir,
         artifact_cache_dir=artifact_cache_dir,
@@ -556,7 +570,7 @@ def _ensure_flatpak_rpm_builds(
                 card_source=plan.card_path,
                 card_env=plan.substitution_env,
                 specs=plan.specs,
-                prepare_script="",
+                prepare_script=plan.prepare_script,
                 arch=context.arch,
                 spec_source_cache_dir=context.spec_source_cache_dir,
                 source_revisions=plan.spec_revisions,
