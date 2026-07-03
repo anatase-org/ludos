@@ -639,7 +639,7 @@ def _descriptor_digest(value: object, what: str) -> str:
 
 def _flatpak_ref_app_id(ref: str) -> str:
     parts = ref.split("/")
-    if len(parts) != 4 or parts[0] != "app" or not parts[1]:
+    if len(parts) != 4 or parts[0] not in ("app", "runtime") or not parts[1]:
         raise ConfigError(f"invalid flatpak app ref: {ref}")
     return parts[1]
 
