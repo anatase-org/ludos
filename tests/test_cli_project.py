@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ludos.__main__ import main
-from ludos.model import Project
+from ludos.model import ConfigError, Project
 
 
 class CliProjectTests(unittest.TestCase):
@@ -42,6 +42,74 @@ class CliProjectTests(unittest.TestCase):
         )
         self.assertEqual(project.flatpak_images.s3, "icons/")
         self.assertEqual(project.flatpak_images.overlay, "./flatpaks/overlay.png")
+
+    def test_project_parser_accepts_flatpak_gpg(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "name: Test",
+                        "flatpaks:",
+                        "  gpg:",
+                        "    identity: https://flatpaks.example.test/",
+                        "    lookaside: gpg",
+                        "    verify: ./keys/test.pub.asc",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            project = Project.from_file(config)
+
+        self.assertEqual(project.flatpak_gpg.identity, "https://flatpaks.example.test/")
+        self.assertEqual(project.flatpak_gpg.lookaside, "gpg")
+        self.assertEqual(project.flatpak_gpg.verify, "./keys/test.pub.asc")
+
+    def test_project_parser_rejects_incomplete_flatpak_gpg(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text(
+                "version: 1\nflatpaks:\n  gpg:\n    lookaside: gpg\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "'identity'"):
+                Project.from_file(config)
+
+            config.write_text(
+                "version: 1\nflatpaks:\n  gpg:\n    identity: https://example.test/\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "'lookaside'"):
+                Project.from_file(config)
+
+    def test_project_parser_rejects_unknown_flatpak_gpg_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "flatpaks:",
+                        "  gpg:",
+                        "    identity: https://example.test/",
+                        "    lookaside: gpg",
+                        "    surprise: nope",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "flatpaks.gpg.surprise"):
+                Project.from_file(config)
 
     def test_build_from_subdirectory_uses_discovered_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

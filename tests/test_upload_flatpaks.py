@@ -12,14 +12,24 @@ from types import SimpleNamespace
 from unittest.mock import call, patch
 
 from ludos.__main__ import build_parser
-from ludos.model import ConfigError, FlatpakImagesConfig, validate_manifest
+from ludos.model import (
+    ConfigError,
+    FlatpakGpgConfig,
+    FlatpakImagesConfig,
+    validate_manifest,
+)
+from ludos.upload.common import REGISTRY_IMMUTABLE_CACHE_CONTROL
 from ludos.upload.flatpaks import (
     export_flatpak_oci_images,
     tree_shake_flatpaks,
     upload_dummy_runtime,
     upload_flatpaks,
+    _flatpak_signature_payload,
 )
 from test_upload_file import ENV, FakeS3Client
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class UploadFlatpaksTests(unittest.TestCase):
@@ -50,6 +60,23 @@ class UploadFlatpaksTests(unittest.TestCase):
         self.assertEqual(args.cache_dir, Path("out/cache"))
         self.assertTrue(args.cache)
         self.assertTrue(args.refresh)
+
+    def test_atomic_flatpak_remote_enforces_gpg_and_lookaside(self) -> None:
+        repo = (ROOT / "cards/base/atomic/flatpak/anatase.flatpakrepo").read_text(
+            encoding="utf-8"
+        )
+        service = (
+            ROOT / "cards/base/atomic/flatpak/anatase-flatpaks.service"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("GPGKey=@gpg@", repo)
+        self.assertIn("xa.signature-lookaside=https://flatpaks.anatase.org/gpg", repo)
+        self.assertIn("--gpg-verify", service)
+        self.assertIn(
+            "--gpg-import=/usr/share/anatase/keys/anatase-gpg.pub.asc",
+            service,
+        )
+        self.assertIn("--signature-lookaside=https://flatpaks.anatase.org/gpg", service)
 
     def test_registry_flatpak_upload_command_dispatches(self) -> None:
         args = build_parser().parse_args(
@@ -585,6 +612,210 @@ class UploadFlatpaksTests(unittest.TestCase):
                 labels["org.freedesktop.appstream.appdata"],
             )
 
+    def test_flatpak_signature_payload_uses_atomic_container_signature(self) -> None:
+        payload = _flatpak_signature_payload(
+            FlatpakGpgConfig(
+                identity="https://flatpaks.example.test/",
+                lookaside="gpg",
+                verify="./keys/test.pub.asc",
+            ),
+            repo="flatpaks/kate",
+            tag="f44-x86_64",
+            manifest_digest="sha256:" + "a" * 64,
+        )
+
+        data = json.loads(payload.decode("utf-8"))
+        self.assertEqual(data["critical"]["type"], "atomic container signature")
+        self.assertEqual(
+            data["critical"]["image"]["docker-manifest-digest"],
+            "sha256:" + "a" * 64,
+        )
+        self.assertEqual(
+            data["critical"]["identity"]["docker-reference"],
+            "flatpaks.example.test/flatpaks/kate:f44-x86_64",
+        )
+        self.assertEqual(data["optional"], {})
+
+    def test_upload_flatpaks_signs_and_uploads_lookaside_before_oci(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+            _write_project_gpg(root)
+            events = []
+            client = FakeS3Client()
+            cert = root / "keys" / "test.pub.asc"
+
+            def sign(data: bytes, _config: object) -> bytes:
+                events.append("sign")
+                payload = json.loads(data.decode("utf-8"))
+                digest = payload["critical"]["image"]["docker-manifest-digest"]
+                client.objects[
+                    (
+                        "anatase-artifacts",
+                        "gpg/flatpaks/kate@sha256="
+                        + digest.removeprefix("sha256:")
+                        + "/signature-1",
+                    )
+                ] = b"existing"
+                return b"signed-flatpak-payload"
+
+            def verify(*_args: object, **_kwargs: object) -> None:
+                events.append("verify")
+
+            def upload_oci(*_args: object, **_kwargs: object) -> int:
+                events.append("upload-oci")
+                return 0
+
+            with _mock_upload_deps() as deps:
+                with (
+                    patch(
+                        "ludos.upload.flatpaks.config_from_env",
+                        return_value=SimpleNamespace(),
+                    ) as config_from_env,
+                    patch("ludos.upload.flatpaks.sign_attached_data", side_effect=sign),
+                    patch(
+                        "ludos.upload.flatpaks.verify_attached_data",
+                        side_effect=verify,
+                    ) as verify_attached,
+                ):
+                    deps.upload_oci.side_effect = upload_oci
+                    self.assertEqual(
+                        upload_flatpaks(
+                            manifest,
+                            tuple(),
+                            False,
+                            environ={
+                                **ENV,
+                                "LUDOS_GPG_CERT": "./keys/signing.pub.asc:s2",
+                                "LUDOS_GPG_KEY": "gcloud://example",
+                            },
+                            client=client,
+                        ),
+                        0,
+                    )
+
+            self.assertEqual(events, ["sign", "verify", "upload-oci"])
+            config_from_env.assert_called_once()
+            self.assertEqual(
+                config_from_env.call_args.args[0]["LUDOS_GPG_CERT"],
+                "./keys/signing.pub.asc:s2",
+            )
+            verify_attached.assert_called_once_with(
+                b"signed-flatpak-payload",
+                cert,
+                project_root=root,
+            )
+            signature_puts = [
+                put
+                for put in client.puts
+                if put["ContentType"] == "application/octet-stream"
+            ]
+            self.assertEqual(len(signature_puts), 1)
+            self.assertEqual(signature_puts[0]["Body"], b"signed-flatpak-payload")
+            self.assertTrue(
+                str(signature_puts[0]["Key"]).startswith(
+                    "gpg/flatpaks/kate@sha256="
+                )
+            )
+            self.assertTrue(str(signature_puts[0]["Key"]).endswith("/signature-2"))
+            self.assertEqual(
+                signature_puts[0]["CacheControl"],
+                REGISTRY_IMMUTABLE_CACHE_CONTROL,
+            )
+
+    def test_upload_flatpaks_gpg_missing_key_fails_before_oci_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+            _write_project_gpg(root)
+
+            with _mock_upload_deps() as deps:
+                with patch(
+                    "ludos.upload.flatpaks.config_from_env",
+                    side_effect=ConfigError("LUDOS_GPG_KEY is required"),
+                ):
+                    with self.assertRaisesRegex(ConfigError, "LUDOS_GPG_KEY"):
+                        upload_flatpaks(manifest, tuple(), False, environ=ENV)
+
+            deps.upload_oci.assert_not_called()
+
+    def test_upload_flatpaks_preserves_env_gpg_cert_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+            _write_project_gpg(root)
+            cert = root / "keys" / "test.pub.asc"
+
+            with _mock_upload_deps() as deps:
+                with (
+                    patch(
+                        "ludos.upload.flatpaks.config_from_env",
+                        return_value=SimpleNamespace(),
+                    ) as config_from_env,
+                    patch(
+                        "ludos.upload.flatpaks.sign_attached_data",
+                        return_value=b"signed-flatpak-payload",
+                    ),
+                    patch("ludos.upload.flatpaks.verify_attached_data"),
+                ):
+                    self.assertEqual(
+                        upload_flatpaks(
+                            manifest,
+                            tuple(),
+                            False,
+                            environ={
+                                **ENV,
+                                "LUDOS_GPG_CERT": "./keys/signing.pub.asc:s2",
+                                "LUDOS_GPG_KEY": "gcloud://example",
+                            },
+                            client=FakeS3Client(),
+                        ),
+                        0,
+                    )
+
+            self.assertEqual(
+                config_from_env.call_args.args[0]["LUDOS_GPG_CERT"],
+                "./keys/signing.pub.asc:s2",
+            )
+            deps.upload_oci.assert_called_once()
+
+    def test_upload_flatpaks_without_verify_still_signs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+            _write_project_gpg(root, verify="")
+
+            with _mock_upload_deps() as deps:
+                with (
+                    patch(
+                        "ludos.upload.flatpaks.config_from_env",
+                        return_value=SimpleNamespace(),
+                    ),
+                    patch(
+                        "ludos.upload.flatpaks.sign_attached_data",
+                        return_value=b"signed-flatpak-payload",
+                    ) as sign,
+                    patch("ludos.upload.flatpaks.verify_attached_data") as verify,
+                ):
+                    self.assertEqual(
+                        upload_flatpaks(
+                            manifest,
+                            tuple(),
+                            False,
+                            environ={
+                                **ENV,
+                                "LUDOS_GPG_CERT": "./keys/signing.pub.asc:s2",
+                                "LUDOS_GPG_KEY": "gcloud://example",
+                            },
+                            client=FakeS3Client(),
+                        ),
+                        0,
+                    )
+
+            sign.assert_called_once()
+            verify.assert_not_called()
+            deps.upload_oci.assert_called_once()
+
     def test_tree_shake_flatpaks_uses_all_manifest_flatpaks_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -617,6 +848,74 @@ class UploadFlatpaksTests(unittest.TestCase):
                 )
 
         shake.assert_called_once_with("flatpaks/ark", dry_run=True)
+
+    def test_tree_shake_flatpaks_prunes_unreferenced_signatures(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+            _write_project_gpg(root)
+            live_manifest = _manifest_body("b" * 64)
+            live_digest = hashlib.sha256(live_manifest).hexdigest()
+            dead_digest = "d" * 64
+            client = FakeS3Client(
+                {
+                    (
+                        "anatase-artifacts",
+                        "v2/flatpaks/kate/manifests/f44-x86_64",
+                    ): live_manifest,
+                    (
+                        "anatase-artifacts",
+                        f"gpg/flatpaks/kate@sha256={live_digest}/signature-1",
+                    ): b"live",
+                    (
+                        "anatase-artifacts",
+                        f"gpg/flatpaks/kate@sha256={dead_digest}/signature-1",
+                    ): b"dead",
+                }
+            )
+
+            self.assertEqual(
+                tree_shake_flatpaks(
+                    manifest,
+                    tuple(),
+                    environ=ENV,
+                    client=client,
+                ),
+                0,
+            )
+
+        self.assertEqual(
+            [delete["Key"] for delete in client.deletes],
+            [f"gpg/flatpaks/kate@sha256={dead_digest}/signature-1"],
+        )
+
+    def test_tree_shake_flatpaks_signature_pruning_honors_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+            _write_project_gpg(root)
+            dead_digest = "d" * 64
+            client = FakeS3Client(
+                {
+                    (
+                        "anatase-artifacts",
+                        f"gpg/flatpaks/kate@sha256={dead_digest}/signature-1",
+                    ): b"dead",
+                }
+            )
+
+            self.assertEqual(
+                tree_shake_flatpaks(
+                    manifest,
+                    tuple(),
+                    dry_run=True,
+                    environ=ENV,
+                    client=client,
+                ),
+                0,
+            )
+
+        self.assertEqual(client.deletes, [])
 
     def test_upload_dummy_runtime_writes_runtime_oci_and_updates_index(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -877,6 +1176,46 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
     return manifest
 
 
+def _write_project_gpg(root: Path, *, verify: str = "./keys/test.pub.asc") -> None:
+    cert = root / "keys" / "test.pub.asc"
+    cert.parent.mkdir(parents=True, exist_ok=True)
+    cert.write_text("fake public key\n", encoding="utf-8")
+    lines = [
+        "version: 1",
+        "name: Test",
+        "flatpaks:",
+        "  gpg:",
+        "    identity: https://flatpaks.example.test/",
+        "    lookaside: gpg",
+    ]
+    if verify:
+        lines.append(f"    verify: {verify}")
+    lines.append("")
+    (root / "ludos.yml").write_text(
+        "\n".join(lines),
+        encoding="utf-8",
+    )
+
+
+def _manifest_body(config_digest: str) -> bytes:
+    return (
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "config": {
+                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": f"sha256:{config_digest}",
+                    "size": 2,
+                },
+                "layers": [],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 def _resolved_context(manifest: Path, root: Path, cache_dir: Path) -> object:
     return SimpleNamespace(
         validation=validate_manifest(manifest),
@@ -887,6 +1226,7 @@ def _resolved_context(manifest: Path, root: Path, cache_dir: Path) -> object:
         cache_dir=cache_dir,
         podman="/usr/bin/podman",
         flatpak_images=FlatpakImagesConfig(),
+        flatpak_gpg=FlatpakGpgConfig(),
         dnf_workspace_dir=root / "dnf-workspace",
     )
 

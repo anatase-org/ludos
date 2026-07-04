@@ -184,6 +184,12 @@ class UploadGpgTests(unittest.TestCase):
             "B922794B7A739D9AD10DC58F31374FEF0CB4854D",
         )
 
+    def test_cert_path_from_spec_resolves_project_relative_selector(self) -> None:
+        self.assertEqual(
+            gpg.cert_path_from_spec(f"{CERT_REL}:s2", project_root=ROOT),
+            CERT,
+        )
+
     def test_gcloud_key_path_parses_version(self) -> None:
         config = config_from_env(
             {

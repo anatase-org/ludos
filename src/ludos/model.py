@@ -21,10 +21,18 @@ class FlatpakImagesConfig:
 
 
 @dataclass(frozen=True)
+class FlatpakGpgConfig:
+    identity: str = ""
+    lookaside: str = ""
+    verify: str = ""
+
+
+@dataclass(frozen=True)
 class Project:
     name: str
     root: Path
     flatpak_images: FlatpakImagesConfig = FlatpakImagesConfig()
+    flatpak_gpg: FlatpakGpgConfig = FlatpakGpgConfig()
 
     @classmethod
     def from_file(cls, path: Path) -> "Project":
@@ -40,6 +48,7 @@ class Project:
             name=name or root.name,
             root=root,
             flatpak_images=_flatpak_images_config(data, path),
+            flatpak_gpg=_flatpak_gpg_config(data, path),
         )
 
 
@@ -497,7 +506,7 @@ def _flatpak_images_config(data: dict[str, Any], path: Path) -> FlatpakImagesCon
         return FlatpakImagesConfig()
     if not isinstance(flatpaks, dict):
         raise ConfigError(f"{path}: 'flatpaks' must be a mapping")
-    allowed_flatpaks = {"images"}
+    allowed_flatpaks = {"images", "gpg"}
     for key in flatpaks:
         if key not in allowed_flatpaks:
             raise ConfigError(f"{path}: 'flatpaks.{key}' is not supported")
@@ -516,6 +525,32 @@ def _flatpak_images_config(data: dict[str, Any], path: Path) -> FlatpakImagesCon
         uri=_optional_string(images, "uri", path).strip(),
         s3=_optional_string(images, "s3", path).strip(),
         overlay=_optional_string(images, "overlay", path).strip(),
+    )
+
+
+def _flatpak_gpg_config(data: dict[str, Any], path: Path) -> FlatpakGpgConfig:
+    flatpaks = data.get("flatpaks")
+    if flatpaks is None:
+        return FlatpakGpgConfig()
+    if not isinstance(flatpaks, dict):
+        raise ConfigError(f"{path}: 'flatpaks' must be a mapping")
+
+    gpg = flatpaks.get("gpg")
+    if gpg is None:
+        return FlatpakGpgConfig()
+    if not isinstance(gpg, dict):
+        raise ConfigError(f"{path}: 'flatpaks.gpg' must be a mapping")
+    allowed_gpg = {"identity", "lookaside", "verify"}
+    for key in gpg:
+        if key not in allowed_gpg:
+            raise ConfigError(f"{path}: 'flatpaks.gpg.{key}' is not supported")
+
+    identity = _required_string(gpg, "identity", path).strip()
+    lookaside = _required_string(gpg, "lookaside", path).strip()
+    return FlatpakGpgConfig(
+        identity=identity,
+        lookaside=lookaside,
+        verify=_optional_string(gpg, "verify", path).strip(),
     )
 
 

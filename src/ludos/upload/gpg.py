@@ -120,6 +120,38 @@ def sign_detached_file(
     Path(output_path).write_bytes(_make_signature_from_digest(digest, config))
 
 
+def verify_attached_data(
+    data: bytes,
+    cert_path: Path,
+    *,
+    project_root: Path | None = None,
+) -> None:
+    homedir = _gpg_verify_home(project_root)
+    verify_dir = homedir / "verify"
+    verify_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        prefix="attached-",
+        suffix=".gpg",
+        dir=verify_dir,
+        delete=False,
+    ) as handle:
+        handle.write(data)
+        output_path = Path(handle.name)
+    try:
+        _verify_attached(output_path, cert_path, homedir)
+    finally:
+        output_path.unlink(missing_ok=True)
+
+
+def cert_path_from_spec(
+    cert_spec: str,
+    *,
+    project_root: Path | None = None,
+) -> Path:
+    cert_path, _selector = _parse_cert_spec(cert_spec, project_root)
+    return cert_path
+
+
 def config_from_env(
     environ: Mapping[str, str] | None = None,
     *,

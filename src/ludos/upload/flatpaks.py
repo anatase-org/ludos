@@ -4,6 +4,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import struct
@@ -11,6 +12,7 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlparse
 from xml.sax.saxutils import escape
 
 from ..common import (
@@ -39,6 +41,7 @@ from ..build import _remove_tree
 from ..logging import log
 from ..model import (
     ConfigError,
+    FlatpakGpgConfig,
     FlatpakImagesConfig,
     ManifestRuntime,
     ManifestValidation,
@@ -46,11 +49,25 @@ from ..model import (
     validate_manifest,
 )
 from .common import (
+    REGISTRY_IMMUTABLE_CACHE_CONTROL,
     REGISTRY_SHORT_CACHE_CONTROL,
     _create_s3_client,
     _s3_config_from_env,
 )
-from .registry import tree_shake_oci, update_flatpak_static_index, upload_oci
+from .gpg import (
+    GpgSigningConfig,
+    cert_path_from_spec,
+    config_from_env,
+    sign_attached_data,
+    verify_attached_data,
+)
+from .registry import (
+    _list_object_keys,
+    referenced_oci_manifest_digests,
+    tree_shake_oci,
+    update_flatpak_static_index,
+    upload_oci,
+)
 
 
 OCI_ARCHES = {
@@ -73,6 +90,7 @@ class FlatpakUploadContext:
     cache_dir: Path
     podman: str
     flatpak_images: FlatpakImagesConfig
+    flatpak_gpg: FlatpakGpgConfig
 
 
 @dataclass(frozen=True)
@@ -145,6 +163,12 @@ def upload_flatpaks(
             image = results.get(target.name, target.image)
             export_flatpak_oci_target(context, target, image=image)
             labels = _prepare_exported_flatpak_metadata(context, target)
+            _sign_and_upload_flatpak_oci_signature(
+                context,
+                target,
+                environ=environ,
+                client=client,
+            )
             upload_oci(target.export_dir, target.ref, (target.tag,))
             _upload_flatpak_icon(context, labels, environ=environ, client=client)
     finally:
@@ -201,6 +225,8 @@ def tree_shake_flatpaks(
     flatpaks: tuple[Path, ...],
     *,
     dry_run: bool = False,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
 ) -> int:
     context = _resolve_flatpak_upload_context(
         manifest,
@@ -208,7 +234,17 @@ def tree_shake_flatpaks(
         require_podman=False,
     )
     for target in _upload_targets(context, flatpaks, resolve_images=False):
-        tree_shake_oci(target.ref, dry_run=dry_run)
+        if environ is None and client is None:
+            tree_shake_oci(target.ref, dry_run=dry_run)
+        else:
+            tree_shake_oci(target.ref, dry_run=dry_run, environ=environ, client=client)
+        _tree_shake_flatpak_signatures(
+            context,
+            target,
+            dry_run=dry_run,
+            environ=environ,
+            client=client,
+        )
     return 0
 
 
@@ -275,7 +311,7 @@ def _resolve_flatpak_upload_context(
         _raise_missing_flatpaks(manifest, validation.missing_flatpaks)
 
     root_dir = manifest_path.parent
-    flatpak_images = _project_flatpak_images(root_dir)
+    flatpak_images, flatpak_gpg = _project_flatpak_config(root_dir)
     manifest_env = {key: str(value) for key, value in validation.manifest.env.items()}
     local_values = _load_dotenv(root_dir / ".env")
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
@@ -318,6 +354,7 @@ def _resolve_flatpak_upload_context(
         cache_dir=resolved_cache_dir,
         podman=podman,
         flatpak_images=flatpak_images,
+        flatpak_gpg=flatpak_gpg,
     )
 
 
@@ -333,6 +370,7 @@ def _upload_context_from_resolved(
         cache_dir=context.cache_dir,
         podman=context.podman,
         flatpak_images=context.flatpak_images,
+        flatpak_gpg=getattr(context, "flatpak_gpg", FlatpakGpgConfig()),
     )
 
 
@@ -352,11 +390,14 @@ def _raise_missing_flatpaks(
     raise ConfigError(f"{manifest}: missing flatpak definitions: {missing}")
 
 
-def _project_flatpak_images(root_dir: Path) -> FlatpakImagesConfig:
+def _project_flatpak_config(
+    root_dir: Path,
+) -> tuple[FlatpakImagesConfig, FlatpakGpgConfig]:
     project_config = root_dir / "ludos.yml"
     if not project_config.exists():
-        return FlatpakImagesConfig()
-    return Project.from_file(project_config).flatpak_images
+        return FlatpakImagesConfig(), FlatpakGpgConfig()
+    project = Project.from_file(project_config)
+    return project.flatpak_images, project.flatpak_gpg
 
 
 def _upload_targets(
@@ -682,6 +723,201 @@ def _upload_flatpak_icon(
         )
     except Exception as exc:
         raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc
+
+
+def _sign_and_upload_flatpak_oci_signature(
+    context: FlatpakUploadContext,
+    target: FlatpakUploadTarget,
+    *,
+    environ: Mapping[str, str] | None,
+    client: Any | None,
+) -> None:
+    if not _flatpak_gpg_enabled(context.flatpak_gpg):
+        return
+    manifest_digest = _exported_flatpak_manifest_digest(target.export_dir)
+    payload = _flatpak_signature_payload(
+        context.flatpak_gpg,
+        repo=target.ref,
+        tag=target.tag,
+        manifest_digest=manifest_digest,
+    )
+    signing_config = _flatpak_gpg_signing_config(context, environ)
+    signature = sign_attached_data(payload, signing_config)
+    if context.flatpak_gpg.verify:
+        verify_attached_data(
+            signature,
+            cert_path_from_spec(
+                context.flatpak_gpg.verify,
+                project_root=context.root_dir,
+            ),
+            project_root=context.root_dir,
+        )
+    _upload_flatpak_signature(
+        context,
+        target,
+        manifest_digest,
+        signature,
+        environ=environ,
+        client=client,
+    )
+
+
+def _flatpak_gpg_enabled(config: FlatpakGpgConfig) -> bool:
+    return bool(config.identity or config.lookaside or config.verify)
+
+
+def _flatpak_gpg_signing_config(
+    context: FlatpakUploadContext,
+    environ: Mapping[str, str] | None,
+) -> GpgSigningConfig:
+    env = dict(environ or {})
+    if environ is None:
+        env.update(os.environ)
+    return config_from_env(env, project_root=context.root_dir)
+
+
+def _exported_flatpak_manifest_digest(export_dir: Path) -> str:
+    index = _read_json_file(export_dir / "index.json", "flatpak OCI index")
+    manifests = index.get("manifests")
+    if not isinstance(manifests, list) or len(manifests) != 1:
+        raise ConfigError(f"{export_dir}: flatpak OCI index must contain one manifest")
+    return _descriptor_digest(manifests[0], "flatpak OCI manifest")
+
+
+def _flatpak_signature_payload(
+    config: FlatpakGpgConfig,
+    *,
+    repo: str,
+    tag: str,
+    manifest_digest: str,
+) -> bytes:
+    reference = _flatpak_signature_docker_reference(config.identity, repo, tag)
+    body = {
+        "critical": {
+            "type": "atomic container signature",
+            "image": {"docker-manifest-digest": manifest_digest},
+            "identity": {"docker-reference": reference},
+        },
+        "optional": {},
+    }
+    return (
+        json.dumps(body, sort_keys=True, indent=4, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+
+
+def _flatpak_signature_docker_reference(identity: str, repo: str, tag: str) -> str:
+    parsed = urlparse(identity.rstrip("/"))
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ConfigError("flatpaks.gpg.identity must be an http(s) URL")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise ConfigError(
+            "flatpaks.gpg.identity must not include params, query, or fragment"
+        )
+    path = parsed.path.strip("/")
+    registry = parsed.netloc if not path else f"{parsed.netloc}/{path}"
+    return f"{registry}/{repo}:{tag}"
+
+
+def _upload_flatpak_signature(
+    context: FlatpakUploadContext,
+    target: FlatpakUploadTarget,
+    manifest_digest: str,
+    signature: bytes,
+    *,
+    environ: Mapping[str, str] | None,
+    client: Any | None,
+) -> None:
+    algorithm, digest = manifest_digest.split(":", 1)
+    if algorithm != "sha256":
+        raise ConfigError(f"unsupported flatpak manifest digest: {manifest_digest}")
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+    prefix = _join_s3_key(
+        context.flatpak_gpg.lookaside,
+        f"{target.ref}@sha256={digest}",
+    )
+    slot = _next_flatpak_signature_slot(s3, config.bucket, prefix)
+    key = f"{prefix}/signature-{slot}"
+    log(f"Uploading flatpak signature: {key}")
+    try:
+        s3.put_object(
+            Bucket=config.bucket,
+            Key=key,
+            Body=signature,
+            ContentType="application/octet-stream",
+            CacheControl=REGISTRY_IMMUTABLE_CACHE_CONTROL,
+        )
+    except Exception as exc:
+        raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc
+
+
+def _next_flatpak_signature_slot(client: Any, bucket: str, prefix: str) -> int:
+    existing = set()
+    for key in _list_object_keys(client, bucket, f"{prefix}/"):
+        name = key.rsplit("/", 1)[-1]
+        if not name.startswith("signature-"):
+            continue
+        slot = name.removeprefix("signature-")
+        if slot.isdigit() and int(slot) > 0:
+            existing.add(int(slot))
+    slot = 1
+    while slot in existing:
+        slot += 1
+    return slot
+
+
+def _tree_shake_flatpak_signatures(
+    context: FlatpakUploadContext,
+    target: FlatpakUploadTarget,
+    *,
+    dry_run: bool,
+    environ: Mapping[str, str] | None,
+    client: Any | None,
+) -> None:
+    if not _flatpak_gpg_enabled(context.flatpak_gpg):
+        return
+    live_digests = referenced_oci_manifest_digests(
+        target.ref,
+        environ=environ,
+        client=client,
+    )
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+    prefix = _join_s3_key(context.flatpak_gpg.lookaside, f"{target.ref}@sha256=")
+    for key, digest in _flatpak_signature_keys(
+        _list_object_keys(s3, config.bucket, prefix),
+        context.flatpak_gpg.lookaside,
+        target.ref,
+    ):
+        if f"sha256:{digest}" in live_digests:
+            continue
+        if dry_run:
+            log(f"Would delete flatpak signature: {key}")
+            continue
+        log(f"Deleting flatpak signature: {key}")
+        try:
+            s3.delete_object(Bucket=config.bucket, Key=key)
+        except Exception as exc:
+            raise ConfigError(f"S3 delete failed for {key}: {exc}") from exc
+
+
+def _flatpak_signature_keys(
+    keys: tuple[str, ...],
+    lookaside: str,
+    repo: str,
+) -> tuple[tuple[str, str], ...]:
+    prefix = _join_s3_key(lookaside, f"{repo}@sha256=")
+    result = []
+    for key in keys:
+        if not key.startswith(prefix):
+            continue
+        remainder = key[len(prefix) :]
+        digest, sep, name = remainder.partition("/")
+        if sep != "/" or not name.startswith("signature-"):
+            continue
+        if len(digest) == 64 and all(c in "0123456789abcdef" for c in digest):
+            result.append((key, digest))
+    return tuple(result)
 
 
 def _decode_png_data_url(value: str) -> bytes:

@@ -257,6 +257,20 @@ def tree_shake_oci(
     return 0
 
 
+def referenced_oci_manifest_digests(
+    ref: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
+) -> set[str]:
+    repo_ref = _validate_ref(ref)
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+    manifest_keys = _list_object_keys(s3, config.bucket, f"v2/{repo_ref}/manifests/")
+    references = _referenced_oci_digests(s3, config.bucket, repo_ref, manifest_keys)
+    return references.manifest_digests
+
+
 def update_flatpak_static_index(
     distro: str,
     *,
