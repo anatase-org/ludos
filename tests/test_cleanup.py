@@ -10,9 +10,11 @@ from unittest.mock import patch
 from ludos.__main__ import build_parser, cleanup_command
 from ludos.cleanup import (
     CleanupTarget,
+    _installer_latest_from_image_latest,
     _keep_named_image,
     _manifest_cleanup_targets,
     _purge_local_images,
+    _stale_local_images,
     cleanup_local_images,
 )
 
@@ -164,6 +166,16 @@ class CleanupImageKeepTests(unittest.TestCase):
             )
         )
 
+    def test_installer_latest_uses_image_alias_name(self) -> None:
+        self.assertEqual(
+            _installer_latest_from_image_latest("localhost/images:anatase"),
+            "localhost/installers:anatase",
+        )
+        self.assertEqual(
+            _installer_latest_from_image_latest("localhost/test-images:anatase"),
+            "localhost/test-installers:anatase",
+        )
+
     def test_removes_stale_flatpak_cache_images(self) -> None:
         self.assertFalse(
             _keep_named_image(
@@ -231,7 +243,7 @@ class CleanupImageKeepTests(unittest.TestCase):
                 return_value=flatpak_result,
             ) as resolve_flatpaks,
         ):
-            _manifest_cleanup_targets(Path("anatase.yml"), "2026.27")
+            targets = _manifest_cleanup_targets(Path("anatase.yml"), "2026.27")
 
         resolve_images.assert_called_once_with(
             Path("anatase.yml"),
@@ -243,6 +255,7 @@ class CleanupImageKeepTests(unittest.TestCase):
             cache_version="2026.27",
             cache_only=False,
         )
+        self.assertIn("localhost/installers:anatase", targets)
 
     def test_manifest_targets_can_require_cache(self) -> None:
         build_result = SimpleNamespace(
@@ -283,6 +296,51 @@ class CleanupImageKeepTests(unittest.TestCase):
             Path("anatase.yml"),
             cache_version="2026.27",
             cache_only=True,
+        )
+
+    def test_stale_local_images_removes_hashed_installer_tags(self) -> None:
+        images = [
+            {
+                "Id": "current",
+                "Names": [
+                    "localhost/installers:anatase",
+                    "localhost/installers:f44-x86_64-anatase-abc12345",
+                ],
+                "Size": 1024,
+            },
+            {
+                "Id": "old",
+                "Names": ["localhost/installers:f44-x86_64-anatase-deadbeef"],
+                "Size": 2048,
+            },
+            {
+                "Id": "other",
+                "Names": ["localhost/other:f44-x86_64-anatase-deadbeef"],
+                "Size": 4096,
+            },
+        ]
+
+        with patch(
+            "ludos.cleanup.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["podman", "images", "--format", "json"],
+                0,
+                stdout=json.dumps(images),
+            ),
+        ):
+            targets = _stale_local_images(
+                "podman",
+                "2026.27",
+                "",
+                ("localhost/installers:anatase",),
+            )
+
+        self.assertEqual(
+            tuple(target.ref for target in targets),
+            (
+                "localhost/installers:f44-x86_64-anatase-abc12345",
+                "localhost/installers:f44-x86_64-anatase-deadbeef",
+            ),
         )
 
 

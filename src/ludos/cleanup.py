@@ -163,9 +163,13 @@ def _manifest_cleanup_targets(
         cache_version=version,
         cache_only=cache_only,
     )
+    installer_latest = _installer_latest_from_image_latest(
+        getattr(result, "latest_image", "")
+    )
     targets = (
         result.output_image,
         getattr(result, "latest_image", ""),
+        installer_latest,
         result.orchestrator,
         *result.repo_images,
         *result.package_images,
@@ -177,6 +181,8 @@ def _manifest_cleanup_targets(
         *flatpaks.builder_images,
     )
     log(f"Keeping manifest image: {result.output_image}")
+    if installer_latest:
+        log(f"Keeping installer image: {installer_latest}")
     if result.package_images or result.build_images or result.builder_images:
         log(
             f"Keeping resolved cache images: "
@@ -191,6 +197,18 @@ def _manifest_cleanup_targets(
             f"{len(flatpaks.builder_images)} builders"
         )
     return tuple(target for target in targets if target)
+
+
+def _installer_latest_from_image_latest(image: str) -> str:
+    parsed = _split_image_name(image)
+    if parsed is None:
+        return ""
+    repository, tag = parsed
+    prefix, separator, name = repository.rpartition("/")
+    if not separator or not name.endswith("images"):
+        return ""
+    installer_repository = f"{prefix}/{name.removesuffix('images')}installers"
+    return f"{installer_repository}:{tag}"
 
 
 def _stale_local_images(
