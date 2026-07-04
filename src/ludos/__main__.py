@@ -24,6 +24,7 @@ from .upload.flatpaks import (
     upload_dummy_runtime,
     upload_flatpaks,
 )
+from .upload.gpg import sign_detached, sign_file
 from .upload.registry import (
     delete_oci_tags,
     list_oci_tags,
@@ -292,6 +293,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="S3 object path to delete.",
     )
     registry_file_delete.set_defaults(func=registry_command)
+
+    registry_gpg = registry_subcommands.add_parser(
+        "gpg",
+        help="Create OpenPGP signatures using registry signing keys.",
+    )
+    registry_gpg_subcommands = registry_gpg.add_subparsers(
+        dest="registry_gpg_action",
+        required=True,
+    )
+    registry_gpg_sign = registry_gpg_subcommands.add_parser(
+        "sign",
+        help="Create a binary attached OpenPGP signature.",
+    )
+    registry_gpg_sign.add_argument(
+        "input_path",
+        type=Path,
+        help="Path to the input file.",
+    )
+    registry_gpg_sign.add_argument(
+        "output_path",
+        type=Path,
+        help="Path to write the signed output.",
+    )
+    registry_gpg_sign.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify the written signature with gpg.",
+    )
+    registry_gpg_sign.set_defaults(func=registry_command)
+
+    registry_gpg_sign_detached = registry_gpg_subcommands.add_parser(
+        "sign-detached",
+        help="Create a binary detached OpenPGP signature next to the input file.",
+    )
+    registry_gpg_sign_detached.add_argument(
+        "input_path",
+        type=Path,
+        help="Path to the input file.",
+    )
+    registry_gpg_sign_detached.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify the written signature with gpg.",
+    )
+    registry_gpg_sign_detached.set_defaults(func=registry_command)
 
     registry_flatpak = registry_subcommands.add_parser(
         "flatpak",
@@ -861,6 +907,22 @@ def registry_command(args: argparse.Namespace) -> int:
         if args.registry_file_action == "delete":
             return delete_file(args.output_path)
         raise ConfigError(f"unknown registry file action: {args.registry_file_action}")
+    if args.registry_action == "gpg":
+        project_root = _project_root(args)
+        if args.registry_gpg_action == "sign":
+            return sign_file(
+                args.input_path,
+                args.output_path,
+                verify=args.verify,
+                project_root=project_root,
+            )
+        if args.registry_gpg_action == "sign-detached":
+            return sign_detached(
+                args.input_path,
+                verify=args.verify,
+                project_root=project_root,
+            )
+        raise ConfigError(f"unknown registry gpg action: {args.registry_gpg_action}")
     if args.registry_action == "flatpak":
         if args.registry_flatpak_action == "upload":
             result = upload_flatpaks(
@@ -979,6 +1041,13 @@ def _discover_project_config(start: Path) -> Path | None:
         if config.exists():
             return config
     return None
+
+
+def _project_root(args: argparse.Namespace) -> Path:
+    project = getattr(args, "project", None)
+    if project is not None:
+        return project.root
+    return Path.cwd()
 
 
 if __name__ == "__main__":
