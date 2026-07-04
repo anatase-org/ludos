@@ -26,6 +26,10 @@ CERT_REL = Path("ludos/tests/fixtures/fake-gpg.pub.asc")
 CERT = ROOT / CERT_REL
 KEY_BASE_URI = "gcloud://projects/example/locations/global/keyRings/test/cryptoKeys/openpgp"
 KEY_URI = KEY_BASE_URI + "/cryptoKeyVersions/7"
+GCPKMS_KEY_URI = (
+    "gcpkms://projects/example/locations/global/keyRings/test/"
+    "cryptoKeys/openpgp/versions/7"
+)
 
 
 class UploadGpgTests(unittest.TestCase):
@@ -136,15 +140,15 @@ class UploadGpgTests(unittest.TestCase):
 
     def test_config_rejects_bad_protocol_and_key_path(self) -> None:
         env = {"LUDOS_GPG_CERT": str(CERT), "LUDOS_GPG_KEY": "file:///key"}
-        with self.assertRaisesRegex(ConfigError, "gcloud://"):
+        with self.assertRaisesRegex(ConfigError, "gcpkms://"):
             config_from_env(env)
 
         env = {"LUDOS_GPG_CERT": str(CERT), "LUDOS_GPG_KEY": "gcloud://bad"}
-        with self.assertRaisesRegex(ConfigError, "invalid gcloud"):
+        with self.assertRaisesRegex(ConfigError, "invalid Google Cloud"):
             config_from_env(env)
 
         env = {"LUDOS_GPG_CERT": str(CERT), "LUDOS_GPG_KEY": KEY_BASE_URI}
-        with self.assertRaisesRegex(ConfigError, "invalid gcloud"):
+        with self.assertRaisesRegex(ConfigError, "invalid Google Cloud"):
             config_from_env(env)
 
     def test_config_rejects_bad_subkey_selector(self) -> None:
@@ -195,6 +199,20 @@ class UploadGpgTests(unittest.TestCase):
             {
                 "LUDOS_GPG_CERT": str(CERT),
                 "LUDOS_GPG_KEY": KEY_URI,
+            }
+        )
+
+        self.assertEqual(config.gcloud_key.project, "example")
+        self.assertEqual(config.gcloud_key.location, "global")
+        self.assertEqual(config.gcloud_key.keyring, "test")
+        self.assertEqual(config.gcloud_key.key, "openpgp")
+        self.assertEqual(config.gcloud_key.version, "7")
+
+    def test_gcpkms_key_path_alias_parses_version(self) -> None:
+        config = config_from_env(
+            {
+                "LUDOS_GPG_CERT": str(CERT),
+                "LUDOS_GPG_KEY": GCPKMS_KEY_URI,
             }
         )
 

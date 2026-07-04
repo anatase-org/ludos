@@ -411,17 +411,24 @@ def _read_subpacket_length(data: bytes, offset: int) -> tuple[int, int]:
 
 
 def _parse_gcloud_key_uri(value: str) -> GcloudKey:
-    if not value.startswith("gcloud://"):
-        raise ConfigError("only gcloud:// LUDOS_GPG_KEY values are supported")
-    parts = value.removeprefix("gcloud://").strip("/").split("/")
+    if value.startswith("gcloud://"):
+        parts = value.removeprefix("gcloud://").strip("/").split("/")
+        version_label = "cryptoKeyVersions"
+    elif value.startswith("gcpkms://"):
+        parts = value.removeprefix("gcpkms://").strip("/").split("/")
+        version_label = "versions"
+    else:
+        raise ConfigError(
+            "only gcloud:// and gcpkms:// LUDOS_GPG_KEY values are supported"
+        )
     expected = ("projects", "locations", "keyRings", "cryptoKeys")
     if len(parts) != 10:
-        raise ConfigError("invalid gcloud KMS key path in LUDOS_GPG_KEY")
+        raise ConfigError("invalid Google Cloud KMS key path in LUDOS_GPG_KEY")
     for index, label in enumerate(expected):
         if parts[index * 2] != label or not parts[index * 2 + 1]:
-            raise ConfigError("invalid gcloud KMS key path in LUDOS_GPG_KEY")
-    if parts[8] != "cryptoKeyVersions" or not parts[9]:
-        raise ConfigError("invalid gcloud KMS key version in LUDOS_GPG_KEY")
+            raise ConfigError("invalid Google Cloud KMS key path in LUDOS_GPG_KEY")
+    if parts[8] != version_label or not parts[9]:
+        raise ConfigError("invalid Google Cloud KMS key version in LUDOS_GPG_KEY")
     return GcloudKey(
         project=parts[1],
         location=parts[3],
