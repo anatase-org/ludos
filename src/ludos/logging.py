@@ -17,7 +17,7 @@ from tqdm.auto import tqdm
 console = Console()
 error_console = Console(stderr=True)
 
-AGENT = os.environ.get("CODEX_CI") == "1" or os.environ.get("AGENT") == "1"
+AGENT = os.environ.get("CODEX_CI") == "1" or os.environ.get("AGENT") == "1" or os.environ.get("GITHUB_ACTIONS") 
 STREAM_HISTORY_LIMIT = 15
 STREAM_TRUNCATED_LINE = "| ... <truncated>"
 INFO_MESSAGE_INDENT = 8
