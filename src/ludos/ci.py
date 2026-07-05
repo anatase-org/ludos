@@ -11,7 +11,7 @@ import yaml
 from .build import (
     ResolvedBuildMetadata,
     _cleanup_dnf_workspace_paths,
-    _image_exists,
+    _ensure_image,
     _image_tag,
     _remove_tree,
     build_package_card_images,
@@ -88,7 +88,12 @@ def prepare_ci(
                 manifest_path=manifest_path,
                 cache_only=cache_only,
             )
-            if full or not _image_exists(context.podman, plan.output_image)
+            if full
+            or not _ensure_image(
+                context.podman,
+                plan.output_image,
+                getattr(context, "ci_registry", ""),
+            )
         )
         output = cache_root / "ci" / "build.yml"
         _build_output, encoded_output = _write_ci_build_manifest(
@@ -144,9 +149,10 @@ def _write_ci_build_manifest(
                 metadata,
             )
             if full
-            or not _image_exists(
+            or not _ensure_image(
                 manifest_metadata.podman,
                 manifest_metadata.output_image,
+                getattr(manifest_metadata, "ci_registry", ""),
             )
         },
         "flatpaks": {

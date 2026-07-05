@@ -13,6 +13,58 @@ from ludos.model import ConfigError, Project
 
 
 class CliProjectTests(unittest.TestCase):
+    def test_project_parser_accepts_ci_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "name: Anatase",
+                        "ci:",
+                        "  registry: ghcr.io/anatase-org/",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            project = Project.from_file(config)
+
+        self.assertEqual(project.ci.registry, "ghcr.io/anatase-org")
+
+    def test_project_parser_defaults_to_empty_ci(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text("version: 1\nname: Anatase\n", encoding="utf-8")
+
+            project = Project.from_file(config)
+
+        self.assertEqual(project.ci.registry, "")
+
+    def test_project_parser_rejects_invalid_ci(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text("version: 1\nci: enabled\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "'ci' must be a mapping"):
+                Project.from_file(config)
+
+    def test_project_parser_rejects_unknown_ci_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text(
+                "version: 1\nci:\n  registry: ghcr.io/test\n  surprise: nope\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "ci.surprise"):
+                Project.from_file(config)
+
     def test_project_parser_accepts_flatpak_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

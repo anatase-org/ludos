@@ -56,6 +56,7 @@ class ResolvedManifestContext:
     podman: str
     buildah: str | None
     repo_images: tuple[str, ...]
+    ci_registry: str
     flatpak_images: FlatpakImagesConfig
     flatpak_gpg: FlatpakGpgConfig
     oci_cosign: OciCosignConfig
@@ -76,7 +77,7 @@ def resolve_manifest_context(
     apply_repo_priority=None,
     require_buildah=None,
 ) -> ResolvedManifestContext:
-    image_exists = image_exists or _image_exists
+    image_exists = image_exists or _ensure_image
     create_orchestrator_image = create_orchestrator_image or _create_orchestrator_image
     create_repo_image = create_repo_image or _create_repo_image
     extract_image_paths = extract_image_paths or _extract_image_paths
@@ -190,7 +191,8 @@ def resolve_manifest_context(
         orchestrator_tag = f"{distro}-base-{cache_version}"
 
     orchestrator_image = _local_image(local_prefix, "orchestrator", orchestrator_tag)
-    if image_exists(podman, orchestrator_image):
+    ci_registry = project_config.ci.registry
+    if _call_image_exists(image_exists, podman, orchestrator_image, ci_registry):
         log(f"Reusing orchestrator image: {orchestrator_image}")
     elif cache_only:
         raise ConfigError(f"orchestrator image is not cached: {orchestrator_image}")
@@ -227,7 +229,7 @@ def resolve_manifest_context(
             f"{distro}-{repo.ref.repo}-{cache_version}",
         )
         repo_images.append(repo_image)
-        if image_exists(podman, repo_image):
+        if _call_image_exists(image_exists, podman, repo_image, ci_registry):
             log(f"Reusing repository metadata image: {repo_image}")
             extract_image_paths(
                 podman,
@@ -298,6 +300,7 @@ def resolve_manifest_context(
         podman=str(podman),
         buildah=buildah,
         repo_images=tuple(repo_images),
+        ci_registry=ci_registry,
         flatpak_images=project_config.flatpak_images,
         flatpak_gpg=project_config.flatpak_gpg,
         oci_cosign=project_config.oci_cosign,
@@ -359,7 +362,54 @@ def _latest_image(image: str) -> str:
 
 
 def _image_exists(podman: str, image: str) -> bool:
-    return subprocess.run([podman, "image", "exists", image], check=False).returncode == 0
+    try:
+        return subprocess.run([podman, "image", "exists", image], check=False).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _call_image_exists(
+    image_exists: Callable[..., bool],
+    podman: str,
+    image: str,
+    ci_registry: str,
+) -> bool:
+    try:
+        return image_exists(podman, image, ci_registry)
+    except TypeError:
+        return image_exists(podman, image)
+
+
+def _ensure_image(podman: str, image: str, ci_registry: str = "") -> bool:
+    if _image_exists(podman, image):
+        return True
+
+    remote_image = _remote_cache_image(ci_registry, image)
+    if remote_image is None:
+        return False
+
+    log(f"Checking CI for image: {remote_image}")
+    try:
+        returncode, _ = _run_streamed_command([podman, "pull", remote_image])
+    except FileNotFoundError:
+        return False
+    if returncode != 0:
+        return False
+
+    subprocess.run([podman, "tag", remote_image, image], check=True)
+    return True
+
+
+def _remote_cache_image(ci_registry: str, image: str) -> str | None:
+    registry = ci_registry.strip().rstrip("/")
+    if not registry:
+        return None
+    if "@" in image or ":" not in image:
+        return None
+    repository, tag = image.rsplit(":", 1)
+    if not repository or not tag or "/" in repository:
+        return None
+    return f"{registry}/{repository}:{tag}"
 
 
 def _require_buildah(buildah: str | None) -> str:

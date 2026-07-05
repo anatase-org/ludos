@@ -4,6 +4,7 @@ import base64
 import lzma
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import call, patch
@@ -102,7 +103,7 @@ class PrepareCiTests(unittest.TestCase):
                     "ludos.ci.plan_manifest_flatpaks_with_context",
                     return_value=(plan,),
                 ) as plan_flatpaks,
-                patch("ludos.ci._image_exists", return_value=False) as image_exists,
+                patch("ludos.ci._ensure_image", return_value=False) as ensure_image,
                 patch("ludos.ci.build_package_card_images") as build_cards,
                 patch("ludos.ci._remove_tree") as remove_tree,
                 patch("ludos.ci.log") as log,
@@ -136,10 +137,10 @@ class PrepareCiTests(unittest.TestCase):
                 manifest_path=manifest,
                 cache_only=True,
             )
-            image_exists.assert_has_calls(
+            ensure_image.assert_has_calls(
                 [
-                    call(context.podman, plan.output_image),
-                    call(context.podman, metadata.output_image),
+                    call(context.podman, plan.output_image, ""),
+                    call(context.podman, metadata.output_image, ""),
                 ]
             )
             remove_tree.assert_called_once_with(
@@ -232,7 +233,7 @@ class PrepareCiTests(unittest.TestCase):
                     "ludos.ci.plan_manifest_flatpaks_with_context",
                     return_value=(plan,),
                 ),
-                patch("ludos.ci._image_exists", return_value=True),
+                patch("ludos.ci._ensure_image", return_value=True),
                 patch("ludos.ci.build_package_card_images"),
                 patch("ludos.ci._remove_tree"),
                 patch("ludos.ci.log"),
@@ -263,7 +264,7 @@ class PrepareCiTests(unittest.TestCase):
                     "ludos.ci.plan_manifest_flatpaks_with_context",
                     return_value=(plan,),
                 ),
-                patch("ludos.ci._image_exists", return_value=True) as image_exists,
+                patch("ludos.ci._ensure_image", return_value=True) as ensure_image,
                 patch("ludos.ci.build_package_card_images"),
                 patch("ludos.ci._remove_tree"),
                 patch("ludos.ci.log"),
@@ -273,7 +274,45 @@ class PrepareCiTests(unittest.TestCase):
             data = yaml.safe_load(output.read_text(encoding="utf-8"))
             self.assertIn("f44-anatase", data["images"])
             self.assertIn("f44-kate-output", data["flatpaks"])
-            image_exists.assert_not_called()
+            ensure_image.assert_not_called()
+
+    def test_prepare_ci_checks_remote_cache_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+            context = self._context(root)
+            context.ci_registry = "ghcr.io/anatase-org"
+            metadata = replace(
+                self._metadata(root, context),
+                ci_registry="ghcr.io/anatase-org",
+            )
+            plan = self._flatpak_plan(root, cache)
+
+            with (
+                patch("ludos.ci.resolve_build_manifest_context", return_value=context),
+                patch(
+                    "ludos.ci.resolve_build_manifests_from_contexts",
+                    return_value=(metadata,),
+                ),
+                patch(
+                    "ludos.ci.plan_manifest_flatpaks_with_context",
+                    return_value=(plan,),
+                ),
+                patch("ludos.ci._ensure_image", return_value=False) as ensure_image,
+                patch("ludos.ci.build_package_card_images"),
+                patch("ludos.ci._remove_tree"),
+                patch("ludos.ci.log"),
+            ):
+                prepare_ci((manifest,), cache_dir=cache)
+
+        ensure_image.assert_has_calls(
+            [
+                call(context.podman, plan.output_image, "ghcr.io/anatase-org"),
+                call(context.podman, metadata.output_image, "ghcr.io/anatase-org"),
+            ]
+        )
 
     def test_prepare_ci_keeps_existing_output_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

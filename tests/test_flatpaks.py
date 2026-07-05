@@ -672,7 +672,7 @@ specs:
             with (
                 patch("ludos.flatpaks._write_flatpak_containerfile") as write,
                 patch("ludos.flatpaks._run_flatpak_image_build") as run,
-                patch("ludos.flatpaks._image_exists", return_value=False),
+                patch("ludos.flatpaks._ensure_image", return_value=False),
                 patch("ludos.flatpaks._tag_image") as tag,
             ):
                 results = _ensure_flatpak_images(
@@ -736,7 +736,7 @@ specs:
             )
 
             with (
-                patch("ludos.flatpaks._image_exists", return_value=False),
+                patch("ludos.flatpaks._ensure_image", return_value=False),
                 patch(
                     "ludos.flatpaks._build_specs_output_image",
                     return_value=SimpleNamespace(rpm_files=("kate.rpm",)),
@@ -757,6 +757,66 @@ specs:
             build_specs.call_args.kwargs["prepare_script"],
             "touch generated-source.tar.gz",
         )
+
+    def test_flatpak_rpm_build_reuses_remote_cache_hit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            card_path = self._write_flatpak_card(
+                root,
+                "kate",
+                app_id="org.anatase.TextEditor",
+                command="kate",
+            )
+            card = FlatpakCard.from_file(card_path)
+            context = self._flatpak_context(root)
+            context.ci_registry = "ghcr.io/anatase-org"
+            plan = FlatpakBuildPlan(
+                card_path=card_path,
+                card=card,
+                flatpak_dir=card_path.parent,
+                app_name="kate",
+                block="flatpak-kate",
+                branch="stable",
+                flatpak_arch="x86_64",
+                app_ref="app/org.anatase.TextEditor/x86_64/stable",
+                output_image="flatpaks:f44-x86_64-kate",
+                latest_image="flatpaks:kate",
+                substitution_env={"releasever": "44", "arch": "x86_64"},
+                build_env={"releasever": "44", "arch": "x86_64"},
+                specs=(SpecBuild(spec="kate.spec", packages={"*": ("kate",)}),),
+                prepare_script="",
+                spec_revisions=tuple(),
+                spec_build_dir=root / "spec-build",
+                artifact_cache_dir=root / "artifacts",
+                final_build_dir=root / "final",
+                rpmbuild_defines=("flatpak 1",),
+                builder_packages=("rpm-build",),
+                builder_image="builders:f44-x86_64-flatpak-kate",
+                build_image="builds:f44-x86_64-flatpak-kate",
+                metadata="[Application]\nname=org.anatase.TextEditor\n",
+            )
+
+            with (
+                patch("ludos.flatpaks._ensure_image", return_value=True) as ensure,
+                patch(
+                    "ludos.flatpaks._output_metadata_in_image",
+                    return_value=(("kate.rpm",), False),
+                ),
+                patch("ludos.flatpaks._build_specs_output_image") as build_specs,
+            ):
+                result = _ensure_flatpak_rpm_builds(
+                    context,
+                    (plan,),
+                    cache_only=False,
+                )
+
+        ensure.assert_called_once_with(
+            "podman",
+            "builds:f44-x86_64-flatpak-kate",
+            "ghcr.io/anatase-org",
+        )
+        build_specs.assert_not_called()
+        self.assertEqual(result[0].rpm_files, ("kate.rpm",))
 
     def test_card_parser_accepts_metadata_hooks_and_specs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -35,9 +35,15 @@ class OciCosignConfig:
 
 
 @dataclass(frozen=True)
+class CiConfig:
+    registry: str = ""
+
+
+@dataclass(frozen=True)
 class Project:
     name: str
     root: Path
+    ci: CiConfig = CiConfig()
     flatpak_images: FlatpakImagesConfig = FlatpakImagesConfig()
     flatpak_gpg: FlatpakGpgConfig = FlatpakGpgConfig()
     oci_cosign: OciCosignConfig = OciCosignConfig()
@@ -55,6 +61,7 @@ class Project:
         return cls(
             name=name or root.name,
             root=root,
+            ci=_ci_config(data, path),
             flatpak_images=_flatpak_images_config(data, path),
             flatpak_gpg=_flatpak_gpg_config(data, path),
             oci_cosign=_oci_cosign_config(data, path),
@@ -534,6 +541,22 @@ def _flatpak_images_config(data: dict[str, Any], path: Path) -> FlatpakImagesCon
         uri=_optional_string(images, "uri", path).strip(),
         s3=_optional_string(images, "s3", path).strip(),
         overlay=_optional_string(images, "overlay", path).strip(),
+    )
+
+
+def _ci_config(data: dict[str, Any], path: Path) -> CiConfig:
+    ci = data.get("ci")
+    if ci is None:
+        return CiConfig()
+    if not isinstance(ci, dict):
+        raise ConfigError(f"{path}: 'ci' must be a mapping")
+    allowed_ci = {"registry"}
+    for key in ci:
+        if key not in allowed_ci:
+            raise ConfigError(f"{path}: 'ci.{key}' is not supported")
+
+    return CiConfig(
+        registry=_optional_string(ci, "registry", path).strip().rstrip("/"),
     )
 
 

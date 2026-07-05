@@ -20,8 +20,8 @@ from .build import (
     _build_specs_output_image,
     _create_builder_image,
     _download_block_packages,
+    _ensure_image,
     _identifier,
-    _image_exists,
     _local_image,
     _output_metadata_in_image,
     _remove_tree,
@@ -253,12 +253,17 @@ def build_flatpaks_with_context(
             f"{manifest_path}: 'flatpaks' must contain at least one item"
         )
     plans = _manifest_flatpak_build_plans(context, cache_only=cache_only)
+    ci_registry = getattr(context, "ci_registry", "")
     if not force:
         missing_plans = tuple(
             plan
             for plan in plans
             if not hasattr(plan, "output_image")
-            or not _image_exists(context.podman, plan.output_image)
+            or not _ensure_image(
+                context.podman,
+                plan.output_image,
+                ci_registry,
+            )
         )
     else:
         missing_plans = plans
@@ -361,7 +366,12 @@ def _build_flatpak_with_context(
     force: bool,
 ) -> FlatpakBuildResult:
     plan = _prepare_flatpak_build_plan(context, flatpak_path, cache_only=cache_only)
-    if force or not _image_exists(context.podman, plan.output_image):
+    ci_registry = getattr(context, "ci_registry", "")
+    if force or not _ensure_image(
+        context.podman,
+        plan.output_image,
+        ci_registry,
+    ):
         _ensure_flatpak_builders(context, (plan,), cache_only=cache_only)
         plan = _ensure_flatpak_rpm_builds(context, (plan,), cache_only=cache_only)[0]
     return _ensure_flatpak_images(
@@ -518,8 +528,9 @@ def _ensure_flatpak_builders(
     cache_only: bool,
 ) -> None:
     orchestrator_dnf_base = _orchestrator_dnf_base(context)
+    ci_registry = getattr(context, "ci_registry", "")
     for plan in plans:
-        if _image_exists(context.podman, plan.builder_image):
+        if _ensure_image(context.podman, plan.builder_image, ci_registry):
             log(f"Reusing flatpak builder image: {plan.builder_image}")
             continue
         if cache_only:
@@ -557,8 +568,9 @@ def _ensure_flatpak_rpm_builds(
     cache_only: bool,
 ) -> tuple[FlatpakBuildPlan, ...]:
     results = []
+    ci_registry = getattr(context, "ci_registry", "")
     for plan in plans:
-        if _image_exists(context.podman, plan.build_image):
+        if _ensure_image(context.podman, plan.build_image, ci_registry):
             log(f"Reusing flatpak build output image: {plan.build_image}")
             rpm_files, _has_files = _output_metadata_in_image(
                 context.podman,
@@ -614,8 +626,13 @@ def _ensure_flatpak_images(
     force: bool = False,
 ) -> tuple[FlatpakBuildResult, ...]:
     results = []
+    ci_registry = getattr(context, "ci_registry", "")
     for plan in plans:
-        if not force and _image_exists(context.podman, plan.output_image):
+        if not force and _ensure_image(
+            context.podman,
+            plan.output_image,
+            ci_registry,
+        ):
             log(f"Reusing flatpak image: {plan.output_image}")
             _tag_image(context.podman, plan.output_image, plan.latest_image)
             results.append(_flatpak_build_result(context, plan))
@@ -1057,8 +1074,12 @@ def _write_flatpak_containerfile(
         *_rename_lines(card.flatpak),
         *_rename_display_lines(card.flatpak),
         *_appdata_lines(card.flatpak),
-        *_appstream_compose_lines(card.flatpak, app_ref),
-        *_export_lines(card.flatpak),
+        *(
+            []
+            if card.flatpak.runtime
+            else _appstream_compose_lines(card.flatpak, app_ref)
+        ),
+        *([] if card.flatpak.runtime else _export_lines(card.flatpak)),
         "cat > /out/metadata <<'LUDOS_FLATPAK_METADATA'",
         metadata.rstrip(),
         "LUDOS_FLATPAK_METADATA",

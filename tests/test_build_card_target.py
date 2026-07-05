@@ -13,6 +13,7 @@ from ludos.build import (
     OciImagePlan,
     PackageImagePlan,
     ResolvedBuildMetadata,
+    build_package_card_images,
     build_manifest,
     _cleanup_dnf_workspaces,
     _build_final_manifest_image,
@@ -486,6 +487,34 @@ class TargetCardBuildTests(unittest.TestCase):
             r"^images:f44-x86_64-anatase-[0-9a-f]{8}$",
         )
         self.assertEqual(result.latest_image, "images:anatase")
+
+    def test_package_card_image_reuses_remote_cache_hit(self) -> None:
+        metadata = replace(
+            self._metadata(),
+            ci_registry="ghcr.io/anatase-org",
+            package_images=(
+                PackageImagePlan(
+                    block="base-scx",
+                    packages=("jq-0:1-1.fc44.x86_64",),
+                    image="cards:f44-x86_64-base-scx",
+                ),
+            ),
+        )
+
+        with (
+            patch("ludos.build._ensure_image", return_value=True) as ensure_image,
+            patch("ludos.build._download_block_packages") as download,
+            patch("ludos.build._create_package_image") as create_image,
+        ):
+            build_package_card_images((metadata,), cache_only=False)
+
+        ensure_image.assert_any_call(
+            "podman",
+            "cards:f44-x86_64-base-scx",
+            "ghcr.io/anatase-org",
+        )
+        download.assert_not_called()
+        create_image.assert_not_called()
 
     def test_install_heredocs_include_build_image_refs_for_cache(self) -> None:
         metadata = self._metadata()

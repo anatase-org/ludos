@@ -82,7 +82,11 @@ def bootc_create(
             for item in final_metadata
         )
         if not force and can_reuse_final and all(
-            build_module._image_exists(item.podman, item.output_image)
+            build_module._ensure_image(
+                item.podman,
+                item.output_image,
+                getattr(item, "ci_registry", ""),
+            )
             for item in final_metadata
         ):
             for item in final_metadata:

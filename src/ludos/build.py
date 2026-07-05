@@ -17,7 +17,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from .common import ResolvedManifestContext, resolve_manifest_context
+from .common import (
+    ResolvedManifestContext,
+    _ensure_image as _ensure_cached_image,
+    resolve_manifest_context,
+)
 from .logging import log, stream
 from .model import ConfigError, SpecBuild, _resolve_card_path
 
@@ -150,6 +154,7 @@ class ResolvedBuildMetadata:
     card_specs: tuple[tuple[str, tuple[SpecBuild, ...]], ...]
     spec_source_revisions: tuple[tuple[str, str, str], ...]
     latest_image: str = ""
+    ci_registry: str = ""
 
 
 @dataclass(frozen=True)
@@ -280,7 +285,11 @@ def build_manifest(
 
         mode = "combined" if ci else "separated"
         metadata = _resolve_final_manifest_metadata(metadata, mode=mode)
-        if not force and _image_exists(metadata[0].podman, metadata[0].output_image):
+        if not force and _ensure_image(
+            metadata[0].podman,
+            metadata[0].output_image,
+            metadata[0].ci_registry,
+        ):
             log(f"Reusing final image: {metadata[0].output_image}")
             _tag_image(metadata[0].podman, metadata[0].output_image, metadata[0].latest_image)
             return _metadata_build_result(metadata[0])
@@ -371,7 +380,7 @@ def resolve_build_manifest_context(
         cache_only=cache_only,
         ccache=ccache,
         dnf_workspace_dirs=dnf_workspace_dirs,
-        image_exists=_image_exists,
+        image_exists=_ensure_image,
         create_orchestrator_image=_create_orchestrator_image,
         create_repo_image=_create_repo_image,
         extract_image_paths=_extract_image_paths,
@@ -466,6 +475,7 @@ def _resolve_manifest_metadata(
     dnf_workspace_dir = context.dnf_workspace_dir
     podman = context.podman
     buildah = context.buildah
+    ci_registry = context.ci_registry
     orchestrator = context.orchestrator
     repo_images = list(context.repo_images)
 
@@ -568,6 +578,7 @@ def _resolve_manifest_metadata(
                 podman,
                 oci_image,
                 source=card.source,
+                ci_registry=ci_registry,
             )
             oci_package_ids = _package_request_ids(oci_packages, arch)
             card_oci_package_ids.setdefault(card_name, set()).update(oci_package_ids)
@@ -1075,6 +1086,7 @@ def _resolve_manifest_metadata(
         podman=str(podman),
         buildah=buildah,
         cache_version=cache_version,
+        ci_registry=ci_registry,
         repo_images=tuple(repo_images),
         orchestrator_dnf_base=tuple(orchestrator_dnf_base),
         package_blocks=package_blocks,
@@ -1149,6 +1161,7 @@ def _merge_common_packages(
             item.arch,
             item.local_prefix,
             item.orchestrator,
+            item.ci_registry,
             item.repo_images,
         )
         for item in metadata
@@ -1156,7 +1169,7 @@ def _merge_common_packages(
     if len(contexts) != 1:
         raise ConfigError(
             "multi-manifest resolution requires compatible root, distro, "
-            "releasever, arch, orchestrator, and repository metadata"
+            "releasever, arch, orchestrator, CI registry, and repository metadata"
         )
     return metadata
 
@@ -1171,7 +1184,7 @@ def build_package_card_images(
         for plan in manifest.package_images:
             if not plan.packages or plan.image in created:
                 continue
-            if _image_exists(manifest.podman, plan.image):
+            if _ensure_image(manifest.podman, plan.image, manifest.ci_registry):
                 log(f"Reusing card package image: {plan.image}")
                 created.add(plan.image)
                 continue
@@ -1213,7 +1226,11 @@ def build_builder_images(
                 continue
             if plan.builder_image in built_builders:
                 continue
-            if _image_exists(manifest.podman, plan.builder_image):
+            if _ensure_image(
+                manifest.podman,
+                plan.builder_image,
+                manifest.ci_registry,
+            ):
                 log(f"Reusing builder image: {plan.builder_image}")
                 built_builders.add(plan.builder_image)
                 continue
@@ -1272,7 +1289,7 @@ def build_build_images(
             if target_set and plan.block not in target_set and plan.image not in target_set:
                 continue
 
-            if _image_exists(manifest.podman, plan.image):
+            if _ensure_image(manifest.podman, plan.image, manifest.ci_registry):
                 log(f"Reusing build output image: {plan.image}")
                 images_by_block[plan.block] = plan.image
                 rpm_files, has_files = _output_metadata_in_image(
@@ -1284,7 +1301,11 @@ def build_build_images(
                 continue
             if cache_only:
                 raise ConfigError(f"build output image is not cached: {plan.image}")
-            if not _image_exists(manifest.podman, plan.builder_image):
+            if not _ensure_image(
+                manifest.podman,
+                plan.builder_image,
+                manifest.ci_registry,
+            ):
                 raise ConfigError(
                     f"builder image is missing: {plan.builder_image}; "
                     "create card images before running builds"
@@ -1393,7 +1414,11 @@ def _build_final_manifest_image(
     force: bool = False,
 ) -> BuildResult:
     metadata = _metadata_with_final_image(metadata, mode=mode)
-    if not force and _image_exists(metadata.podman, metadata.output_image):
+    if not force and _ensure_image(
+        metadata.podman,
+        metadata.output_image,
+        metadata.ci_registry,
+    ):
         log(f"Reusing final image: {metadata.output_image}")
         _tag_image(metadata.podman, metadata.output_image, metadata.latest_image)
         return _metadata_build_result(
@@ -2191,8 +2216,14 @@ fi
     return tuple(rpm_files), has_files
 
 
-def _inspect_oci_image(podman: str, image: str, *, source: Path) -> ImageInfo:
-    if not _image_exists(podman, image):
+def _inspect_oci_image(
+    podman: str,
+    image: str,
+    *,
+    source: Path,
+    ci_registry: str = "",
+) -> ImageInfo:
+    if not _ensure_image(podman, image, ci_registry):
         raise ConfigError(f"{source}: OCI image is not cached: {image}")
     result = subprocess.run(
         [podman, "image", "inspect", image, "--format", "{{json .}}"],
@@ -2508,6 +2539,14 @@ def _image_exists(podman: str, image: str) -> bool:
         return subprocess.run([podman, "image", "exists", image], check=False).returncode == 0
     except FileNotFoundError:
         return False
+
+
+def _ensure_image(podman: str, image: str, ci_registry: str = "") -> bool:
+    if _image_exists(podman, image):
+        return True
+    if not ci_registry:
+        return False
+    return _ensure_cached_image(podman, image, ci_registry)
 
 
 def _remove_image(podman: str, image: str) -> None:
