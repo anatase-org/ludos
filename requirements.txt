@@ -4,6 +4,8 @@
 #
 #    pip-compile
 #
+-e .
+    # via -r requirements.in
 boto3==1.43.36
     # via ludos
 botocore==1.43.36
@@ -14,8 +16,6 @@ jmespath==1.1.0
     # via
     #   boto3
     #   botocore
-ludos
-    # via -r requirements.in
 markdown-it-py==3.0.0
     # via rich
 mdurl==0.1.2
