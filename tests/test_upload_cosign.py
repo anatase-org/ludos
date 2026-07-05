@@ -150,6 +150,7 @@ class UploadCosignTests(unittest.TestCase):
             )
 
             with (
+                patch("ludos.upload.cosign.shutil.which", return_value="/usr/bin/cosign"),
                 patch("ludos.upload.cosign._run_quiet_verify") as run,
                 patch(
                     "ludos.upload.cosign._cosign_verify_supports",
@@ -196,6 +197,38 @@ class UploadCosignTests(unittest.TestCase):
             ],
         )
 
+    def test_verify_warns_and_skips_when_cosign_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cert = root / "leaf.pem"
+            ca = root / "root.pem"
+            config = cosign.CosignSigningConfig(
+                key_uri=KEY_URI,
+                cert_path=cert,
+                root_path=ca,
+                registry="https://flatpaks.example.test/",
+                identity="cosign.example.test",
+            )
+
+            with (
+                patch("ludos.upload.cosign.shutil.which", return_value=None),
+                patch("ludos.upload.cosign.warning") as warning,
+                patch("ludos.upload.cosign._run_quiet_verify") as run,
+                patch("ludos.upload.cosign._verify_certificate_identity") as identity,
+                patch("ludos.upload.cosign._verify_certificate_chain") as chain,
+            ):
+                cosign.verify_cosign_signature(
+                    image="flatpaks.example.test/images/anatase@sha256:" + "a" * 64,
+                    config=config,
+                )
+
+        warning.assert_called_once_with(
+            "cosign is not installed; skipping cosign verification"
+        )
+        run.assert_not_called()
+        identity.assert_not_called()
+        chain.assert_not_called()
+
     def test_verify_falls_back_for_cosign_without_referrers_mode_flag(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -210,6 +243,7 @@ class UploadCosignTests(unittest.TestCase):
             )
 
             with (
+                patch("ludos.upload.cosign.shutil.which", return_value="/usr/bin/cosign"),
                 patch("ludos.upload.cosign._run_quiet_verify") as run,
                 patch(
                     "ludos.upload.cosign._cosign_verify_supports",

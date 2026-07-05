@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import ssl
 import subprocess
 import tempfile
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-from ..logging import log
+from ..logging import log, warning
 from ..model import ConfigError, OciCosignConfig
 from .common import (
     REGISTRY_IMMUTABLE_CACHE_CONTROL,
@@ -313,6 +314,9 @@ def verify_cosign_signature(
     image: str,
     config: CosignSigningConfig,
 ) -> None:
+    if shutil.which("cosign") is None:
+        warning("cosign is not installed; skipping cosign verification")
+        return
     _verify_certificate_identity(config.cert_path, config.identity)
     _verify_certificate_chain(config.cert_path, config.root_path)
     with tempfile.TemporaryDirectory(prefix="ludos-cosign-verify-") as tmp:
