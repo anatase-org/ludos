@@ -78,6 +78,24 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.ci_action, "seed")
         self.assertEqual(args.build_manifest, Path("cache/ci/build.yml"))
 
+    def test_parser_defaults_seed_ci_build_manifest(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(["ci", "seed"])
+
+        self.assertEqual(args.ci_action, "seed")
+        self.assertIsNone(args.build_manifest)
+        self.assertIsNone(args.cache_dir)
+
+    def test_parser_accepts_seed_ci_cache_dir(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(["ci", "seed", "--cache-dir", "out-cache"])
+
+        self.assertEqual(args.ci_action, "seed")
+        self.assertIsNone(args.build_manifest)
+        self.assertEqual(args.cache_dir, Path("out-cache"))
+
     def test_prepare_ci_rejects_cache_and_cards_dir(self) -> None:
         parser = build_parser()
 
@@ -149,7 +167,25 @@ class CiParserTests(unittest.TestCase):
             exit_code = ci_command(args)
 
         self.assertEqual(exit_code, 0)
-        seed.assert_called_once_with(Path("cache/ci/build.yml"))
+        seed.assert_called_once_with(Path("cache/ci/build.yml"), cache_dir=None)
+
+    def test_ci_command_calls_seed_ci_with_default_build_manifest(self) -> None:
+        args = build_parser().parse_args(["ci", "seed"])
+
+        with patch("ludos.__main__.seed_ci") as seed:
+            exit_code = ci_command(args)
+
+        self.assertEqual(exit_code, 0)
+        seed.assert_called_once_with(None, cache_dir=None)
+
+    def test_ci_command_calls_seed_ci_with_cache_dir(self) -> None:
+        args = build_parser().parse_args(["ci", "seed", "--cache-dir", "out-cache"])
+
+        with patch("ludos.__main__.seed_ci") as seed:
+            exit_code = ci_command(args)
+
+        self.assertEqual(exit_code, 0)
+        seed.assert_called_once_with(None, cache_dir=Path("out-cache"))
 
 
 class PrepareCiTests(unittest.TestCase):

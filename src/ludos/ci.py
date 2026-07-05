@@ -38,6 +38,9 @@ from .logging import log
 from .model import ConfigError
 
 
+DEFAULT_CI_CACHE_DIR = Path("cache")
+
+
 class _LiteralString(str):
     pass
 
@@ -195,7 +198,12 @@ def init_ci(
             dnf_workspace_dirs.clear()
 
 
-def seed_ci(build_manifest: Path) -> None:
+def seed_ci(
+    build_manifest: Path | None = None,
+    *,
+    cache_dir: Path | None = None,
+) -> None:
+    build_manifest = build_manifest or _default_ci_build_manifest(cache_dir)
     metadata = _read_seed_metadata(build_manifest)
     for manifest in metadata:
         _require_ci_registry(manifest.ci_registry)
@@ -243,6 +251,11 @@ def _resolve_cache_root(
 def _ci_dnf_workspace(cache_root: Path, index: int, manifest_path: Path) -> Path:
     name = manifest_path.resolve().stem
     return cache_root / "ci" / "dnf" / f"{index}-{name}"
+
+
+def _default_ci_build_manifest(cache_dir: Path | None) -> Path:
+    cache_root = cache_dir.expanduser() if cache_dir is not None else DEFAULT_CI_CACHE_DIR
+    return cache_root / "ci" / "build.yml"
 
 
 def _require_ci_registry(ci_registry: str) -> str:
