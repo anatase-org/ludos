@@ -373,8 +373,6 @@ def _git_revision(git_dir: Path) -> str | None:
 
 def _safe_oci_name(image: str) -> str:
     value = image
-    if value.startswith("localhost/"):
-        value = value.removeprefix("localhost/")
     value = value.replace(":", "-")
     value = SAFE_OCI_NAME_RE.sub("-", value).strip("-._")
     return value or "image"

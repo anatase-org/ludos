@@ -10,6 +10,7 @@ from pathlib import Path
 from .bootc import DEFAULT_OCI_WRITERS, bootc_create, ostree_import
 from .build import build_manifest
 from .cleanup import cleanup_local_images
+from .ci import prepare_ci
 from .flatpaks import build_flatpak, build_flatpaks
 from .installer import bootc_installer
 from .logging import LOGO_STR, configure_logging, configure_tracebacks, error, log
@@ -679,6 +680,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     installer_parser.set_defaults(func=bootc_command)
 
+    ci = subcommands.add_parser(
+        "ci",
+        help="Create and consume CI fan-out manifests.",
+    )
+    ci_subcommands = ci.add_subparsers(dest="ci_action", required=True)
+    prepare_parser = ci_subcommands.add_parser(
+        "prepare",
+        help="Prepare shared CI images and write build metadata.",
+    )
+    prepare_parser.add_argument(
+        "manifests",
+        nargs="+",
+        type=Path,
+        help="Paths to Ludos YAML manifests.",
+    )
+    prepare_parser.add_argument(
+        "--cards-dir",
+        type=Path,
+        default=None,
+        help="Directory containing card YAML files. Defaults to ./cards next to the manifest.",
+    )
+    prepare_parser.add_argument(
+        "--cache",
+        action="store_true",
+        help="Only use cached repository and card images. Fail if any are missing.",
+    )
+    prepare_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Directory for build, dnf, and package caches. Defaults to ./cache next to the first manifest.",
+    )
+    prepare_parser.add_argument(
+        "--version",
+        default=None,
+        help="Repository/package cache version to load. Defaults to the current UTC ISO week as YYYY.WW and creates missing cache images.",
+    )
+    prepare_parser.add_argument(
+        "--no-ccache",
+        action="store_true",
+        help="Do not mount or enable shared ccache/sccache directories for builder runs.",
+    )
+    prepare_parser.set_defaults(func=ci_command)
+
     cleanup = subcommands.add_parser(
         "cleanup",
         help="Remove stale local Ludos cache images.",
@@ -1023,6 +1068,20 @@ def bootc_command(args: argparse.Namespace) -> int:
             force=args.force,
         )
     raise ConfigError(f"unknown bootc action: {args.bootc_action}")
+
+
+def ci_command(args: argparse.Namespace) -> int:
+    if args.ci_action == "prepare":
+        prepare_ci(
+            tuple(args.manifests),
+            cards_dir=args.cards_dir,
+            cache_dir=args.cache_dir,
+            cache_version=args.version,
+            cache_only=args.cache,
+            ccache=not args.no_ccache,
+        )
+        return 0
+    raise ConfigError(f"unknown ci action: {args.ci_action}")
 
 
 def main() -> int:

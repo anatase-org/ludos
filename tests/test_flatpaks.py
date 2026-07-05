@@ -439,9 +439,9 @@ class FlatpakParserTests(unittest.TestCase):
         self.assertIn("sdk=org.anatase.ludos.Sdk/x86_64/beta", plan.metadata)
         self.assertRegex(
             plan.output_image,
-            r"^localhost/flatpaks:f44-x86_64-kate-[0-9a-f]{8}$",
+            r"^flatpaks:f44-x86_64-kate-[0-9a-f]{8}$",
         )
-        self.assertEqual(plan.latest_image, "localhost/flatpaks:kate")
+        self.assertEqual(plan.latest_image, "flatpaks:kate")
 
     def test_prepare_flatpak_runtime_build_plan_uses_configured_version(
         self,
@@ -604,20 +604,20 @@ specs:
 
         self.assertRegex(
             plans[0].output_image,
-            r"^localhost/flatpaks:f44-x86_64-kate-[0-9a-f]{8}$",
+            r"^flatpaks:f44-x86_64-kate-[0-9a-f]{8}$",
         )
         self.assertRegex(
             plans[1].output_image,
-            r"^localhost/flatpaks:f44-x86_64-ark-[0-9a-f]{8}$",
+            r"^flatpaks:f44-x86_64-ark-[0-9a-f]{8}$",
         )
         self.assertEqual(
             tuple(plan.latest_image for plan in plans),
-            ("localhost/flatpaks:kate", "localhost/flatpaks:ark"),
+            ("flatpaks:kate", "flatpaks:ark"),
         )
         self.assertEqual(tuple(plan.branch for plan in plans), ("stable", "stable"))
         self.assertTrue(
             all(
-                plan.output_image.startswith("localhost/flatpaks:")
+                plan.output_image.startswith("flatpaks:")
                 for plan in plans
             )
         )

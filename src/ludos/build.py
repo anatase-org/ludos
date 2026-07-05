@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from .common import resolve_manifest_context
+from .common import ResolvedManifestContext, resolve_manifest_context
 from .logging import log, stream
 from .model import ConfigError, SpecBuild, _resolve_card_path
 
@@ -354,17 +354,16 @@ def resolve_build_manifests(
         raise
 
 
-def _resolve_manifest_metadata(
+def resolve_build_manifest_context(
     manifest_path: Path,
     cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
     ccache: bool = True,
-    target_card: str | None = None,
     dnf_workspace_dirs: list[Path] | None = None,
-) -> ResolvedBuildMetadata:
-    context = resolve_manifest_context(
+) -> ResolvedManifestContext:
+    return resolve_manifest_context(
         manifest_path,
         cards_dir=cards_dir,
         cache_dir=cache_dir,
@@ -379,6 +378,70 @@ def _resolve_manifest_metadata(
         apply_repo_priority=_apply_repo_priority,
         require_buildah=_require_buildah,
     )
+
+
+def resolve_build_manifest_from_context(
+    context: ResolvedManifestContext,
+    *,
+    manifest_path: Path,
+    cards_dir: Path | None = None,
+    cache_only: bool = False,
+    card: str | None = None,
+) -> ResolvedBuildMetadata:
+    return _resolve_manifest_metadata(
+        manifest_path,
+        cards_dir=cards_dir,
+        cache_only=cache_only,
+        target_card=card,
+        context=context,
+    )
+
+
+def resolve_build_manifests_from_contexts(
+    manifest_contexts: tuple[tuple[Path, ResolvedManifestContext], ...],
+    *,
+    cards_dir: Path | None = None,
+    cache_only: bool = False,
+    card: str | None = None,
+) -> tuple[ResolvedBuildMetadata, ...]:
+    if not manifest_contexts:
+        raise ConfigError("at least one manifest is required")
+    if card is not None and len(manifest_contexts) != 1:
+        raise ConfigError("targeted card builds require exactly one manifest")
+    metadata = tuple(
+        resolve_build_manifest_from_context(
+            context,
+            manifest_path=manifest_path,
+            cards_dir=cards_dir,
+            cache_only=cache_only,
+            card=card,
+        )
+        for manifest_path, context in manifest_contexts
+    )
+    return _merge_common_packages(metadata)
+
+
+def _resolve_manifest_metadata(
+    manifest_path: Path,
+    cards_dir: Path | None = None,
+    cache_dir: Path | None = None,
+    cache_version: str | None = None,
+    cache_only: bool = False,
+    ccache: bool = True,
+    target_card: str | None = None,
+    dnf_workspace_dirs: list[Path] | None = None,
+    context: ResolvedManifestContext | None = None,
+) -> ResolvedBuildMetadata:
+    if context is None:
+        context = resolve_build_manifest_context(
+            manifest_path,
+            cards_dir=cards_dir,
+            cache_dir=cache_dir,
+            cache_version=cache_version,
+            cache_only=cache_only,
+            ccache=ccache,
+            dnf_workspace_dirs=dnf_workspace_dirs,
+        )
     validation = context.validation
     root_dir = context.root_dir
     image = context.image
@@ -499,7 +562,7 @@ def _resolve_manifest_metadata(
         card_sources[card_name] = card.source
         for oci_input in card.oci:
             oci_packages = _packages_for_arch(oci_input.packages, arch)
-            oci_image = f"localhost/{oci_input.oci}:{distro}"
+            oci_image = f"{oci_input.oci}:{distro}"
             log(f"Resolving OCI input for card {card_name}: {oci_image}")
             oci_info = _inspect_oci_image(
                 podman,
@@ -2424,7 +2487,7 @@ def _local_prefix(value: str) -> str:
 
 
 def _local_image(local_prefix: str, repository: str, tag: str) -> str:
-    return f"localhost/{local_prefix}{repository}:{tag}"
+    return f"{local_prefix}{repository}:{tag}"
 
 
 def _image_tag(image: str) -> str:

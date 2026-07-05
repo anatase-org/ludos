@@ -146,7 +146,7 @@ class BootcCommandTests(unittest.TestCase):
     def test_safe_oci_name_sanitizes_image_ref(self) -> None:
         self.assertEqual(
             _safe_oci_name("localhost/anatase:f44-x86_64"),
-            "anatase-f44-x86_64",
+            "localhost-anatase-f44-x86_64",
         )
         self.assertEqual(
             _safe_oci_name("registry.example.com/team/anatase:test"),

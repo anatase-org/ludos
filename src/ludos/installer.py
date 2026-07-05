@@ -336,7 +336,7 @@ def _installer_image_ref(ctx: InstallerContext, source_image: str = "") -> str:
 
 def _installer_latest_image_ref(ctx: InstallerContext | None = None) -> str:
     if ctx is None:
-        return "localhost/installers:latest"
+        return "installers:latest"
     image, _distro, local_prefix = _installer_manifest_identity(ctx)
     return _local_image(local_prefix, "installers", image)
 

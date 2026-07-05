@@ -205,9 +205,17 @@ def _installer_latest_from_image_latest(image: str) -> str:
         return ""
     repository, tag = parsed
     prefix, separator, name = repository.rpartition("/")
-    if not separator or not name.endswith("images"):
+    if separator:
+        image_repository = name
+        installer_prefix = f"{prefix}/"
+    else:
+        image_repository = repository
+        installer_prefix = ""
+    if not image_repository.endswith("images"):
         return ""
-    installer_repository = f"{prefix}/{name.removesuffix('images')}installers"
+    installer_repository = (
+        f"{installer_prefix}{image_repository.removesuffix('images')}installers"
+    )
     return f"{installer_repository}:{tag}"
 
 
@@ -218,15 +226,15 @@ def _stale_local_images(
     manifest_targets: tuple[str, ...] = tuple(),
 ) -> tuple[CleanupTarget, ...]:
     versioned_cache_repositories = {
-        f"localhost/{local_prefix}{repository}"
+        f"{local_prefix}{repository}"
         for repository in VERSIONED_CLEANUP_REPOSITORIES
     }
     latest_cache_repositories = {
-        f"localhost/{local_prefix}{repository}"
+        f"{local_prefix}{repository}"
         for repository in LATEST_CLEANUP_REPOSITORIES
     }
     resolved_cache_repositories = {
-        f"localhost/{local_prefix}{repository}"
+        f"{local_prefix}{repository}"
         for repository in RESOLVED_CLEANUP_REPOSITORIES
     }
     manifest_keep_refs = set(manifest_targets)
@@ -296,7 +304,7 @@ def _stale_local_images(
 
 def _purge_local_images(podman: str, local_prefix: str) -> tuple[CleanupTarget, ...]:
     managed_repositories = {
-        f"localhost/{local_prefix}{repository}"
+        f"{local_prefix}{repository}"
         for repository in (
             *CLEANUP_REPOSITORIES,
             *FINAL_CLEANUP_REPOSITORIES,

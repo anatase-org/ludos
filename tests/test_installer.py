@@ -451,11 +451,11 @@ class InstallerHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _context(Path(tmp))
 
-            self.assertRegex(
-                _installer_image_ref(ctx),
-                r"^localhost/installers:f44-x86_64-anatase-[0-9a-f]{8}$",
-            )
-            self.assertEqual(_installer_latest_image_ref(ctx), "localhost/installers:anatase")
+        self.assertRegex(
+            _installer_image_ref(ctx),
+            r"^installers:f44-x86_64-anatase-[0-9a-f]{8}$",
+        )
+        self.assertEqual(_installer_latest_image_ref(ctx), "installers:anatase")
 
     def test_installer_containerfile_runs_build_steps_in_image(self) -> None:
         containerfile = _installer_containerfile(
@@ -529,7 +529,7 @@ class InstallerHelperTests(unittest.TestCase):
 
         self.assertRegex(
             image,
-            r"^localhost/installers:f44-x86_64-anatase-[0-9a-f]{8}$",
+            r"^installers:f44-x86_64-anatase-[0-9a-f]{8}$",
         )
         run.assert_called_once_with(
             [
@@ -538,7 +538,7 @@ class InstallerHelperTests(unittest.TestCase):
                 "--tag",
                 image,
                 "--tag",
-                "localhost/installers:anatase",
+                "installers:anatase",
                 "--file",
                 str(containerfile),
                 str(ctx.build_context),
@@ -571,7 +571,7 @@ class InstallerHelperTests(unittest.TestCase):
 
         self.assertRegex(
             image,
-            r"^localhost/installers:f44-x86_64-anatase-[0-9a-f]{8}$",
+            r"^installers:f44-x86_64-anatase-[0-9a-f]{8}$",
         )
         self.assertIn("FROM sha256:" + "c" * 64, containerfile_text)
         self.assertIn("--cap-add", build_command)

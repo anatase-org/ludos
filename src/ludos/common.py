@@ -131,7 +131,7 @@ def resolve_manifest_context(
     orchestrator_source = _substitute_variables(
         validation.manifest.orchestrator, manifest_env
     )
-    output_image = f"localhost/{local_prefix}{image}:{distro}"
+    output_image = f"{local_prefix}{image}:{distro}"
     if cache_only:
         log("Using cache-only mode")
 
@@ -350,7 +350,7 @@ def _local_prefix(value: str) -> str:
 
 
 def _local_image(local_prefix: str, repository: str, tag: str) -> str:
-    return f"localhost/{local_prefix}{repository}:{tag}"
+    return f"{local_prefix}{repository}:{tag}"
 
 
 def _latest_image(image: str) -> str:

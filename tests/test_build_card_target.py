@@ -477,15 +477,15 @@ class TargetCardBuildTests(unittest.TestCase):
                 "podman",
                 "tag",
                 result.output_image,
-                "localhost/images:anatase",
+                "images:anatase",
             ],
             check=True,
         )
         self.assertRegex(
             result.output_image,
-            r"^localhost/images:f44-x86_64-anatase-[0-9a-f]{8}$",
+            r"^images:f44-x86_64-anatase-[0-9a-f]{8}$",
         )
-        self.assertEqual(result.latest_image, "localhost/images:anatase")
+        self.assertEqual(result.latest_image, "images:anatase")
 
     def test_install_heredocs_include_build_image_refs_for_cache(self) -> None:
         metadata = self._metadata()
@@ -645,7 +645,7 @@ class TargetCardBuildTests(unittest.TestCase):
         card_envs = {name: dict(values) for name, values in metadata.card_envs}
         self.assertEqual(card_envs["base-kernel"]["nvidia"], "580.95.05")
         self.assertEqual(card_envs["drivers-nvidia"]["version"], "580.95.05")
-        self.assertEqual(metadata.oci_images[0].image, "localhost/kernel:f44-x86_64")
+        self.assertEqual(metadata.oci_images[0].image, "kernel:f44-x86_64")
         oci_metadata.assert_not_called()
 
     def test_oci_digest_does_not_change_owning_build_image_hash(self) -> None:

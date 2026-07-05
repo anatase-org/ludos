@@ -321,6 +321,20 @@ def resolve_manifest_flatpak_images(
                 _remove_tree(dnf_workspace_dir)
 
 
+def plan_manifest_flatpaks_with_context(
+    context: ResolvedManifestContext,
+    *,
+    manifest_path: Path,
+    cache_only: bool = False,
+) -> tuple[FlatpakBuildPlan, ...]:
+    if context.validation.missing_flatpaks:
+        missing = ", ".join(context.validation.missing_flatpaks)
+        raise ConfigError(
+            f"{manifest_path}: missing flatpak definitions: {missing}"
+        )
+    return _manifest_flatpak_build_plans(context, cache_only=cache_only)
+
+
 def _manifest_flatpak_build_plans(
     context: ResolvedManifestContext,
     *,

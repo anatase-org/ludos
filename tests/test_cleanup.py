@@ -349,12 +349,12 @@ class CleanupPurgeTests(unittest.TestCase):
         images = [
             {
                 "Id": "image1",
-                "Names": ["localhost/images:anatase", "localhost/other:keep"],
+                "Names": ["images:anatase", "other:keep"],
                 "Size": 1024,
             },
             {
                 "Id": "image2",
-                "Names": ["localhost/flatpaks:browser"],
+                "Names": ["flatpaks:browser"],
                 "Size": 2048,
             },
             {
@@ -366,7 +366,7 @@ class CleanupPurgeTests(unittest.TestCase):
                 "Id": "image4",
                 "Names": [],
                 "Dangling": True,
-                "History": ["localhost/builds:f44-x86_64-base-oldhash"],
+                "History": ["builds:f44-x86_64-base-oldhash"],
                 "Size": 512,
             },
             {
@@ -391,8 +391,8 @@ class CleanupPurgeTests(unittest.TestCase):
         self.assertEqual(
             tuple(target.ref for target in targets),
             (
-                "localhost/images:anatase",
-                "localhost/flatpaks:browser",
+                "images:anatase",
+                "flatpaks:browser",
                 "image4",
             ),
         )
@@ -401,12 +401,12 @@ class CleanupPurgeTests(unittest.TestCase):
         images = [
             {
                 "Id": "image1",
-                "Names": ["localhost/images:anatase"],
+                "Names": ["images:anatase"],
                 "Size": 1024,
             },
             {
                 "Id": "image2",
-                "Names": ["localhost/test-images:anatase"],
+                "Names": ["test-images:anatase"],
                 "Size": 1024,
             },
         ]
@@ -423,7 +423,7 @@ class CleanupPurgeTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(target.ref for target in targets),
-            ("localhost/test-images:anatase",),
+            ("test-images:anatase",),
         )
 
     def test_cleanup_purge_skips_manifest_resolution(self) -> None:
