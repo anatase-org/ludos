@@ -108,7 +108,11 @@ def sign_detached_file(
     with Path(input_path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
-    Path(output_path).write_bytes(_make_signature_from_digest(digest, config))
+    Path(output_path).write_bytes(sign_detached_digest(digest, config))
+
+
+def sign_detached_digest(data_digest: Any, config: GpgSigningConfig) -> bytes:
+    return _make_signature_from_digest(data_digest, config)
 
 
 def verify_attached_data(

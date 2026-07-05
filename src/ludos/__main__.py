@@ -282,6 +282,11 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="Filename to publish in SHA256SUMS and Content-Disposition.",
     )
+    registry_file_upload.add_argument(
+        "--sign",
+        action="store_true",
+        help="Upload detached OpenPGP .sig files next to the uploaded file.",
+    )
     registry_file_upload.set_defaults(func=registry_command)
 
     registry_file_delete = registry_file_subcommands.add_parser(
@@ -903,7 +908,12 @@ def registry_command(args: argparse.Namespace) -> int:
         return registry_init()
     if args.registry_action == "file":
         if args.registry_file_action == "upload":
-            return upload_file(args.path, args.output_path, args.download_name)
+            return upload_file(
+                args.path,
+                args.output_path,
+                args.download_name,
+                sign=args.sign,
+            )
         if args.registry_file_action == "delete":
             return delete_file(args.output_path)
         raise ConfigError(f"unknown registry file action: {args.registry_file_action}")

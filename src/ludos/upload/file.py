@@ -15,6 +15,7 @@ from .common import (
     _normalize_object_key,
     _s3_config_from_env,
 )
+from .gpg import config_from_env as gpg_config_from_env, sign_detached_digest
 
 
 SHA256SUMS = "SHA256SUMS"
@@ -40,6 +41,7 @@ def upload_file(
     output_path: str,
     download_name: str | None = None,
     *,
+    sign: bool = False,
     environ: Mapping[str, str] | None = None,
     client: Any | None = None,
 ) -> int:
@@ -52,8 +54,15 @@ def upload_file(
     target = _s3_object(output_path, environ=environ)
     s3 = client if client is not None else _create_s3_client(target.config, environ)
     log(f"Calculating digest for {source}")
-    digest = _sha256_file(source)
+    source_digest = _sha256_file_digest(source)
+    digest = source_digest.hexdigest()
     log(f"Digest of {source}\n{digest}")
+    signature = None
+    if sign:
+        signature = sign_detached_digest(
+            source_digest,
+            gpg_config_from_env(environ, project_root=Path.cwd()),
+        )
     checksum_name = download_name or source.name
     extra_args = {}
     if download_name is not None:
@@ -79,6 +88,15 @@ def upload_file(
             )
     except Exception as exc:
         raise ConfigError(f"S3 upload failed for {target.key}: {exc}") from exc
+
+    if signature is not None:
+        _upload_detached_signatures(
+            s3,
+            target,
+            signature,
+            output_name=Path(target.key).name,
+            download_name=download_name,
+        )
 
     entries = _read_sha256sums(s3, target)
     updated = _update_sha256sums(entries, digest, checksum_name)
@@ -125,12 +143,39 @@ def _content_disposition(download_name: str) -> str:
     return f'attachment; filename="{escaped}"'
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file_digest(path: Path) -> Any:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while chunk := stream.read(HASH_CHUNK_SIZE):
             digest.update(chunk)
-    return digest.hexdigest()
+    return digest
+
+
+def _upload_detached_signatures(
+    client: Any,
+    target: S3Object,
+    signature: bytes,
+    *,
+    output_name: str,
+    download_name: str | None,
+) -> None:
+    names = [output_name]
+    if download_name is not None and download_name not in names:
+        names.append(download_name)
+    prefix = "" if "/" not in target.key else target.key.rsplit("/", 1)[0] + "/"
+    for name in names:
+        key = f"{prefix}{name}.sig"
+        log(f"Uploading detached signature: {key}")
+        try:
+            client.put_object(
+                Bucket=target.config.bucket,
+                Key=key,
+                Body=signature,
+                ContentType="application/octet-stream",
+                CacheControl=REGISTRY_SHORT_CACHE_CONTROL,
+            )
+        except Exception as exc:
+            raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc
 
 
 def _read_sha256sums(client: Any, target: S3Object) -> list[tuple[str, str]]:

@@ -165,6 +165,22 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(args.path, Path("cache/iso/anatase.iso"))
         self.assertEqual(args.output_path, "isos/anatase.iso")
         self.assertEqual(args.download_name, "anatase-44.20260627.iso")
+        self.assertFalse(args.sign)
+
+    def test_upload_file_parser_accepts_sign(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "file",
+                "upload",
+                "--sign",
+                "cache/iso/anatase.iso",
+                "isos/anatase.iso",
+                "anatase-44.20260627.iso",
+            ]
+        )
+
+        self.assertTrue(args.sign)
 
     def test_upload_file_parser_allows_missing_download_name(self) -> None:
         args = build_parser().parse_args(
@@ -211,6 +227,7 @@ class UploadFileTests(unittest.TestCase):
             Path("cache/iso/anatase.iso"),
             "isos/anatase.iso",
             "anatase-44.20260627.iso",
+            sign=False,
         )
 
     def test_upload_file_command_dispatches_upload_without_download_name(self) -> None:
@@ -231,6 +248,29 @@ class UploadFileTests(unittest.TestCase):
             Path("cache/iso/anatase.iso"),
             "isos/anatase.iso",
             None,
+            sign=False,
+        )
+
+    def test_upload_file_command_dispatches_sign(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "file",
+                "upload",
+                "--sign",
+                "cache/iso/anatase.iso",
+                "isos/anatase.iso",
+            ]
+        )
+
+        with patch("ludos.__main__.upload_file", return_value=0) as upload:
+            self.assertEqual(args.func(args), 0)
+
+        upload.assert_called_once_with(
+            Path("cache/iso/anatase.iso"),
+            "isos/anatase.iso",
+            None,
+            sign=True,
         )
 
     def test_upload_file_command_dispatches_delete(self) -> None:
@@ -369,6 +409,83 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(len(lines), 20)
         self.assertEqual(lines[0], f"{digest} anatase-44.20260627.iso")
         self.assertEqual(lines[-1], f"{18:064x} old-18.iso")
+
+    def test_upload_sign_uploads_detached_signatures_and_reuses_digest(self) -> None:
+        client = FakeS3Client()
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "anatase.iso"
+            path.write_bytes(b"installer")
+            digest = hashlib.sha256(b"installer").hexdigest()
+
+            with (
+                patch("ludos.upload.file.gpg_config_from_env", return_value=object()),
+                patch(
+                    "ludos.upload.file.sign_detached_digest",
+                    return_value=b"detached signature",
+                ) as sign_detached,
+            ):
+                upload_file(
+                    path,
+                    "isos/anatase.iso",
+                    "anatase-44.20260627.iso",
+                    sign=True,
+                    environ=ENV,
+                    client=client,
+                )
+
+        signed_digest = sign_detached.call_args.args[0]
+        self.assertEqual(signed_digest.hexdigest(), digest)
+        self.assertEqual(
+            [
+                (put["Key"], put["ContentType"], put["Body"])
+                for put in client.puts
+                if str(put["Key"]).endswith(".sig")
+            ],
+            [
+                (
+                    "isos/anatase.iso.sig",
+                    "application/octet-stream",
+                    b"detached signature",
+                ),
+                (
+                    "isos/anatase-44.20260627.iso.sig",
+                    "application/octet-stream",
+                    b"detached signature",
+                ),
+            ],
+        )
+
+    def test_upload_sign_without_download_name_uploads_one_signature(self) -> None:
+        client = FakeS3Client()
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "anatase.iso"
+            path.write_bytes(b"installer")
+
+            with (
+                patch("ludos.upload.file.gpg_config_from_env", return_value=object()),
+                patch(
+                    "ludos.upload.file.sign_detached_digest",
+                    return_value=b"detached signature",
+                ),
+            ):
+                upload_file(
+                    path,
+                    "isos/anatase.iso",
+                    sign=True,
+                    environ=ENV,
+                    client=client,
+                )
+
+        self.assertEqual(
+            [
+                put["Key"]
+                for put in client.puts
+                if str(put["Key"]).endswith(".sig")
+            ],
+            ["isos/anatase.iso.sig"],
+        )
 
     def test_delete_file_does_not_touch_sha256sums(self) -> None:
         client = FakeS3Client(
