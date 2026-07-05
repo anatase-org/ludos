@@ -722,6 +722,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not mount or enable shared ccache/sccache directories for builder runs.",
     )
+    prepare_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Include already-built final images and flatpaks in the CI metadata.",
+    )
     prepare_parser.set_defaults(func=ci_command)
 
     cleanup = subcommands.add_parser(
@@ -1079,6 +1084,7 @@ def ci_command(args: argparse.Namespace) -> int:
             cache_version=args.version,
             cache_only=args.cache,
             ccache=not args.no_ccache,
+            full=args.full,
         )
         return 0
     raise ConfigError(f"unknown ci action: {args.ci_action}")

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import yaml
 
@@ -35,6 +35,7 @@ class CiParserTests(unittest.TestCase):
                 "--version",
                 "20260629",
                 "--no-ccache",
+                "--full",
                 "anatase.yml",
             ]
         )
@@ -45,6 +46,7 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.version, "20260629")
         self.assertTrue(args.cache)
         self.assertTrue(args.no_ccache)
+        self.assertTrue(args.full)
 
     def test_ci_command_calls_prepare_ci(self) -> None:
         args = build_parser().parse_args(
@@ -72,6 +74,7 @@ class CiParserTests(unittest.TestCase):
             cache_version="20260629",
             cache_only=True,
             ccache=False,
+            full=False,
         )
 
 
@@ -133,7 +136,12 @@ class PrepareCiTests(unittest.TestCase):
                 manifest_path=manifest,
                 cache_only=True,
             )
-            image_exists.assert_called_once_with(context.podman, plan.output_image)
+            image_exists.assert_has_calls(
+                [
+                    call(context.podman, plan.output_image),
+                    call(context.podman, metadata.output_image),
+                ]
+            )
             remove_tree.assert_called_once_with(
                 context.dnf_workspace_dir,
                 podman=context.podman,
@@ -204,7 +212,7 @@ class PrepareCiTests(unittest.TestCase):
                 "kate.spec",
             )
 
-    def test_prepare_ci_drops_already_built_flatpaks(self) -> None:
+    def test_prepare_ci_drops_already_built_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             manifest = root / "anatase.yml"
@@ -232,7 +240,40 @@ class PrepareCiTests(unittest.TestCase):
                 output = prepare_ci((manifest,), cache_dir=cache)
 
             data = yaml.safe_load(output.read_text(encoding="utf-8"))
+            self.assertEqual(data["images"], {})
             self.assertEqual(data["flatpaks"], {})
+
+    def test_prepare_ci_full_keeps_already_built_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+            context = self._context(root)
+            metadata = self._metadata(root, context)
+            plan = self._flatpak_plan(root, cache)
+
+            with (
+                patch("ludos.ci.resolve_build_manifest_context", return_value=context),
+                patch(
+                    "ludos.ci.resolve_build_manifests_from_contexts",
+                    return_value=(metadata,),
+                ),
+                patch(
+                    "ludos.ci.plan_manifest_flatpaks_with_context",
+                    return_value=(plan,),
+                ),
+                patch("ludos.ci._image_exists", return_value=True) as image_exists,
+                patch("ludos.ci.build_package_card_images"),
+                patch("ludos.ci._remove_tree"),
+                patch("ludos.ci.log"),
+            ):
+                output = prepare_ci((manifest,), cache_dir=cache, full=True)
+
+            data = yaml.safe_load(output.read_text(encoding="utf-8"))
+            self.assertIn("f44-anatase", data["images"])
+            self.assertIn("f44-kate-output", data["flatpaks"])
+            image_exists.assert_not_called()
 
     def test_prepare_ci_keeps_existing_output_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

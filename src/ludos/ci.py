@@ -53,6 +53,7 @@ def prepare_ci(
     cache_version: str | None = None,
     cache_only: bool = False,
     ccache: bool = True,
+    full: bool = False,
 ) -> Path:
     if not manifest_paths:
         raise ConfigError("at least one manifest is required")
@@ -87,7 +88,7 @@ def prepare_ci(
                 manifest_path=manifest_path,
                 cache_only=cache_only,
             )
-            if not _image_exists(context.podman, plan.output_image)
+            if full or not _image_exists(context.podman, plan.output_image)
         )
         output = cache_root / "ci" / "build.yml"
         _build_output, encoded_output = _write_ci_build_manifest(
@@ -95,6 +96,7 @@ def prepare_ci(
             manifest_contexts=tuple(manifest_contexts),
             metadata=metadata,
             flatpaks=flatpaks,
+            full=full,
         )
         log(f"Wrote CI build manifest: {output}")
         log(
@@ -128,6 +130,7 @@ def _write_ci_build_manifest(
     manifest_contexts: tuple[tuple[Path, ResolvedManifestContext], ...],
     metadata: tuple[ResolvedBuildMetadata, ...],
     flatpaks: tuple[dict[str, Any], ...],
+    full: bool = False,
 ) -> tuple[Path, Path]:
     payload = {
         "version": 1,
@@ -139,6 +142,11 @@ def _write_ci_build_manifest(
             for (manifest_path, _context), manifest_metadata in zip(
                 manifest_contexts,
                 metadata,
+            )
+            if full
+            or not _image_exists(
+                manifest_metadata.podman,
+                manifest_metadata.output_image,
             )
         },
         "flatpaks": {
