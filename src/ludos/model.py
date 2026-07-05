@@ -28,11 +28,19 @@ class FlatpakGpgConfig:
 
 
 @dataclass(frozen=True)
+class OciCosignConfig:
+    registry: str = ""
+    identity: str = ""
+    verify: str = ""
+
+
+@dataclass(frozen=True)
 class Project:
     name: str
     root: Path
     flatpak_images: FlatpakImagesConfig = FlatpakImagesConfig()
     flatpak_gpg: FlatpakGpgConfig = FlatpakGpgConfig()
+    oci_cosign: OciCosignConfig = OciCosignConfig()
 
     @classmethod
     def from_file(cls, path: Path) -> "Project":
@@ -49,6 +57,7 @@ class Project:
             root=root,
             flatpak_images=_flatpak_images_config(data, path),
             flatpak_gpg=_flatpak_gpg_config(data, path),
+            oci_cosign=_oci_cosign_config(data, path),
         )
 
 
@@ -551,6 +560,34 @@ def _flatpak_gpg_config(data: dict[str, Any], path: Path) -> FlatpakGpgConfig:
         identity=identity,
         lookaside=lookaside,
         verify=_optional_string(gpg, "verify", path).strip(),
+    )
+
+
+def _oci_cosign_config(data: dict[str, Any], path: Path) -> OciCosignConfig:
+    oci = data.get("oci")
+    if oci is None:
+        return OciCosignConfig()
+    if not isinstance(oci, dict):
+        raise ConfigError(f"{path}: 'oci' must be a mapping")
+    allowed_oci = {"cosign"}
+    for key in oci:
+        if key not in allowed_oci:
+            raise ConfigError(f"{path}: 'oci.{key}' is not supported")
+
+    cosign = oci.get("cosign")
+    if cosign is None:
+        return OciCosignConfig()
+    if not isinstance(cosign, dict):
+        raise ConfigError(f"{path}: 'oci.cosign' must be a mapping")
+    allowed_cosign = {"registry", "identity", "verify"}
+    for key in cosign:
+        if key not in allowed_cosign:
+            raise ConfigError(f"{path}: 'oci.cosign.{key}' is not supported")
+
+    return OciCosignConfig(
+        registry=_required_string(cosign, "registry", path).strip(),
+        identity=_required_string(cosign, "identity", path).strip(),
+        verify=_required_string(cosign, "verify", path).strip(),
     )
 
 

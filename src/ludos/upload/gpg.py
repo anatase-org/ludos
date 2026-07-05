@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from ..logging import stream
 from ..model import ConfigError
+from .sign_utils import GcloudKey, gcloud_sign, parse_gcloud_key_uri, run_streamed_command
 
 
 RSA_ALGORITHM = 1
@@ -37,15 +37,6 @@ class PublicKey:
     @property
     def fingerprint_hex(self) -> str:
         return self.fingerprint.hex().upper()
-
-
-@dataclass(frozen=True)
-class GcloudKey:
-    project: str
-    location: str
-    keyring: str
-    key: str
-    version: str
 
 
 @dataclass(frozen=True)
@@ -172,7 +163,7 @@ def config_from_env(
         cert_path=cert_path,
         key_uri=key_uri,
         public_key=public_key,
-        gcloud_key=_parse_gcloud_key_uri(key_uri),
+        gcloud_key=parse_gcloud_key_uri(key_uri, env_name="LUDOS_GPG_KEY"),
     )
 
 
@@ -228,30 +219,11 @@ def _sign_digest_info(digest_info: bytes, config: GpgSigningConfig) -> bytes:
 
 
 def _gcloud_sign_digest_info(digest_info: bytes, config: GpgSigningConfig) -> bytes:
-    key = config.gcloud_key
-    with tempfile.TemporaryDirectory(prefix="ludos-gpg-sign-") as tmp:
-        input_path = Path(tmp) / "digest-info"
-        signature_path = Path(tmp) / "signature"
-        input_path.write_bytes(digest_info)
-        command = [
-            "gcloud",
-            "kms",
-            "asymmetric-sign",
-            f"--project={key.project}",
-            f"--location={key.location}",
-            f"--keyring={key.keyring}",
-            f"--key={key.key}",
-            f"--input-file={input_path}",
-            f"--signature-file={signature_path}",
-            f"--version={key.version}",
-        ]
-        try:
-            _run_streamed_command(command)
-        except FileNotFoundError as exc:
-            raise ConfigError("gcloud must be installed to sign with LUDOS_GPG_KEY") from exc
-        except subprocess.CalledProcessError as exc:
-            raise ConfigError(f"gcloud KMS signing failed with exit code {exc.returncode}") from exc
-        return _decode_gcloud_signature(signature_path.read_bytes())
+    return gcloud_sign(
+        digest_info,
+        config.gcloud_key,
+        expected_length=RSA_SIGN_RAW_PKCS1_4096_BYTES,
+    )
 
 
 def _decode_gcloud_signature(data: bytes) -> bytes:
@@ -408,34 +380,6 @@ def _read_subpacket_length(data: bytes, offset: int) -> tuple[int, int]:
     if offset + 4 > len(data):
         return 0, offset
     return int.from_bytes(data[offset : offset + 4], "big"), offset + 4
-
-
-def _parse_gcloud_key_uri(value: str) -> GcloudKey:
-    if value.startswith("gcloud://"):
-        parts = value.removeprefix("gcloud://").strip("/").split("/")
-        version_label = "cryptoKeyVersions"
-    elif value.startswith("gcpkms://"):
-        parts = value.removeprefix("gcpkms://").strip("/").split("/")
-        version_label = "versions"
-    else:
-        raise ConfigError(
-            "only gcloud:// and gcpkms:// LUDOS_GPG_KEY values are supported"
-        )
-    expected = ("projects", "locations", "keyRings", "cryptoKeys")
-    if len(parts) != 10:
-        raise ConfigError("invalid Google Cloud KMS key path in LUDOS_GPG_KEY")
-    for index, label in enumerate(expected):
-        if parts[index * 2] != label or not parts[index * 2 + 1]:
-            raise ConfigError("invalid Google Cloud KMS key path in LUDOS_GPG_KEY")
-    if parts[8] != version_label or not parts[9]:
-        raise ConfigError("invalid Google Cloud KMS key version in LUDOS_GPG_KEY")
-    return GcloudKey(
-        project=parts[1],
-        location=parts[3],
-        keyring=parts[5],
-        key=parts[7],
-        version=parts[9],
-    )
 
 
 def _packet(tag: int, body: bytes) -> bytes:
@@ -598,21 +542,4 @@ def _run_gpg(command: list[str]) -> None:
 
 
 def _run_streamed_command(command: list[str]) -> None:
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    try:
-        assert process.stdout is not None
-        for line in process.stdout:
-            stream(line)
-        returncode = process.wait()
-    finally:
-        if process.stdout is not None:
-            process.stdout.close()
-        if process.poll() is None:
-            process.terminate()
-    if returncode != 0:
-        raise subprocess.CalledProcessError(returncode, command)
+    run_streamed_command(command)

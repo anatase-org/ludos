@@ -16,6 +16,7 @@ from ludos.model import (
     ConfigError,
     FlatpakGpgConfig,
     FlatpakImagesConfig,
+    OciCosignConfig,
     validate_manifest,
 )
 from ludos.upload.common import REGISTRY_IMMUTABLE_CACHE_CONTROL
@@ -291,11 +292,19 @@ class UploadFlatpaksTests(unittest.TestCase):
                         root / "cache" / "flatpaks" / "kate-f44-x86_64",
                         "flatpaks/kate",
                         ("f44-x86_64",),
+                        environ=None,
+                        client=None,
+                        project_root=root,
+                        cosign_config=OciCosignConfig(),
                     ),
                     call(
                         root / "cache" / "flatpaks" / "ark-f44-x86_64",
                         "flatpaks/ark",
                         ("f44-x86_64",),
+                        environ=None,
+                        client=None,
+                        project_root=root,
+                        cosign_config=OciCosignConfig(),
                     ),
                 ],
             )
@@ -325,6 +334,25 @@ class UploadFlatpaksTests(unittest.TestCase):
                 manifest,
                 cache_dir=root / "cache",
                 cache_only=True,
+            )
+
+    def test_upload_flatpaks_ignores_project_oci_cosign(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+            _write_project_cosign(root)
+
+            with _mock_upload_deps() as deps:
+                self.assertEqual(upload_flatpaks(manifest, tuple(), False), 0)
+
+            deps.upload_oci.assert_called_once_with(
+                root / "cache" / "flatpaks" / "kate-f44-x86_64",
+                "flatpaks/kate",
+                ("f44-x86_64",),
+                environ=None,
+                client=None,
+                project_root=root,
+                cosign_config=OciCosignConfig(),
             )
 
     def test_export_flatpak_oci_images_returns_refs_and_image_ids(self) -> None:
@@ -384,6 +412,10 @@ class UploadFlatpaksTests(unittest.TestCase):
                 export_dir,
                 "flatpaks/ark",
                 ("f44-x86_64",),
+                environ=None,
+                client=None,
+                project_root=root,
+                cosign_config=OciCosignConfig(),
             )
 
     def test_upload_flatpaks_rejects_missing_local_image_without_build(self) -> None:
@@ -601,6 +633,10 @@ class UploadFlatpaksTests(unittest.TestCase):
                 export_dir,
                 "flatpaks/kate",
                 ("f44-x86_64",),
+                environ=ENV,
+                client=client,
+                project_root=root,
+                cosign_config=OciCosignConfig(),
             )
             self.assertEqual(
                 [(put["Key"], put["ContentType"], put["Body"]) for put in client.puts],
@@ -827,8 +863,22 @@ class UploadFlatpaksTests(unittest.TestCase):
         self.assertEqual(
             shake.call_args_list,
             [
-                call("flatpaks/kate", dry_run=False),
-                call("flatpaks/ark", dry_run=False),
+                call(
+                    "flatpaks/kate",
+                    dry_run=False,
+                    environ=None,
+                    client=None,
+                    project_root=root,
+                    cosign_config=OciCosignConfig(),
+                ),
+                call(
+                    "flatpaks/ark",
+                    dry_run=False,
+                    environ=None,
+                    client=None,
+                    project_root=root,
+                    cosign_config=OciCosignConfig(),
+                ),
             ],
         )
 
@@ -847,7 +897,14 @@ class UploadFlatpaksTests(unittest.TestCase):
                     0,
                 )
 
-        shake.assert_called_once_with("flatpaks/ark", dry_run=True)
+        shake.assert_called_once_with(
+            "flatpaks/ark",
+            dry_run=True,
+            environ=None,
+            client=None,
+            project_root=root,
+            cosign_config=OciCosignConfig(),
+        )
 
     def test_tree_shake_flatpaks_prunes_unreferenced_signatures(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -924,7 +981,12 @@ class UploadFlatpaksTests(unittest.TestCase):
             events = []
             manifest_digests = []
 
-            def upload(path: Path, ref: str, tags: tuple[str, ...]) -> int:
+            def upload(
+                path: Path,
+                ref: str,
+                tags: tuple[str, ...],
+                **_kwargs: object,
+            ) -> int:
                 events.append(("upload", ref, tags))
                 index = json.loads((path / "index.json").read_text(encoding="utf-8"))
                 manifest_desc = index["manifests"][0]
@@ -1072,7 +1134,12 @@ class UploadFlatpaksTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def upload(path: Path, _ref: str, _tags: tuple[str, ...]) -> int:
+            def upload(
+                path: Path,
+                _ref: str,
+                _tags: tuple[str, ...],
+                **_kwargs: object,
+            ) -> int:
                 index = json.loads((path / "index.json").read_text(encoding="utf-8"))
                 manifest_desc = index["manifests"][0]
                 manifest_blob = json.loads(
@@ -1197,6 +1264,24 @@ def _write_project_gpg(root: Path, *, verify: str = "./keys/test.pub.asc") -> No
     )
 
 
+def _write_project_cosign(root: Path) -> None:
+    (root / "ludos.yml").write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "name: Test",
+                "oci:",
+                "  cosign:",
+                "    registry: https://i.example.test/",
+                "    identity: cosign.example.test",
+                "    verify: root.pem",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def _manifest_body(config_digest: str) -> bytes:
     return (
         json.dumps(
@@ -1227,6 +1312,7 @@ def _resolved_context(manifest: Path, root: Path, cache_dir: Path) -> object:
         podman="/usr/bin/podman",
         flatpak_images=FlatpakImagesConfig(),
         flatpak_gpg=FlatpakGpgConfig(),
+        oci_cosign=OciCosignConfig(),
         dnf_workspace_dir=root / "dnf-workspace",
     )
 

@@ -19,6 +19,7 @@ from .model import (
     FlatpakGpgConfig,
     FlatpakImagesConfig,
     ManifestValidation,
+    OciCosignConfig,
     Project,
     validate_manifest,
 )
@@ -57,6 +58,7 @@ class ResolvedManifestContext:
     repo_images: tuple[str, ...]
     flatpak_images: FlatpakImagesConfig
     flatpak_gpg: FlatpakGpgConfig
+    oci_cosign: OciCosignConfig
 
 
 def resolve_manifest_context(
@@ -95,7 +97,7 @@ def resolve_manifest_context(
         raise ConfigError(f"{manifest_path}: missing card definitions: {missing}")
 
     root_dir = manifest_path.resolve().parent
-    flatpak_images, flatpak_gpg = _project_flatpak_config(root_dir)
+    project_config = _project_upload_config(root_dir)
     image = _cache_name(manifest_path.resolve().stem, "image")
     manifest_env = {key: str(value) for key, value in validation.manifest.env.items()}
     local_values = _load_dotenv(root_dir / ".env")
@@ -296,17 +298,23 @@ def resolve_manifest_context(
         podman=str(podman),
         buildah=buildah,
         repo_images=tuple(repo_images),
-        flatpak_images=flatpak_images,
-        flatpak_gpg=flatpak_gpg,
+        flatpak_images=project_config.flatpak_images,
+        flatpak_gpg=project_config.flatpak_gpg,
+        oci_cosign=project_config.oci_cosign,
     )
 
 
-def _project_flatpak_config(root_dir: Path) -> tuple[FlatpakImagesConfig, FlatpakGpgConfig]:
+def _project_upload_config(root_dir: Path) -> Project:
     project_config = root_dir / "ludos.yml"
     if not project_config.exists():
-        return FlatpakImagesConfig(), FlatpakGpgConfig()
-    project = Project.from_file(project_config)
-    return project.flatpak_images, project.flatpak_gpg
+        return Project(
+            name=root_dir.name,
+            root=root_dir,
+            flatpak_images=FlatpakImagesConfig(),
+            flatpak_gpg=FlatpakGpgConfig(),
+            oci_cosign=OciCosignConfig(),
+        )
+    return Project.from_file(project_config)
 
 
 def _load_dotenv(path: Path) -> dict[str, str]:

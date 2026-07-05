@@ -360,7 +360,7 @@ class UploadGpgTests(unittest.TestCase):
             )
             signature_file.write_bytes(b"\x81" + b"\x00" * 511)
 
-        with patch("ludos.upload.gpg._run_streamed_command", side_effect=run):
+        with patch("ludos.upload.sign_utils.run_streamed_command", side_effect=run):
             self.assertEqual(
                 gpg._gcloud_sign_digest_info(b"digest-info", config),
                 b"\x81" + b"\x00" * 511,
@@ -370,8 +370,8 @@ class UploadGpgTests(unittest.TestCase):
         process = _FakeProcess("line one\nline two\n")
 
         with (
-            patch("ludos.upload.gpg.subprocess.Popen", return_value=process),
-            patch("ludos.upload.gpg.stream") as stream,
+            patch("ludos.upload.sign_utils.subprocess.Popen", return_value=process),
+            patch("ludos.upload.sign_utils.stream") as stream,
         ):
             gpg._run_streamed_command(["gpg", "--version"])
 

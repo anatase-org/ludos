@@ -9,13 +9,20 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..logging import log, piter, warning
-from ..model import ConfigError
+from ..model import ConfigError, OciCosignConfig, Project
 from .common import (
     REGISTRY_IMMUTABLE_CACHE_CONTROL,
     REGISTRY_SHORT_CACHE_CONTROL,
     _client_error_code,
     _create_s3_client,
     _s3_config_from_env,
+)
+from .cosign import (
+    config_from_env as cosign_config_from_env,
+    image_digest_reference,
+    sign_oci_manifest,
+    upload_cosign_artifacts,
+    verify_cosign_signature,
 )
 
 
@@ -80,6 +87,8 @@ def upload_oci(
     *,
     environ: Mapping[str, str] | None = None,
     client: Any | None = None,
+    project_root: Path | None = None,
+    cosign_config: OciCosignConfig | None = None,
 ) -> int:
     source = Path(path)
     repo_ref = _validate_ref(ref)
@@ -89,6 +98,14 @@ def upload_oci(
     config = _s3_config_from_env(environ)
     s3 = client if client is not None else _create_s3_client(config, environ)
     bucket = config.bucket
+    cosign = _resolve_oci_cosign_config(project_root, cosign_config)
+    signing_config = None
+    if _cosign_enabled(cosign):
+        signing_config = cosign_config_from_env(
+            cosign,
+            project_root=project_root,
+            environ=environ,
+        )
 
     log(f"Uploading OCI repository: {repo_ref}")
     total_bytes = (
@@ -139,6 +156,33 @@ def upload_oci(
             overall,
             object_type="manifest",
         )
+
+        if _cosign_enabled(cosign):
+            signing_config, artifacts = sign_oci_manifest(
+                repo=repo_ref,
+                manifest_digest=layout.manifest.digest,
+                manifest_media_type=layout.manifest.media_type,
+                manifest_size=layout.manifest.size,
+                cosign=cosign,
+                project_root=project_root,
+                environ=environ,
+                signing_config=signing_config,
+            )
+            upload_cosign_artifacts(
+                s3,
+                bucket,
+                repo_ref,
+                layout.manifest.digest,
+                artifacts,
+            )
+            verify_cosign_signature(
+                image=image_digest_reference(
+                    cosign.registry,
+                    repo_ref,
+                    layout.manifest.digest,
+                ),
+                config=signing_config,
+            )
 
         for tag in tag_list:
             tag_key = _tag_key(repo_ref, tag)
@@ -238,6 +282,8 @@ def tree_shake_oci(
     dry_run: bool = False,
     environ: Mapping[str, str] | None = None,
     client: Any | None = None,
+    project_root: Path | None = None,
+    cosign_config: OciCosignConfig | None = None,
 ) -> int:
     repo_ref = _validate_ref(ref)
     config = _s3_config_from_env(environ)
@@ -245,10 +291,26 @@ def tree_shake_oci(
 
     manifest_keys = _list_object_keys(s3, config.bucket, f"v2/{repo_ref}/manifests/")
     references = _referenced_oci_digests(s3, config.bucket, repo_ref, manifest_keys)
+    _add_live_cosign_references(
+        s3,
+        config.bucket,
+        repo_ref,
+        references,
+        manifest_keys=manifest_keys,
+        dry_run=dry_run,
+    )
     for key, digest in _oci_digest_manifest_keys(manifest_keys, repo_ref):
         if digest in references.manifest_digests:
             continue
         _delete_manifest(s3, config.bucket, key, dry_run=dry_run)
+    _delete_stale_cosign_legacy_tags(
+        s3,
+        config.bucket,
+        repo_ref,
+        manifest_keys,
+        references,
+        dry_run=dry_run,
+    )
     for key in _list_object_keys(s3, config.bucket, f"v2/{repo_ref}/blobs/"):
         digest = key.rsplit("/", 1)[-1]
         if digest in references.blob_digests:
@@ -269,6 +331,163 @@ def referenced_oci_manifest_digests(
     manifest_keys = _list_object_keys(s3, config.bucket, f"v2/{repo_ref}/manifests/")
     references = _referenced_oci_digests(s3, config.bucket, repo_ref, manifest_keys)
     return references.manifest_digests
+
+
+def _resolve_oci_cosign_config(
+    project_root: Path | None,
+    cosign_config: OciCosignConfig | None,
+) -> OciCosignConfig:
+    if cosign_config is not None:
+        return cosign_config
+    if project_root is None:
+        return OciCosignConfig()
+    project_config = Path(project_root) / "ludos.yml"
+    if not project_config.exists():
+        return OciCosignConfig()
+    return Project.from_file(project_config).oci_cosign
+
+
+def _cosign_enabled(config: OciCosignConfig) -> bool:
+    return bool(config.registry or config.identity or config.verify)
+
+
+def _add_live_cosign_references(
+    client: Any,
+    bucket: str,
+    ref: str,
+    references: OciReferences,
+    *,
+    manifest_keys: tuple[str, ...],
+    dry_run: bool,
+) -> None:
+    for key, subject_digest in _cosign_legacy_signature_keys(manifest_keys, ref):
+        if subject_digest not in references.manifest_digests:
+            continue
+        manifest = _loads_json(
+            _read_s3_object(client, bucket, key),
+            f"cosign legacy manifest {key}",
+        )
+        _add_manifest_blob_references(manifest, references, key)
+
+    for key, subject_digest in _cosign_referrers_keys(
+        _list_object_keys(client, bucket, f"v2/{ref}/referrers/"),
+        ref,
+    ):
+        if subject_digest not in references.manifest_digests:
+            _delete_referrers(client, bucket, key, dry_run=dry_run)
+            continue
+        index = _loads_json(
+            _read_s3_object(client, bucket, key),
+            f"cosign referrers index {key}",
+        )
+        manifests = index.get("manifests")
+        if not isinstance(manifests, list):
+            raise ConfigError(f"cosign referrers index {key} must contain manifests")
+        for item in manifests:
+            descriptor = _descriptor(
+                item,
+                default_media_type=DEFAULT_MANIFEST_MEDIA_TYPE,
+                what=f"cosign referrer descriptor {key}",
+            )
+            references.manifest_digests.add(descriptor.digest)
+            manifest_key = _manifest_key(ref, descriptor.digest)
+            manifest = _loads_json(
+                _read_s3_object(client, bucket, manifest_key),
+                f"cosign referrer manifest {manifest_key}",
+            )
+            _add_manifest_blob_references(manifest, references, manifest_key)
+
+
+def _delete_stale_cosign_legacy_tags(
+    client: Any,
+    bucket: str,
+    ref: str,
+    manifest_keys: tuple[str, ...],
+    references: OciReferences,
+    *,
+    dry_run: bool,
+) -> None:
+    for key, subject_digest in _cosign_legacy_signature_keys(manifest_keys, ref):
+        if subject_digest in references.manifest_digests:
+            continue
+        _delete_manifest(client, bucket, key, dry_run=dry_run)
+
+
+def _add_manifest_blob_references(
+    manifest: dict[str, Any],
+    references: OciReferences,
+    key: str,
+) -> None:
+    config = manifest.get("config")
+    if isinstance(config, dict) and "digest" in config:
+        descriptor = _descriptor(
+            config,
+            default_media_type=DEFAULT_CONFIG_MEDIA_TYPE,
+            what=f"manifest object {key} config",
+        )
+        references.blob_digests.add(descriptor.digest)
+    layers = manifest.get("layers")
+    if not isinstance(layers, list):
+        raise ConfigError(f"manifest object {key} must contain a layers list")
+    for index, layer in enumerate(layers):
+        descriptor = _descriptor(
+            layer,
+            default_media_type=DEFAULT_LAYER_MEDIA_TYPE,
+            what=f"manifest object {key} layer {index}",
+        )
+        references.blob_digests.add(descriptor.digest)
+
+
+def _cosign_legacy_signature_keys(
+    keys: tuple[str, ...],
+    ref: str,
+) -> tuple[tuple[str, str], ...]:
+    results = []
+    prefix = f"v2/{ref}/manifests/"
+    for key, name in _oci_manifest_names(keys, ref):
+        if not key.startswith(prefix):
+            continue
+        if not name.startswith("sha256-") or not name.endswith(".sig"):
+            continue
+        digest = name.removeprefix("sha256-").removesuffix(".sig")
+        if _SHA256_RE.match(digest):
+            results.append((key, f"sha256:{digest}"))
+    return tuple(results)
+
+
+def _cosign_referrers_keys(
+    keys: tuple[str, ...],
+    ref: str,
+) -> tuple[tuple[str, str], ...]:
+    prefix = f"v2/{ref}/referrers/"
+    results = []
+    for key in keys:
+        if not key.startswith(prefix):
+            continue
+        digest = key[len(prefix) :]
+        try:
+            _validate_digest(digest, f"cosign referrers object {key}")
+        except ConfigError:
+            continue
+        results.append((key, digest))
+    return tuple(results)
+
+
+def _delete_referrers(
+    client: Any,
+    bucket: str,
+    key: str,
+    *,
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        log(f"Would delete referrers: {_display_key(key)}")
+        return
+    log(f"Deleting referrers: {_display_key(key)}")
+    try:
+        client.delete_object(Bucket=bucket, Key=key)
+    except Exception as exc:
+        raise ConfigError(f"S3 delete failed for {key}: {exc}") from exc
 
 
 def update_flatpak_static_index(
@@ -576,7 +795,11 @@ def _oci_digest_manifest_keys(
 ) -> tuple[tuple[str, str], ...]:
     manifests: list[tuple[str, str]] = []
     for key, name in _oci_manifest_names(keys, ref):
-        if "/" in name or not name.startswith("sha"):
+        if "/" in name or not name.startswith("sha256:"):
+            continue
+        try:
+            _validate_digest(name, f"manifest key {key}")
+        except ConfigError:
             continue
         manifests.append((key, name))
     return tuple(manifests)

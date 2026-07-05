@@ -111,6 +111,75 @@ class CliProjectTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "flatpaks.gpg.surprise"):
                 Project.from_file(config)
 
+    def test_project_parser_accepts_oci_cosign(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "name: Test",
+                        "oci:",
+                        "  cosign:",
+                        "    registry: https://flatpaks.example.test/",
+                        "    identity: cosign.example.test",
+                        "    verify: ./keys/root.pem",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            project = Project.from_file(config)
+
+        self.assertEqual(project.oci_cosign.registry, "https://flatpaks.example.test/")
+        self.assertEqual(project.oci_cosign.identity, "cosign.example.test")
+        self.assertEqual(project.oci_cosign.verify, "./keys/root.pem")
+
+    def test_project_parser_rejects_incomplete_oci_cosign(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text(
+                "version: 1\noci:\n  cosign:\n    identity: cosign.example.test\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "'registry'"):
+                Project.from_file(config)
+
+            config.write_text(
+                "version: 1\noci:\n  cosign:\n    registry: https://example.test/\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "'identity'"):
+                Project.from_file(config)
+
+    def test_project_parser_rejects_unknown_oci_cosign_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "ludos.yml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "oci:",
+                        "  cosign:",
+                        "    registry: https://example.test/",
+                        "    identity: cosign.example.test",
+                        "    verify: ./keys/root.pem",
+                        "    surprise: nope",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "oci.cosign.surprise"):
+                Project.from_file(config)
+
     def test_build_from_subdirectory_uses_discovered_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             original_cwd = Path.cwd()

@@ -952,7 +952,12 @@ def registry_command(args: argparse.Namespace) -> int:
         )
     if args.registry_action == "oci":
         if args.registry_oci_action == "upload":
-            return upload_oci(args.local_oci_path, args.ref, tuple(args.tags))
+            return upload_oci(
+                args.local_oci_path,
+                args.ref,
+                tuple(args.tags),
+                project_root=_project_root(args),
+            )
         if args.registry_oci_action == "list":
             return list_oci_tags(args.ref)
         if args.registry_oci_action == "delete":
@@ -966,7 +971,11 @@ def registry_command(args: argparse.Namespace) -> int:
                 dry_run=args.dry_run,
             )
         if args.registry_oci_action == "tree-shake":
-            return tree_shake_oci(args.ref, dry_run=args.dry_run)
+            return tree_shake_oci(
+                args.ref,
+                dry_run=args.dry_run,
+                project_root=_project_root(args),
+            )
         raise ConfigError(f"unknown registry oci action: {args.registry_oci_action}")
     raise ConfigError(f"unknown registry action: {args.registry_action}")
 

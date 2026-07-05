@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import call, patch
 
 from ludos.__main__ import build_parser
-from ludos.model import ConfigError
+from ludos.model import ConfigError, OciCosignConfig
 from ludos.upload.registry import (
     DEFAULT_CONFIG_MEDIA_TYPE,
     DEFAULT_LAYER_MEDIA_TYPE,
@@ -24,8 +24,12 @@ from ludos.upload.registry import (
     update_flatpak_static_index,
     upload_oci,
 )
+from ludos.upload.cosign import build_cosign_artifacts
 
 from .test_upload_file import ENV, FakeS3Client
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class UploadRegistryTests(unittest.TestCase):
@@ -85,6 +89,7 @@ class UploadRegistryTests(unittest.TestCase):
             Path("cache/oci/anatase"),
             "images/anatase",
             ("latest", "f44"),
+            project_root=Path.cwd(),
         )
 
     def test_upload_oci_parser_requires_tag(self) -> None:
@@ -243,7 +248,11 @@ class UploadRegistryTests(unittest.TestCase):
         with patch("ludos.__main__.tree_shake_oci", return_value=0) as tree_shake:
             self.assertEqual(args.func(args), 0)
 
-        tree_shake.assert_called_once_with("images/anatase", dry_run=True)
+        tree_shake.assert_called_once_with(
+            "images/anatase",
+            dry_run=True,
+            project_root=Path.cwd(),
+        )
 
     def test_registry_flatpak_refresh_command_dispatches(self) -> None:
         args = build_parser().parse_args(
@@ -498,6 +507,131 @@ class UploadRegistryTests(unittest.TestCase):
                 "v2/images/anatase/tags/list",
             ],
         )
+
+    def test_upload_oci_cosign_missing_env_fails_before_upload(self) -> None:
+        client = FakeS3Client()
+        with tempfile.TemporaryDirectory() as temp:
+            layout = _create_oci_layout(Path(temp))
+
+            with self.assertRaisesRegex(ConfigError, "LUDOS_COSIGN_KEY"):
+                upload_oci(
+                    layout.root,
+                    "images/anatase",
+                    ("latest",),
+                    environ=ENV,
+                    client=client,
+                    project_root=Path(temp),
+                    cosign_config=_cosign_config(),
+                )
+
+        self.assertEqual(client.uploads, [])
+        self.assertEqual(client.puts, [])
+
+    def test_upload_oci_cosign_signs_verifies_before_tag_publish(self) -> None:
+        client = FakeS3Client()
+        events = []
+
+        def sign(**kwargs: object) -> tuple[object, object]:
+            events.append("sign")
+            self.assertIsNotNone(kwargs["signing_config"])
+            return object(), object()
+
+        def upload_artifacts(*_args: object) -> None:
+            events.append("upload-cosign")
+
+        def verify(*_args: object, **_kwargs: object) -> None:
+            events.append("verify")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout = _create_oci_layout(root / "layout")
+            cert = ROOT / "cards/base/atomic/keys/anatase-c002.pem"
+            ca = ROOT / "cards/base/atomic/keys/anatase-cosign-root.pem"
+
+            with (
+                patch("ludos.upload.registry.sign_oci_manifest", side_effect=sign),
+                patch(
+                    "ludos.upload.registry.upload_cosign_artifacts",
+                    side_effect=upload_artifacts,
+                ),
+                patch("ludos.upload.registry.verify_cosign_signature", side_effect=verify),
+            ):
+                self.assertEqual(
+                    upload_oci(
+                        layout.root,
+                        "images/anatase",
+                        ("latest",),
+                        environ={
+                            **ENV,
+                            "LUDOS_COSIGN_KEY": (
+                                "gcpkms://projects/example/locations/global/"
+                                "keyRings/cosign/cryptoKeys/test/versions/1"
+                            ),
+                            "LUDOS_COSIGN_CERT": str(cert),
+                        },
+                        client=client,
+                        project_root=root,
+                        cosign_config=OciCosignConfig(
+                            registry="https://flatpaks.example.test/",
+                            identity="cosign.anatase.org",
+                            verify=str(ca),
+                        ),
+                    ),
+                    0,
+                )
+
+        self.assertEqual(events, ["sign", "upload-cosign", "verify"])
+        self.assertEqual(
+            [item["Key"] for item in client.puts[-2:]],
+            ["v2/images/anatase/manifests/latest", "v2/images/anatase/tags/list"],
+        )
+
+    def test_upload_oci_cosign_verify_failure_skips_tag_publish(self) -> None:
+        client = FakeS3Client()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout = _create_oci_layout(root / "layout")
+            cert = ROOT / "cards/base/atomic/keys/anatase-c002.pem"
+            ca = ROOT / "cards/base/atomic/keys/anatase-cosign-root.pem"
+
+            with (
+                patch(
+                    "ludos.upload.registry.sign_oci_manifest",
+                    return_value=(object(), object()),
+                ),
+                patch("ludos.upload.registry.upload_cosign_artifacts"),
+                patch(
+                    "ludos.upload.registry.verify_cosign_signature",
+                    side_effect=ConfigError("cosign verification failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(ConfigError, "cosign verification"):
+                    upload_oci(
+                        layout.root,
+                        "images/anatase",
+                        ("latest",),
+                        environ={
+                            **ENV,
+                            "LUDOS_COSIGN_KEY": (
+                                "gcpkms://projects/example/locations/global/"
+                                "keyRings/cosign/cryptoKeys/test/versions/1"
+                            ),
+                            "LUDOS_COSIGN_CERT": str(cert),
+                        },
+                        client=client,
+                        project_root=root,
+                        cosign_config=OciCosignConfig(
+                            registry="https://flatpaks.example.test/",
+                            identity="cosign.anatase.org",
+                            verify=str(ca),
+                        ),
+                    )
+
+        self.assertNotIn(
+            ("put_object", "v2/images/anatase/manifests/latest"),
+            client.calls,
+        )
+        self.assertNotIn(("put_object", "v2/images/anatase/tags/list"), client.calls)
 
     def test_upload_oci_logs_only_uploaded_layer_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -964,6 +1098,10 @@ class UploadRegistryTests(unittest.TestCase):
                 },
                 {
                     "Bucket": "anatase-artifacts",
+                    "Prefix": "v2/images/anatase/referrers/",
+                },
+                {
+                    "Bucket": "anatase-artifacts",
                     "Prefix": "v2/images/anatase/blobs/",
                 },
             ],
@@ -1024,6 +1162,159 @@ class UploadRegistryTests(unittest.TestCase):
                     f"Would delete blob: "
                     f"v2/images/anatase/blobs/sha256:{'3' * 11}..."
                 ),
+            ],
+        )
+
+    def test_tree_shake_oci_keeps_live_cosign_artifacts(self) -> None:
+        config_digest = "sha256:" + "1" * 64
+        layer_digest = "sha256:" + "2" * 64
+        unused_digest = "sha256:" + "3" * 64
+        manifest = _manifest_bytes(config_digest, layer_digest)
+        manifest_digest = f"sha256:{hashlib.sha256(manifest).hexdigest()}"
+        artifacts = build_cosign_artifacts(
+            payload=b"payload\n",
+            signature=b"signature",
+            certificate="leaf\n",
+            manifest_digest=manifest_digest,
+            manifest_media_type=DEFAULT_MANIFEST_MEDIA_TYPE,
+            manifest_size=len(manifest),
+        )
+        subject_hex = manifest_digest.removeprefix("sha256:")
+        client = FakeS3Client(
+            {
+                ("anatase-artifacts", "v2/images/anatase/manifests/latest"): manifest,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/manifests/{manifest_digest}",
+                ): manifest,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/manifests/sha256-{subject_hex}.sig",
+                ): artifacts.legacy_manifest,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/manifests/{artifacts.referrer_manifest_digest}",
+                ): artifacts.referrer_manifest,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/referrers/{manifest_digest}",
+                ): artifacts.referrers_index,
+                ("anatase-artifacts", f"v2/images/anatase/blobs/{config_digest}"): b"c",
+                ("anatase-artifacts", f"v2/images/anatase/blobs/{layer_digest}"): b"l",
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{artifacts.config_digest}",
+                ): artifacts.config,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{artifacts.payload_digest}",
+                ): artifacts.payload,
+                ("anatase-artifacts", f"v2/images/anatase/blobs/{unused_digest}"): b"u",
+            }
+        )
+
+        self.assertEqual(
+            tree_shake_oci(
+                "images/anatase",
+                environ=ENV,
+                client=client,
+                cosign_config=_cosign_config(),
+            ),
+            0,
+        )
+
+        self.assertEqual(
+            [item["Key"] for item in client.deletes],
+            [f"v2/images/anatase/blobs/{unused_digest}"],
+        )
+
+    def test_tree_shake_oci_deletes_dead_cosign_artifacts(self) -> None:
+        live_config_digest = "sha256:" + "1" * 64
+        live_layer_digest = "sha256:" + "2" * 64
+        dead_config_digest = "sha256:" + "3" * 64
+        dead_layer_digest = "sha256:" + "4" * 64
+        live_manifest = _manifest_bytes(live_config_digest, live_layer_digest)
+        dead_manifest = _manifest_bytes(dead_config_digest, dead_layer_digest)
+        dead_digest = f"sha256:{hashlib.sha256(dead_manifest).hexdigest()}"
+        dead_hex = dead_digest.removeprefix("sha256:")
+        artifacts = build_cosign_artifacts(
+            payload=b"payload\n",
+            signature=b"signature",
+            certificate="leaf\n",
+            manifest_digest=dead_digest,
+            manifest_media_type=DEFAULT_MANIFEST_MEDIA_TYPE,
+            manifest_size=len(dead_manifest),
+        )
+        client = FakeS3Client(
+            {
+                (
+                    "anatase-artifacts",
+                    "v2/images/anatase/manifests/latest",
+                ): live_manifest,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/manifests/{dead_digest}",
+                ): dead_manifest,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/manifests/sha256-{dead_hex}.sig",
+                ): artifacts.legacy_manifest,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/manifests/{artifacts.referrer_manifest_digest}",
+                ): artifacts.referrer_manifest,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/referrers/{dead_digest}",
+                ): artifacts.referrers_index,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{live_config_digest}",
+                ): b"c",
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{live_layer_digest}",
+                ): b"l",
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{dead_config_digest}",
+                ): b"dc",
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{dead_layer_digest}",
+                ): b"dl",
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{artifacts.config_digest}",
+                ): artifacts.config,
+                (
+                    "anatase-artifacts",
+                    f"v2/images/anatase/blobs/{artifacts.payload_digest}",
+                ): artifacts.payload,
+            }
+        )
+
+        self.assertEqual(
+            tree_shake_oci(
+                "images/anatase",
+                environ=ENV,
+                client=client,
+                cosign_config=_cosign_config(),
+            ),
+            0,
+        )
+
+        self.assertCountEqual(
+            [item["Key"] for item in client.deletes],
+            [
+                f"v2/images/anatase/referrers/{dead_digest}",
+                f"v2/images/anatase/manifests/{dead_digest}",
+                f"v2/images/anatase/manifests/{artifacts.referrer_manifest_digest}",
+                f"v2/images/anatase/manifests/sha256-{dead_hex}.sig",
+                f"v2/images/anatase/blobs/{dead_config_digest}",
+                f"v2/images/anatase/blobs/{dead_layer_digest}",
+                f"v2/images/anatase/blobs/{artifacts.config_digest}",
+                f"v2/images/anatase/blobs/{artifacts.payload_digest}",
             ],
         )
 
@@ -1255,6 +1546,14 @@ def _flatpak_registry_objects(
             ): config_bytes,
         },
         manifest_bytes=manifest_bytes,
+    )
+
+
+def _cosign_config() -> OciCosignConfig:
+    return OciCosignConfig(
+        registry="https://flatpaks.example.test/",
+        identity="cosign.example.test",
+        verify="root.pem",
     )
 
 
