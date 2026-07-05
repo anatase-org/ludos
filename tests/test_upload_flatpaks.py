@@ -27,7 +27,7 @@ from ludos.upload.flatpaks import (
     upload_flatpaks,
     _flatpak_signature_payload,
 )
-from test_upload_file import ENV, FakeS3Client
+from .test_upload_file import ENV, FakeS3Client
 
 
 ROOT = Path(__file__).resolve().parents[2]

@@ -45,6 +45,7 @@ from ..model import (
     FlatpakImagesConfig,
     ManifestRuntime,
     ManifestValidation,
+    OciCosignConfig,
     Project,
     validate_manifest,
 )
@@ -169,7 +170,15 @@ def upload_flatpaks(
                 environ=environ,
                 client=client,
             )
-            upload_oci(target.export_dir, target.ref, (target.tag,))
+            upload_oci(
+                target.export_dir,
+                target.ref,
+                (target.tag,),
+                environ=environ,
+                client=client,
+                project_root=context.root_dir,
+                cosign_config=OciCosignConfig(),
+            )
             _upload_flatpak_icon(context, labels, environ=environ, client=client)
     finally:
         if resolved_context is not None:
@@ -234,10 +243,14 @@ def tree_shake_flatpaks(
         require_podman=False,
     )
     for target in _upload_targets(context, flatpaks, resolve_images=False):
-        if environ is None and client is None:
-            tree_shake_oci(target.ref, dry_run=dry_run)
-        else:
-            tree_shake_oci(target.ref, dry_run=dry_run, environ=environ, client=client)
+        tree_shake_oci(
+            target.ref,
+            dry_run=dry_run,
+            environ=environ,
+            client=client,
+            project_root=context.root_dir,
+            cosign_config=OciCosignConfig(),
+        )
         _tree_shake_flatpak_signatures(
             context,
             target,
@@ -283,7 +296,13 @@ def upload_dummy_runtime(
         oci_arch=_oci_arch(context.arch),
         author=_dummy_runtime_author(runtime),
     )
-    upload_oci(layout_dir, f"flatpaks/{runtime.repo}", (context.distro,))
+    upload_oci(
+        layout_dir,
+        f"flatpaks/{runtime.repo}",
+        (context.distro,),
+        project_root=context.root_dir,
+        cosign_config=OciCosignConfig(),
+    )
     return update_flatpak_static_index(context.distro)
 
 
