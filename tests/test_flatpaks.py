@@ -151,7 +151,6 @@ class FlatpakParserTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         build.assert_called_once_with(
             Path("anatase.yml"),
-            cards_dir=None,
             cache_dir=Path("cache"),
             cache_version="20260629",
             cache_only=True,

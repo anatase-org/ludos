@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import lzma
+import subprocess
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -9,16 +10,29 @@ from typing import Any
 import yaml
 
 from .build import (
+    BuildImagePlan,
+    PackageImagePlan,
     ResolvedBuildMetadata,
-    _cleanup_dnf_workspace_paths,
-    _ensure_image,
+    _create_builder_image,
+    _create_package_image,
+    _download_block_packages,
     _image_tag,
     _remove_tree,
-    build_package_card_images,
+    _require_buildah,
     resolve_build_manifest_context,
     resolve_build_manifests_from_contexts,
 )
-from .common import ResolvedManifestContext
+from .common import (
+    ResolvedManifestContext,
+    _apply_repo_priority as _apply_repo_priority_from_context,
+    _create_orchestrator_image,
+    _create_repo_image,
+    _extract_image_paths,
+    _image_exists as _local_image_exists,
+    _require_buildah as _require_context_buildah,
+    _run_streamed_command,
+    resolve_manifest_context,
+)
 from .flatpaks import FlatpakBuildPlan, plan_manifest_flatpaks_with_context
 from .logging import log
 from .model import ConfigError
@@ -48,10 +62,8 @@ _CiBuildManifestDumper.add_representer(
 def prepare_ci(
     manifest_paths: tuple[Path, ...],
     *,
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
-    cache_only: bool = False,
     ccache: bool = True,
     full: bool = False,
 ) -> Path:
@@ -59,65 +71,164 @@ def prepare_ci(
         raise ConfigError("at least one manifest is required")
 
     cache_root = _resolve_cache_root(manifest_paths, cache_dir)
-    dnf_workspace_dirs: list[Path] = []
     manifest_contexts: list[tuple[Path, ResolvedManifestContext]] = []
-    try:
-        for manifest_path in manifest_paths:
-            context = resolve_build_manifest_context(
+    for index, manifest_path in enumerate(manifest_paths):
+        workspace = _ci_dnf_workspace(cache_root, index, manifest_path)
+        _remove_tree(workspace, podman="podman")
+        context = resolve_build_manifest_context(
+            manifest_path,
+            cache_dir=cache_root,
+            cache_version=cache_version,
+            cache_only=True,
+            ccache=ccache,
+            dnf_workspace_dir=workspace,
+        )
+        manifest_contexts.append((manifest_path, context))
+
+    metadata = resolve_build_manifests_from_contexts(
+        tuple(manifest_contexts),
+        cache_only=False,
+    )
+    flatpaks = tuple(
+        _flatpak_entry(manifest_path, context, plan)
+        for manifest_path, context in manifest_contexts
+        for plan in plan_manifest_flatpaks_with_context(
+            context,
+            manifest_path=manifest_path,
+            cache_only=False,
+        )
+        if full
+        or not _ci_remote_image_exists(
+            context.podman,
+            plan.output_image,
+            getattr(context, "ci_registry", ""),
+        )
+    )
+    output = cache_root / "ci" / "build.yml"
+    _build_output, encoded_output = _write_ci_build_manifest(
+        output,
+        manifest_contexts=tuple(manifest_contexts),
+        metadata=metadata,
+        flatpaks=flatpaks,
+        full=full,
+    )
+    log(f"Wrote CI build manifest: {output}")
+    log(
+        f"Wrote encoded CI build manifest: {encoded_output} "
+        f"({_size_kib(encoded_output)} KiB)"
+    )
+    return output
+
+
+def init_ci(
+    manifest_paths: tuple[Path, ...],
+    *,
+    cache_dir: Path | None = None,
+    cache_version: str | None = None,
+    ccache: bool = True,
+) -> None:
+    if not manifest_paths:
+        raise ConfigError("at least one manifest is required")
+
+    cache_root = _resolve_cache_root(manifest_paths, cache_dir)
+    dnf_workspace_dirs: list[Path] = []
+    remote_exists_by_image: dict[str, bool] = {}
+    current_ci_registry = [""]
+
+    def image_exists(podman: str, image: str, ci_registry: str) -> bool:
+        current_ci_registry[0] = _require_ci_registry(ci_registry)
+        remote_exists = _ci_remote_image_exists(podman, image, ci_registry)
+        remote_exists_by_image[image] = remote_exists
+        if _local_image_exists(podman, image):
+            if not remote_exists:
+                _push_ci_image(podman, image, ci_registry)
+            return True
+        if remote_exists and not _is_orchestrator_image(image):
+            return True
+        return False
+
+    def create_orchestrator_image(**kwargs: Any) -> None:
+        _create_orchestrator_image(**kwargs)
+        if not remote_exists_by_image.get(str(kwargs["image"]), False):
+            _push_ci_image(
+                str(kwargs["podman"]),
+                str(kwargs["image"]),
+                current_ci_registry[0],
+            )
+
+    def create_repo_image(**kwargs: Any) -> None:
+        _create_repo_image(**kwargs)
+        if not remote_exists_by_image.get(str(kwargs["image"]), False):
+            _push_ci_image(
+                str(kwargs["podman"]),
+                str(kwargs["image"]),
+                current_ci_registry[0],
+            )
+
+    def extract_paths(podman: str, image: str, paths: dict[str, Path]) -> None:
+        if _local_image_exists(podman, image):
+            _extract_image_paths(podman, image, paths)
+
+    def apply_repo_priority(repo_file: Path, priority: int) -> None:
+        if repo_file.exists():
+            _apply_repo_priority_from_context(repo_file, priority)
+
+    for manifest_path in manifest_paths:
+        try:
+            resolve_manifest_context(
                 manifest_path,
-                cards_dir=cards_dir,
                 cache_dir=cache_root,
                 cache_version=cache_version,
-                cache_only=cache_only,
+                cache_only=False,
                 ccache=ccache,
                 dnf_workspace_dirs=dnf_workspace_dirs,
+                image_exists=image_exists,
+                create_orchestrator_image=create_orchestrator_image,
+                create_repo_image=create_repo_image,
+                extract_image_paths=extract_paths,
+                apply_repo_priority=apply_repo_priority,
+                require_buildah=_require_context_buildah,
             )
-            manifest_contexts.append((manifest_path, context))
+        finally:
+            for workspace in tuple(dnf_workspace_dirs):
+                _remove_tree(workspace)
+            dnf_workspace_dirs.clear()
 
-        metadata = resolve_build_manifests_from_contexts(
-            tuple(manifest_contexts),
-            cards_dir=cards_dir,
-            cache_only=cache_only,
-        )
-        build_package_card_images(metadata, cache_only=cache_only)
-        flatpaks = tuple(
-            _flatpak_entry(manifest_path, context, plan)
-            for manifest_path, context in manifest_contexts
-            for plan in plan_manifest_flatpaks_with_context(
-                context,
-                manifest_path=manifest_path,
-                cache_only=cache_only,
+
+def seed_ci(build_manifest: Path) -> None:
+    metadata = _read_seed_metadata(build_manifest)
+    for manifest in metadata:
+        _require_ci_registry(manifest.ci_registry)
+
+    seeded: set[str] = set()
+    for manifest in metadata:
+        for plan in manifest.package_images:
+            if not plan.packages or plan.image in seeded:
+                continue
+            _seed_image(
+                manifest.podman,
+                plan.image,
+                manifest.ci_registry,
+                lambda manifest=manifest, plan=plan: _create_seed_package_image(
+                    manifest,
+                    plan,
+                ),
             )
-            if full
-            or not _ensure_image(
-                context.podman,
-                plan.output_image,
-                getattr(context, "ci_registry", ""),
+            seeded.add(plan.image)
+
+        for plan in manifest.build_images:
+            if plan.builder_image in seeded:
+                continue
+            _seed_image(
+                manifest.podman,
+                plan.builder_image,
+                manifest.ci_registry,
+                lambda manifest=manifest, plan=plan: _create_seed_builder_image(
+                    manifest,
+                    plan,
+                ),
             )
-        )
-        output = cache_root / "ci" / "build.yml"
-        _build_output, encoded_output = _write_ci_build_manifest(
-            output,
-            manifest_contexts=tuple(manifest_contexts),
-            metadata=metadata,
-            flatpaks=flatpaks,
-            full=full,
-        )
-        log(f"Wrote CI build manifest: {output}")
-        log(
-            f"Wrote encoded CI build manifest: {encoded_output} "
-            f"({_size_kib(encoded_output)} KiB)"
-        )
-        return output
-    finally:
-        context_paths = {
-            context.dnf_workspace_dir
-            for _path, context in manifest_contexts
-        }
-        _cleanup_contexts(tuple(manifest_contexts))
-        _cleanup_dnf_workspace_paths(
-            tuple(path for path in dnf_workspace_dirs if path not in context_paths)
-        )
+            seeded.add(plan.builder_image)
 
 
 def _resolve_cache_root(
@@ -127,6 +238,260 @@ def _resolve_cache_root(
     if cache_dir is not None:
         return cache_dir.expanduser().resolve()
     return (manifest_paths[0].resolve().parent / "cache").resolve()
+
+
+def _ci_dnf_workspace(cache_root: Path, index: int, manifest_path: Path) -> Path:
+    name = manifest_path.resolve().stem
+    return cache_root / "ci" / "dnf" / f"{index}-{name}"
+
+
+def _require_ci_registry(ci_registry: str) -> str:
+    registry = ci_registry.strip().rstrip("/")
+    if not registry:
+        raise ConfigError("ci.registry is required")
+    return registry
+
+
+def _ci_remote_image(ci_registry: str, image: str) -> str:
+    registry = _require_ci_registry(ci_registry)
+    if "@" in image or ":" not in image:
+        raise ConfigError(f"image cannot be uploaded to CI registry: {image}")
+    repository, tag = image.rsplit(":", 1)
+    if not repository or not tag:
+        raise ConfigError(f"image cannot be uploaded to CI registry: {image}")
+    return f"{registry}/{repository}:{tag}"
+
+
+def _ci_remote_image_exists(podman: str, image: str, ci_registry: str) -> bool:
+    remote = _ci_remote_image(ci_registry, image)
+    return (
+        subprocess.run(
+            [podman, "manifest", "inspect", remote],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        == 0
+    )
+
+
+def _push_ci_image(podman: str, image: str, ci_registry: str) -> None:
+    remote = _ci_remote_image(ci_registry, image)
+    log(f"Uploading CI image: {remote}")
+    returncode, _output = _run_streamed_command([podman, "push", image, remote])
+    if returncode != 0:
+        raise ConfigError(f"CI image upload failed with exit status {returncode}")
+
+
+def _is_orchestrator_image(image: str) -> bool:
+    repository, _tag = image.rsplit(":", 1)
+    return repository.endswith("orchestrator")
+
+
+def _seed_image(
+    podman: str,
+    image: str,
+    ci_registry: str,
+    create: Any,
+) -> None:
+    if _ci_remote_image_exists(podman, image, ci_registry):
+        log(f"CI image already exists: {_ci_remote_image(ci_registry, image)}")
+        return
+    if not _local_image_exists(podman, image):
+        create()
+    _push_ci_image(podman, image, ci_registry)
+
+
+def _create_seed_package_image(
+    manifest: ResolvedBuildMetadata,
+    plan: PackageImagePlan,
+) -> None:
+    rpm_files = _download_block_packages(
+        list(manifest.orchestrator_dnf_base),
+        plan.packages,
+    )
+    log(f"Creating card package image: {plan.image}")
+    _create_package_image(
+        buildah=_require_buildah(manifest.buildah),
+        image=plan.image,
+        package_dir=Path(manifest.package_dir),
+        rpm_files=rpm_files,
+    )
+
+
+def _create_seed_builder_image(
+    manifest: ResolvedBuildMetadata,
+    plan: BuildImagePlan,
+) -> None:
+    builder_rpm_files = _download_block_packages(
+        list(manifest.orchestrator_dnf_base),
+        plan.builder_packages,
+        package_dir=Path(manifest.package_dir),
+        resolve_dependencies=True,
+    )
+    log(f"Creating builder image: {plan.builder_image}")
+    _create_builder_image(
+        podman=manifest.podman,
+        buildah=_require_buildah(manifest.buildah),
+        orchestrator=manifest.orchestrator,
+        root_dir=Path(manifest.root_dir),
+        repo_dir=Path(manifest.repo_dir),
+        dnf_cache_dir=Path(manifest.dnf_cache_dir),
+        dnf_persist_dir=Path(manifest.dnf_persist_dir),
+        dnf_log_dir=Path(manifest.dnf_log_dir),
+        image=plan.builder_image,
+        package_dir=Path(manifest.package_dir),
+        rpm_files=builder_rpm_files,
+        releasever=manifest.releasever,
+    )
+
+
+def _read_seed_metadata(build_manifest: Path) -> tuple[ResolvedBuildMetadata, ...]:
+    data = yaml.safe_load(build_manifest.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise ConfigError(f"{build_manifest}: unsupported CI build manifest")
+    images = data.get("images")
+    if not isinstance(images, dict):
+        raise ConfigError(f"{build_manifest}: 'images' must be a mapping")
+    return tuple(
+        _metadata_from_seed_entry(build_manifest, key, value)
+        for key, value in images.items()
+    )
+
+
+def _metadata_from_seed_entry(
+    build_manifest: Path,
+    key: object,
+    value: object,
+) -> ResolvedBuildMetadata:
+    if not isinstance(value, dict) or not isinstance(value.get("build"), dict):
+        raise ConfigError(f"{build_manifest}: image '{key}' is missing build metadata")
+    build = value["build"]
+    assert isinstance(build, dict)
+    return ResolvedBuildMetadata(
+        image=str(build.get("image", "")),
+        distro=str(build.get("distro", "")),
+        releasever=str(build.get("releasever", "")),
+        arch=str(build.get("arch", "")),
+        root_dir=str(build.get("root_dir", "")),
+        local_prefix=str(build.get("local_prefix", "")),
+        orchestrator=str(build.get("orchestrator", "")),
+        output_image=str(build.get("output_image", "")),
+        manifest_labels=_tuple_pairs(build.get("manifest_labels")),
+        manifest_env=_tuple_pairs(build.get("manifest_env")),
+        requested_packages=tuple(str(item) for item in build.get("requested_packages", ())),
+        resolved_packages=tuple(str(item) for item in build.get("resolved_packages", ())),
+        common_packages=tuple(str(item) for item in build.get("common_packages", ())),
+        bootstrap_packages=tuple(str(item) for item in build.get("bootstrap_packages", ())),
+        card_order=tuple(str(item) for item in build.get("card_order", ())),
+        card_packages=_tuple_string_blocks(build.get("card_packages")),
+        card_resolutions=_tuple_string_blocks(build.get("card_resolutions")),
+        package_ids=_tuple_triples(build.get("package_ids")),
+        package_images=_package_image_plans(build.get("package_images")),
+        build_images=_build_image_plans(build.get("build_images")),
+        oci_images=tuple(),
+        package_dir=str(build.get("package_dir", "")),
+        repo_dir=str(build.get("repo_dir", "")),
+        cache_dir=str(build.get("cache_dir", "")),
+        build_dir=str(build.get("build_dir", "")),
+        card_build_dir=str(build.get("card_build_dir", "")),
+        spec_source_cache_dir=str(build.get("spec_source_cache_dir", "")),
+        build_artifact_cache_dir=str(build.get("build_artifact_cache_dir", "")),
+        ccache_dir=(
+            None
+            if build.get("ccache_dir") is None
+            else str(build.get("ccache_dir"))
+        ),
+        dnf_workspace_dir=str(build.get("dnf_workspace_dir", "")),
+        dnf_cache_dir=str(build.get("dnf_cache_dir", "")),
+        dnf_persist_dir=str(build.get("dnf_persist_dir", "")),
+        dnf_log_dir=str(build.get("dnf_log_dir", "")),
+        dnf_resolve_dir=str(build.get("dnf_resolve_dir", "")),
+        podman=str(build.get("podman", "podman")),
+        buildah=(
+            None
+            if build.get("buildah") is None
+            else str(build.get("buildah"))
+        ),
+        cache_version=str(build.get("cache_version", "")),
+        repo_images=tuple(str(item) for item in build.get("repo_images", ())),
+        orchestrator_dnf_base=tuple(
+            str(item) for item in build.get("orchestrator_dnf_base", ())
+        ),
+        package_blocks=_tuple_string_blocks(build.get("package_blocks")),
+        card_file_sets=tuple(),
+        postprocess_blocks=tuple(),
+        card_envs=tuple(),
+        card_sources=tuple(),
+        card_prepare_scripts=tuple(),
+        card_builds=tuple(),
+        card_specs=tuple(),
+        spec_source_revisions=_tuple_triples(build.get("spec_source_revisions")),
+        latest_image=str(build.get("latest_image", "")),
+        ci_registry=str(build.get("ci_registry", "")),
+    )
+
+
+def _tuple_pairs(value: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, list):
+        return tuple()
+    return tuple((str(item[0]), str(item[1])) for item in value if _is_pair(item))
+
+
+def _tuple_triples(value: object) -> tuple[tuple[str, str, str], ...]:
+    if not isinstance(value, list):
+        return tuple()
+    return tuple(
+        (str(item[0]), str(item[1]), str(item[2]))
+        for item in value
+        if isinstance(item, list) and len(item) == 3
+    )
+
+
+def _tuple_string_blocks(value: object) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if not isinstance(value, list):
+        return tuple()
+    return tuple(
+        (str(item[0]), tuple(str(child) for child in item[1]))
+        for item in value
+        if _is_pair(item) and isinstance(item[1], list)
+    )
+
+
+def _is_pair(value: object) -> bool:
+    return isinstance(value, list) and len(value) == 2
+
+
+def _package_image_plans(value: object) -> tuple[PackageImagePlan, ...]:
+    if not isinstance(value, dict):
+        return tuple()
+    return tuple(
+        PackageImagePlan(
+            block=str(item.get("block", "")),
+            packages=tuple(str(package) for package in item.get("packages", ())),
+            image=str(item.get("image", "")),
+        )
+        for item in value.values()
+        if isinstance(item, dict)
+    )
+
+
+def _build_image_plans(value: object) -> tuple[BuildImagePlan, ...]:
+    if not isinstance(value, dict):
+        return tuple()
+    return tuple(
+        BuildImagePlan(
+            block=str(item.get("block", "")),
+            image=str(item.get("image", "")),
+            builder_image=str(item.get("builder_image", "")),
+            builder_packages=tuple(
+                str(package) for package in item.get("builder_packages", ())
+            ),
+            declared_package_ids=_tuple_pairs(item.get("declared_package_ids")),
+        )
+        for item in value.values()
+        if isinstance(item, dict)
+    )
 
 
 def _write_ci_build_manifest(
@@ -149,7 +514,7 @@ def _write_ci_build_manifest(
                 metadata,
             )
             if full
-            or not _ensure_image(
+            or not _ci_remote_image_exists(
                 manifest_metadata.podman,
                 manifest_metadata.output_image,
                 getattr(manifest_metadata, "ci_registry", ""),

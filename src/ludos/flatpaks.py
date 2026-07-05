@@ -177,7 +177,6 @@ class FlatpakBuildPlan:
 def build_flatpak(
     manifest_path: Path,
     flatpak_path: Path,
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
@@ -188,7 +187,6 @@ def build_flatpak(
     try:
         context = resolve_manifest_context(
             manifest_path,
-            cards_dir=cards_dir,
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
@@ -207,7 +205,6 @@ def build_flatpak(
 
 def build_flatpaks(
     manifest_path: Path,
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
@@ -218,7 +215,6 @@ def build_flatpaks(
     try:
         context = resolve_manifest_context(
             manifest_path,
-            cards_dir=cards_dir,
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
@@ -290,7 +286,6 @@ def build_flatpaks_with_context(
 
 def resolve_manifest_flatpak_images(
     manifest_path: Path,
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = True,
@@ -300,7 +295,6 @@ def resolve_manifest_flatpak_images(
     try:
         context = resolve_manifest_context(
             manifest_path,
-            cards_dir=cards_dir,
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,

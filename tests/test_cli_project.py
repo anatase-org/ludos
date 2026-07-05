@@ -236,13 +236,13 @@ class CliProjectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             original_cwd = Path.cwd()
             root = Path(temp)
-            cards_dir = root / "cards"
-            cards_dir.mkdir()
+            subdir = root / "cards"
+            subdir.mkdir()
             (root / "ludos.yml").write_text(
                 "version: 1\nname: Anatase\n",
                 encoding="utf-8",
             )
-            os.chdir(cards_dir)
+            os.chdir(subdir)
             try:
                 result = SimpleNamespace(
                     output_image="localhost/anatase:latest",
@@ -275,7 +275,7 @@ class CliProjectTests(unittest.TestCase):
                 self.assertEqual(exit_code, 0)
                 self.assertEqual(seen["cwd"], root)
                 self.assertEqual(seen["manifest"], Path("anatase.yml"))
-                self.assertEqual(Path.cwd(), cards_dir)
+                self.assertEqual(Path.cwd(), subdir)
 
                 messages = [call.args[0] for call in log.call_args_list]
                 self.assertEqual(messages[1], "Starting Ludos...")

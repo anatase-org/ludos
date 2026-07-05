@@ -44,7 +44,6 @@ def bootc_create(
     manifests: tuple[Path, ...],
     *,
     chunks: Path | None = None,
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
@@ -65,7 +64,6 @@ def bootc_create(
     try:
         metadata = resolve_build_manifests(
             manifests,
-            cards_dir=cards_dir,
             cache_dir=cache_root,
             cache_version=cache_version,
             cache_only=cache_only,

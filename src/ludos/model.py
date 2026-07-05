@@ -254,15 +254,12 @@ class ManifestValidation:
         )
 
 
-def validate_manifest(
-    manifest_path: Path, cards_dir: Path | None = None
-) -> ManifestValidation:
+def validate_manifest(manifest_path: Path) -> ManifestValidation:
     manifest_path = manifest_path.resolve()
     manifest = Manifest.from_file(manifest_path)
     root_dir = manifest_path.parent
-    cards_dir = cards_dir.resolve() if cards_dir else None
 
-    bootstrap_path = _resolve_card_path(manifest.bootstrap, root_dir, cards_dir)
+    bootstrap_path = _resolve_card_path(manifest.bootstrap, root_dir)
     bootstrap = None
     missing_bootstrap = ""
     if bootstrap_path.exists():
@@ -285,7 +282,7 @@ def validate_manifest(
     cards = []
     missing_cards = []
     for card_ref in manifest.cards:
-        card_path = _resolve_card_path(card_ref, root_dir, cards_dir)
+        card_path = _resolve_card_path(card_ref, root_dir)
         if not card_path.exists():
             missing_cards.append(card_ref)
             continue
@@ -310,13 +307,9 @@ def validate_manifest(
     )
 
 
-def _resolve_card_path(
-    card_ref: str, root_dir: Path, cards_dir: Path | None = None
-) -> Path:
+def _resolve_card_path(card_ref: str, root_dir: Path) -> Path:
     path = Path(card_ref)
-    if cards_dir and len(path.parts) == 1:
-        path = cards_dir / path
-    elif not path.is_absolute():
+    if not path.is_absolute():
         path = root_dir / path
 
     if path.suffix in (".yml", ".yaml"):

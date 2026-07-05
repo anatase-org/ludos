@@ -43,8 +43,6 @@ class BootcCommandTests(unittest.TestCase):
                 "custom-chunks.yml",
                 "--cache-dir",
                 "custom-cache",
-                "--cards-dir",
-                "custom-cards",
                 "--version",
                 "20260618",
                 "--cache",
@@ -62,7 +60,6 @@ class BootcCommandTests(unittest.TestCase):
         self.assertEqual(args.bootc_action, "create")
         self.assertEqual(args.chunks, Path("custom-chunks.yml"))
         self.assertEqual(args.cache_dir, Path("custom-cache"))
-        self.assertEqual(args.cards_dir, Path("custom-cards"))
         self.assertEqual(args.version, "20260618")
         self.assertTrue(args.cache)
         self.assertTrue(args.ci)

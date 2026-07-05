@@ -341,7 +341,7 @@ def _manifest_update_targets(
         validation.manifest.distro,
     )
     selected_source = (
-        _resolve_card_path(card, root_dir, None).resolve()
+        _resolve_card_path(card, root_dir).resolve()
         if card is not None
         else None
     )

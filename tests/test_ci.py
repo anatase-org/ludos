@@ -5,6 +5,7 @@ import lzma
 import tempfile
 import unittest
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import call, patch
@@ -18,11 +19,33 @@ from ludos.build import (
     PackageImagePlan,
     ResolvedBuildMetadata,
 )
-from ludos.ci import prepare_ci
+from ludos.ci import init_ci, prepare_ci, seed_ci
 from ludos.model import ConfigError, SpecBuild
 
 
 class CiParserTests(unittest.TestCase):
+    def test_parser_accepts_init_ci_options(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "ci",
+                "init",
+                "--cache-dir",
+                "cache",
+                "--version",
+                "20260629",
+                "--no-ccache",
+                "anatase.yml",
+            ]
+        )
+
+        self.assertEqual(args.ci_action, "init")
+        self.assertEqual(args.manifests, [Path("anatase.yml")])
+        self.assertEqual(args.cache_dir, Path("cache"))
+        self.assertEqual(args.version, "20260629")
+        self.assertTrue(args.no_ccache)
+
     def test_parser_accepts_prepare_ci_options(self) -> None:
         parser = build_parser()
 
@@ -30,7 +53,6 @@ class CiParserTests(unittest.TestCase):
             [
                 "ci",
                 "prepare",
-                "--cache",
                 "--cache-dir",
                 "cache",
                 "--version",
@@ -45,9 +67,29 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.manifests, [Path("anatase.yml")])
         self.assertEqual(args.cache_dir, Path("cache"))
         self.assertEqual(args.version, "20260629")
-        self.assertTrue(args.cache)
         self.assertTrue(args.no_ccache)
         self.assertTrue(args.full)
+
+    def test_parser_accepts_seed_ci_options(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(["ci", "seed", "cache/ci/build.yml"])
+
+        self.assertEqual(args.ci_action, "seed")
+        self.assertEqual(args.build_manifest, Path("cache/ci/build.yml"))
+
+    def test_prepare_ci_rejects_cache_and_cards_dir(self) -> None:
+        parser = build_parser()
+
+        for option in ("--cache", "--cards-dir"):
+            with self.subTest(option=option):
+                argv = ["ci", "prepare", option]
+                if option == "--cards-dir":
+                    argv.append("cards")
+                argv.append("anatase.yml")
+                with patch("sys.stderr", new=StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parser.parse_args(argv)
 
     def test_ci_command_calls_prepare_ci(self) -> None:
         args = build_parser().parse_args(
@@ -58,7 +100,6 @@ class CiParserTests(unittest.TestCase):
                 "cache",
                 "--version",
                 "20260629",
-                "--cache",
                 "--no-ccache",
                 "anatase.yml",
             ]
@@ -70,16 +111,101 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         create.assert_called_once_with(
             (Path("anatase.yml"),),
-            cards_dir=None,
             cache_dir=Path("cache"),
             cache_version="20260629",
-            cache_only=True,
             ccache=False,
             full=False,
         )
 
+    def test_ci_command_calls_init_ci(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "init",
+                "--cache-dir",
+                "cache",
+                "--version",
+                "20260629",
+                "--no-ccache",
+                "anatase.yml",
+            ]
+        )
+
+        with patch("ludos.__main__.init_ci") as init:
+            exit_code = ci_command(args)
+
+        self.assertEqual(exit_code, 0)
+        init.assert_called_once_with(
+            (Path("anatase.yml"),),
+            cache_dir=Path("cache"),
+            cache_version="20260629",
+            ccache=False,
+        )
+
+    def test_ci_command_calls_seed_ci(self) -> None:
+        args = build_parser().parse_args(["ci", "seed", "cache/ci/build.yml"])
+
+        with patch("ludos.__main__.seed_ci") as seed:
+            exit_code = ci_command(args)
+
+        self.assertEqual(exit_code, 0)
+        seed.assert_called_once_with(Path("cache/ci/build.yml"))
+
 
 class PrepareCiTests(unittest.TestCase):
+    def test_init_ci_creates_and_pushes_missing_init_images(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+
+            def resolve(_manifest: Path, **kwargs: object) -> SimpleNamespace:
+                image_exists = kwargs["image_exists"]
+                create_orchestrator = kwargs["create_orchestrator_image"]
+                create_repo = kwargs["create_repo_image"]
+                self.assertFalse(
+                    image_exists("podman", "orchestrator:f44", "ghcr.io/test")
+                )
+                create_orchestrator(
+                    podman="podman",
+                    buildah="buildah",
+                    source="fedora:44",
+                    image="orchestrator:f44",
+                    packages=tuple(),
+                )
+                self.assertFalse(
+                    image_exists("podman", "repos:f44-fedora", "ghcr.io/test")
+                )
+                create_repo(
+                    podman="podman",
+                    buildah="buildah",
+                    orchestrator="orchestrator:f44",
+                    root_dir=root,
+                    image="repos:f44-fedora",
+                    repo_name="fedora.repo",
+                    repo_id="fedora",
+                    rendered_repo="[fedora]\n",
+                )
+                return SimpleNamespace(ci_registry="ghcr.io/test")
+
+            with (
+                patch("ludos.ci.resolve_manifest_context", side_effect=resolve),
+                patch("ludos.ci._ci_remote_image_exists", return_value=False),
+                patch("ludos.ci._local_image_exists", return_value=False),
+                patch("ludos.ci._create_orchestrator_image") as create_orchestrator,
+                patch("ludos.ci._create_repo_image") as create_repo,
+                patch("ludos.ci._push_ci_image") as push,
+            ):
+                init_ci((manifest,), cache_dir=cache, cache_version="20260629")
+
+            create_orchestrator.assert_called_once()
+            create_repo.assert_called_once()
+            self.assertEqual(
+                [call.args[1] for call in push.call_args_list],
+                ["orchestrator:f44", "repos:f44-fedora"],
+            )
+
     def test_prepare_ci_writes_build_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -103,8 +229,10 @@ class PrepareCiTests(unittest.TestCase):
                     "ludos.ci.plan_manifest_flatpaks_with_context",
                     return_value=(plan,),
                 ) as plan_flatpaks,
-                patch("ludos.ci._ensure_image", return_value=False) as ensure_image,
-                patch("ludos.ci.build_package_card_images") as build_cards,
+                patch(
+                    "ludos.ci._ci_remote_image_exists",
+                    return_value=False,
+                ) as remote_exists,
                 patch("ludos.ci._remove_tree") as remove_tree,
                 patch("ludos.ci.log") as log,
             ):
@@ -112,40 +240,36 @@ class PrepareCiTests(unittest.TestCase):
                     (manifest,),
                     cache_dir=cache,
                     cache_version="20260629",
-                    cache_only=True,
                     ccache=False,
                 )
 
             self.assertEqual(output, cache.resolve() / "ci" / "build.yml")
             resolve_context.assert_called_once_with(
                 manifest,
-                cards_dir=None,
                 cache_dir=cache.resolve(),
                 cache_version="20260629",
                 cache_only=True,
                 ccache=False,
-                dnf_workspace_dirs=[],
+                dnf_workspace_dir=cache.resolve() / "ci" / "dnf" / "0-anatase",
             )
             resolve_build.assert_called_once_with(
                 ((manifest, context),),
-                cards_dir=None,
-                cache_only=True,
+                cache_only=False,
             )
-            build_cards.assert_called_once_with((metadata,), cache_only=True)
             plan_flatpaks.assert_called_once_with(
                 context,
                 manifest_path=manifest,
-                cache_only=True,
+                cache_only=False,
             )
-            ensure_image.assert_has_calls(
+            remote_exists.assert_has_calls(
                 [
-                    call(context.podman, plan.output_image, ""),
-                    call(context.podman, metadata.output_image, ""),
+                    call(context.podman, plan.output_image, "ghcr.io/anatase-org"),
+                    call(metadata.podman, metadata.output_image, "ghcr.io/anatase-org"),
                 ]
             )
             remove_tree.assert_called_once_with(
-                context.dnf_workspace_dir,
-                podman=context.podman,
+                cache.resolve() / "ci" / "dnf" / "0-anatase",
+                podman="podman",
             )
 
             data = yaml.safe_load(output.read_text(encoding="utf-8"))
@@ -233,8 +357,7 @@ class PrepareCiTests(unittest.TestCase):
                     "ludos.ci.plan_manifest_flatpaks_with_context",
                     return_value=(plan,),
                 ),
-                patch("ludos.ci._ensure_image", return_value=True),
-                patch("ludos.ci.build_package_card_images"),
+                patch("ludos.ci._ci_remote_image_exists", return_value=True),
                 patch("ludos.ci._remove_tree"),
                 patch("ludos.ci.log"),
             ):
@@ -264,8 +387,7 @@ class PrepareCiTests(unittest.TestCase):
                     "ludos.ci.plan_manifest_flatpaks_with_context",
                     return_value=(plan,),
                 ),
-                patch("ludos.ci._ensure_image", return_value=True) as ensure_image,
-                patch("ludos.ci.build_package_card_images"),
+                patch("ludos.ci._ci_remote_image_exists", return_value=True) as remote_exists,
                 patch("ludos.ci._remove_tree"),
                 patch("ludos.ci.log"),
             ):
@@ -274,7 +396,7 @@ class PrepareCiTests(unittest.TestCase):
             data = yaml.safe_load(output.read_text(encoding="utf-8"))
             self.assertIn("f44-anatase", data["images"])
             self.assertIn("f44-kate-output", data["flatpaks"])
-            ensure_image.assert_not_called()
+            remote_exists.assert_not_called()
 
     def test_prepare_ci_checks_remote_cache_registry(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -300,14 +422,16 @@ class PrepareCiTests(unittest.TestCase):
                     "ludos.ci.plan_manifest_flatpaks_with_context",
                     return_value=(plan,),
                 ),
-                patch("ludos.ci._ensure_image", return_value=False) as ensure_image,
-                patch("ludos.ci.build_package_card_images"),
+                patch(
+                    "ludos.ci._ci_remote_image_exists",
+                    return_value=False,
+                ) as remote_exists,
                 patch("ludos.ci._remove_tree"),
                 patch("ludos.ci.log"),
             ):
                 prepare_ci((manifest,), cache_dir=cache)
 
-        ensure_image.assert_has_calls(
+        remote_exists.assert_has_calls(
             [
                 call(context.podman, plan.output_image, "ghcr.io/anatase-org"),
                 call(context.podman, metadata.output_image, "ghcr.io/anatase-org"),
@@ -331,16 +455,12 @@ class PrepareCiTests(unittest.TestCase):
                     "ludos.ci.resolve_build_manifests_from_contexts",
                     side_effect=ConfigError("boom"),
                 ),
-                patch("ludos.ci._remove_tree") as remove_tree,
+                patch("ludos.ci._remove_tree"),
             ):
                 with self.assertRaisesRegex(ConfigError, "boom"):
                     prepare_ci((manifest,), cache_dir=cache)
 
             self.assertEqual(output.read_text(encoding="utf-8"), "existing: true\n")
-            remove_tree.assert_called_once_with(
-                context.dnf_workspace_dir,
-                podman=context.podman,
-            )
 
     def test_prepare_ci_requires_manifest(self) -> None:
         with self.assertRaisesRegex(ConfigError, "at least one manifest"):
@@ -351,6 +471,7 @@ class PrepareCiTests(unittest.TestCase):
             root_dir=root,
             dnf_workspace_dir=root / "cache" / "f44-x86_64" / "dnf" / "run-test",
             podman="podman",
+            ci_registry="ghcr.io/anatase-org",
         )
 
     def _flatpak_plan(self, root: Path, cache: Path) -> SimpleNamespace:
@@ -462,4 +583,161 @@ class PrepareCiTests(unittest.TestCase):
             card_specs=tuple(),
             spec_source_revisions=tuple(),
             latest_image="images:anatase",
+            ci_registry=getattr(context, "ci_registry", ""),
         )
+
+
+class SeedCiTests(unittest.TestCase):
+    def test_seed_ci_skips_remote_images_without_pulling_or_creating(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_manifest = self._write_seed_manifest(Path(temp))
+
+            with (
+                patch("ludos.ci._ci_remote_image_exists", return_value=True) as remote,
+                patch("ludos.ci._local_image_exists") as local,
+                patch("ludos.ci._push_ci_image") as push,
+                patch("ludos.ci._create_seed_package_image") as create_package,
+                patch("ludos.ci._create_seed_builder_image") as create_builder,
+                patch("ludos.ci.log"),
+            ):
+                seed_ci(build_manifest)
+
+            self.assertEqual(
+                [call.args[1] for call in remote.call_args_list],
+                ["cards:f44-common", "builders:f44-base"],
+            )
+            local.assert_not_called()
+            push.assert_not_called()
+            create_package.assert_not_called()
+            create_builder.assert_not_called()
+
+    def test_seed_ci_pushes_local_images_missing_remotely(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_manifest = self._write_seed_manifest(Path(temp))
+
+            with (
+                patch("ludos.ci._ci_remote_image_exists", return_value=False),
+                patch("ludos.ci._local_image_exists", return_value=True),
+                patch("ludos.ci._push_ci_image") as push,
+                patch("ludos.ci._create_seed_package_image") as create_package,
+                patch("ludos.ci._create_seed_builder_image") as create_builder,
+            ):
+                seed_ci(build_manifest)
+
+            self.assertEqual(
+                [call.args[1] for call in push.call_args_list],
+                ["cards:f44-common", "builders:f44-base"],
+            )
+            create_package.assert_not_called()
+            create_builder.assert_not_called()
+
+    def test_seed_ci_creates_local_images_missing_remotely_and_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_manifest = self._write_seed_manifest(Path(temp))
+
+            with (
+                patch("ludos.ci._ci_remote_image_exists", return_value=False),
+                patch("ludos.ci._local_image_exists", return_value=False),
+                patch("ludos.ci._push_ci_image") as push,
+                patch("ludos.ci._create_seed_package_image") as create_package,
+                patch("ludos.ci._create_seed_builder_image") as create_builder,
+            ):
+                seed_ci(build_manifest)
+
+            self.assertEqual(create_package.call_count, 1)
+            self.assertEqual(create_builder.call_count, 1)
+            self.assertEqual(
+                [call.args[1] for call in push.call_args_list],
+                ["cards:f44-common", "builders:f44-base"],
+            )
+
+    def _write_seed_manifest(self, root: Path) -> Path:
+        build_manifest = root / "build.yml"
+        build_manifest.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "images": {
+                        "f44-anatase": {
+                            "path": "anatase.yml",
+                            "build": {
+                                "image": "anatase",
+                                "distro": "f44",
+                                "releasever": "44",
+                                "arch": "x86_64",
+                                "root_dir": str(root),
+                                "local_prefix": "",
+                                "orchestrator": "orchestrator:f44",
+                                "output_image": "images:f44-anatase",
+                                "manifest_labels": [],
+                                "manifest_env": [],
+                                "common_packages": [],
+                                "bootstrap_packages": [],
+                                "card_order": [],
+                                "card_packages": [],
+                                "card_resolutions": [],
+                                "package_ids": [],
+                                "package_images": {
+                                    "f44-common": {
+                                        "block": "common",
+                                        "packages": ["bash-0:1-1.fc44.x86_64"],
+                                        "image": "cards:f44-common",
+                                    }
+                                },
+                                "build_images": {
+                                    "f44-base": {
+                                        "block": "base",
+                                        "image": "builds:f44-base",
+                                        "builder_image": "builders:f44-base",
+                                        "builder_packages": [
+                                            "rpm-build-0:1-1.fc44.x86_64"
+                                        ],
+                                    }
+                                },
+                                "oci_images": {},
+                                "package_dir": str(root / "packages"),
+                                "repo_dir": str(root / "repos"),
+                                "cache_dir": str(root),
+                                "build_dir": str(root / "build"),
+                                "card_build_dir": str(root / "cards"),
+                                "spec_source_cache_dir": str(root / "spec-sources"),
+                                "build_artifact_cache_dir": str(root / "artifacts"),
+                                "ccache_dir": None,
+                                "dnf_workspace_dir": str(root / "dnf"),
+                                "dnf_cache_dir": str(root / "dnf/cache"),
+                                "dnf_persist_dir": str(root / "dnf/persist"),
+                                "dnf_log_dir": str(root / "dnf/log"),
+                                "dnf_resolve_dir": str(root / "dnf/resolves"),
+                                "podman": "podman",
+                                "buildah": "buildah",
+                                "cache_version": "20260629",
+                                "repo_images": ["repos:f44-fedora"],
+                                "orchestrator_dnf_base": ["podman", "run"],
+                                "package_blocks": [],
+                                "card_file_sets": [],
+                                "postprocess_blocks": [],
+                                "card_envs": [],
+                                "card_sources": [],
+                                "card_prepare_scripts": [],
+                                "card_builds": [],
+                                "card_specs": [],
+                                "spec_source_revisions": [],
+                                "latest_image": "images:anatase",
+                                "ci_registry": "ghcr.io/anatase-org",
+                            },
+                        }
+                    },
+                    "flatpaks": {
+                        "kate": {
+                            "images": {
+                                "builder": "builders:f44-flatpak-kate",
+                                "build": "builds:f44-flatpak-kate",
+                            }
+                        }
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return build_manifest

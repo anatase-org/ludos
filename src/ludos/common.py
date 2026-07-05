@@ -64,12 +64,12 @@ class ResolvedManifestContext:
 
 def resolve_manifest_context(
     manifest_path: Path,
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
     ccache: bool = True,
     dnf_workspace_dirs: list[Path] | None = None,
+    dnf_workspace_dir: Path | None = None,
     image_exists=None,
     create_orchestrator_image=None,
     create_repo_image=None,
@@ -85,7 +85,7 @@ def resolve_manifest_context(
     require_buildah = require_buildah or _require_buildah
 
     log(f"Validating manifest: {manifest_path}")
-    validation = validate_manifest(manifest_path, cards_dir)
+    validation = validate_manifest(manifest_path)
     if validation.missing_bootstrap:
         raise ConfigError(
             f"{manifest_path}: missing bootstrap card: {validation.missing_bootstrap}"
@@ -153,7 +153,11 @@ def resolve_manifest_context(
 
     distro_cache_dir.mkdir(parents=True, exist_ok=True)
     dnf_dir.mkdir(parents=True, exist_ok=True)
-    dnf_workspace_dir = Path(tempfile.mkdtemp(prefix="run-", dir=dnf_dir))
+    if dnf_workspace_dir is None:
+        dnf_workspace_dir = Path(tempfile.mkdtemp(prefix="run-", dir=dnf_dir))
+    else:
+        dnf_workspace_dir = dnf_workspace_dir.expanduser().resolve()
+        dnf_workspace_dir.mkdir(parents=True, exist_ok=True)
     if dnf_workspace_dirs is not None:
         dnf_workspace_dirs.append(dnf_workspace_dir)
     repo_dir = dnf_workspace_dir / "repos"

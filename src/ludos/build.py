@@ -248,7 +248,6 @@ def _target_spec_keys(card_source: Path, spec: SpecBuild) -> tuple[str, ...]:
 
 def build_manifest(
     manifest_path: Path,
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
@@ -261,7 +260,6 @@ def build_manifest(
     try:
         metadata = resolve_build_manifests(
             (manifest_path,),
-            cards_dir=cards_dir,
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
@@ -272,7 +270,6 @@ def build_manifest(
             target = _resolve_target_card(
                 metadata[0],
                 manifest_path=manifest_path,
-                cards_dir=cards_dir,
                 card=card,
             )
             build_builder_images(metadata, targets=(target,), cache_only=cache_only)
@@ -311,12 +308,11 @@ def _resolve_target_card(
     metadata: ResolvedBuildMetadata,
     *,
     manifest_path: Path,
-    cards_dir: Path | None,
     card: str,
 ) -> str:
     root_dir = manifest_path.resolve().parent
     target_card, _target_spec = _split_target_card(card)
-    target_source = _resolve_card_path(target_card, root_dir, cards_dir).resolve()
+    target_source = _resolve_card_path(target_card, root_dir).resolve()
     blocks_by_source = {
         Path(source).resolve(): block
         for block, source in metadata.card_sources
@@ -331,7 +327,6 @@ def _resolve_target_card(
 
 def resolve_build_manifests(
     manifest_paths: tuple[Path, ...],
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
@@ -347,7 +342,6 @@ def resolve_build_manifests(
         metadata = tuple(
             _resolve_manifest_metadata(
                 manifest_path,
-                cards_dir=cards_dir,
                 cache_dir=cache_dir,
                 cache_version=cache_version,
                 cache_only=cache_only,
@@ -365,21 +359,21 @@ def resolve_build_manifests(
 
 def resolve_build_manifest_context(
     manifest_path: Path,
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
     ccache: bool = True,
     dnf_workspace_dirs: list[Path] | None = None,
+    dnf_workspace_dir: Path | None = None,
 ) -> ResolvedManifestContext:
     return resolve_manifest_context(
         manifest_path,
-        cards_dir=cards_dir,
         cache_dir=cache_dir,
         cache_version=cache_version,
         cache_only=cache_only,
         ccache=ccache,
         dnf_workspace_dirs=dnf_workspace_dirs,
+        dnf_workspace_dir=dnf_workspace_dir,
         image_exists=_ensure_image,
         create_orchestrator_image=_create_orchestrator_image,
         create_repo_image=_create_repo_image,
@@ -393,13 +387,11 @@ def resolve_build_manifest_from_context(
     context: ResolvedManifestContext,
     *,
     manifest_path: Path,
-    cards_dir: Path | None = None,
     cache_only: bool = False,
     card: str | None = None,
 ) -> ResolvedBuildMetadata:
     return _resolve_manifest_metadata(
         manifest_path,
-        cards_dir=cards_dir,
         cache_only=cache_only,
         target_card=card,
         context=context,
@@ -409,7 +401,6 @@ def resolve_build_manifest_from_context(
 def resolve_build_manifests_from_contexts(
     manifest_contexts: tuple[tuple[Path, ResolvedManifestContext], ...],
     *,
-    cards_dir: Path | None = None,
     cache_only: bool = False,
     card: str | None = None,
 ) -> tuple[ResolvedBuildMetadata, ...]:
@@ -421,7 +412,6 @@ def resolve_build_manifests_from_contexts(
         resolve_build_manifest_from_context(
             context,
             manifest_path=manifest_path,
-            cards_dir=cards_dir,
             cache_only=cache_only,
             card=card,
         )
@@ -432,7 +422,6 @@ def resolve_build_manifests_from_contexts(
 
 def _resolve_manifest_metadata(
     manifest_path: Path,
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
@@ -444,7 +433,6 @@ def _resolve_manifest_metadata(
     if context is None:
         context = resolve_build_manifest_context(
             manifest_path,
-            cards_dir=cards_dir,
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
@@ -499,7 +487,6 @@ def _resolve_manifest_metadata(
         target_source = _resolve_card_path(
             target_card_path,
             root_dir,
-            cards_dir,
         ).resolve()
         for _priority, _insertion_order, card_name, card in card_entries:
             if card.source is not None and card.source.resolve() == target_source:
@@ -1127,7 +1114,6 @@ def _resolve_manifest_metadata(
 
 def resolve_manifest_images(
     manifest_path: Path,
-    cards_dir: Path | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = True,
@@ -1136,7 +1122,6 @@ def resolve_manifest_images(
     try:
         metadata = resolve_build_manifests(
             (manifest_path,),
-            cards_dir=cards_dir,
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
