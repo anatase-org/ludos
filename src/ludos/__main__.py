@@ -693,6 +693,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not mount or enable shared ccache/sccache directories.",
     )
+    init_parser.add_argument(
+        "--recreate",
+        action="store_true",
+        help="Recreate local orchestrator images even when they already exist in CI.",
+    )
     init_parser.set_defaults(func=ci_command)
     prepare_parser = ci_subcommands.add_parser(
         "prepare",
@@ -1093,6 +1098,7 @@ def ci_command(args: argparse.Namespace) -> int:
             cache_dir=args.cache_dir,
             cache_version=args.version,
             ccache=not args.no_ccache,
+            recreate=args.recreate,
         )
         return 0
     if args.ci_action == "prepare":

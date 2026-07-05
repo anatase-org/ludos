@@ -36,6 +36,7 @@ class CiParserTests(unittest.TestCase):
                 "--version",
                 "20260629",
                 "--no-ccache",
+                "--recreate",
                 "anatase.yml",
             ]
         )
@@ -45,6 +46,7 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.cache_dir, Path("cache"))
         self.assertEqual(args.version, "20260629")
         self.assertTrue(args.no_ccache)
+        self.assertTrue(args.recreate)
 
     def test_parser_accepts_prepare_ci_options(self) -> None:
         parser = build_parser()
@@ -158,6 +160,7 @@ class CiParserTests(unittest.TestCase):
             cache_dir=Path("cache"),
             cache_version="20260629",
             ccache=False,
+            recreate=False,
         )
 
     def test_ci_command_calls_seed_ci(self) -> None:
@@ -241,6 +244,81 @@ class PrepareCiTests(unittest.TestCase):
                 [call.args[1] for call in push.call_args_list],
                 ["orchestrator:f44", "repos:f44-fedora"],
             )
+
+    def test_init_ci_skips_remote_init_images_without_creating(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+
+            def resolve(_manifest: Path, **kwargs: object) -> SimpleNamespace:
+                image_exists = kwargs["image_exists"]
+                self.assertTrue(
+                    image_exists("podman", "orchestrator:f44", "ghcr.io/test")
+                )
+                self.assertTrue(
+                    image_exists("podman", "repos:f44-fedora", "ghcr.io/test")
+                )
+                return SimpleNamespace(ci_registry="ghcr.io/test")
+
+            with (
+                patch("ludos.ci.resolve_manifest_context", side_effect=resolve),
+                patch("ludos.ci._ci_remote_image_exists", return_value=True),
+                patch("ludos.ci._local_image_exists", return_value=False),
+                patch("ludos.ci._create_orchestrator_image") as create_orchestrator,
+                patch("ludos.ci._create_repo_image") as create_repo,
+                patch("ludos.ci._push_ci_image") as push,
+            ):
+                init_ci((manifest,), cache_dir=cache, cache_version="20260629")
+
+            create_orchestrator.assert_not_called()
+            create_repo.assert_not_called()
+            push.assert_not_called()
+
+    def test_init_ci_recreates_remote_orchestrator_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+
+            def resolve(_manifest: Path, **kwargs: object) -> SimpleNamespace:
+                image_exists = kwargs["image_exists"]
+                create_orchestrator = kwargs["create_orchestrator_image"]
+                self.assertFalse(
+                    image_exists("podman", "orchestrator:f44", "ghcr.io/test")
+                )
+                create_orchestrator(
+                    podman="podman",
+                    buildah="buildah",
+                    source="fedora:44",
+                    image="orchestrator:f44",
+                    packages=tuple(),
+                )
+                self.assertTrue(
+                    image_exists("podman", "repos:f44-fedora", "ghcr.io/test")
+                )
+                return SimpleNamespace(ci_registry="ghcr.io/test")
+
+            with (
+                patch("ludos.ci.resolve_manifest_context", side_effect=resolve),
+                patch("ludos.ci._ci_remote_image_exists", return_value=True),
+                patch("ludos.ci._local_image_exists", return_value=False),
+                patch("ludos.ci._create_orchestrator_image") as create_orchestrator,
+                patch("ludos.ci._create_repo_image") as create_repo,
+                patch("ludos.ci._push_ci_image") as push,
+            ):
+                init_ci(
+                    (manifest,),
+                    cache_dir=cache,
+                    cache_version="20260629",
+                    recreate=True,
+                )
+
+            create_orchestrator.assert_called_once()
+            create_repo.assert_not_called()
+            push.assert_not_called()
 
     def test_prepare_ci_writes_build_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

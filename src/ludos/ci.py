@@ -129,6 +129,7 @@ def init_ci(
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     ccache: bool = True,
+    recreate: bool = False,
 ) -> None:
     if not manifest_paths:
         raise ConfigError("at least one manifest is required")
@@ -146,7 +147,7 @@ def init_ci(
             if not remote_exists:
                 _push_ci_image(podman, image, ci_registry)
             return True
-        if remote_exists and not _is_orchestrator_image(image):
+        if remote_exists and (not recreate or not _is_orchestrator_image(image)):
             return True
         return False
 
