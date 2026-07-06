@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, sentinel
 
 from ludos.build import (
@@ -748,6 +749,44 @@ class TargetCardBuildTests(unittest.TestCase):
                     "localhost/kernel:f44-x86_64",
                     source=self.scx_source,
                 )
+
+    def test_remote_oci_image_is_inspected_with_skopeo(self) -> None:
+        with (
+            patch("ludos.build._image_exists", return_value=False),
+            patch("ludos.build.shutil.which", return_value="skopeo"),
+            patch("ludos.build._ensure_cached_image") as ensure,
+            patch(
+                "ludos.build.subprocess.run",
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout=(
+                        '{"Digest":"sha256:kernel111",'
+                        '"Labels":{"org.anatase.kernel.nvidia":"580.95.05"}}'
+                    ),
+                ),
+            ) as run,
+        ):
+            info = _inspect_oci_image(
+                "podman",
+                "kernel:f44-x86_64",
+                source=self.scx_source,
+                ci_registry="ghcr.io/anatase-org",
+            )
+
+        self.assertEqual(info.digest, "sha256:kernel111")
+        self.assertEqual(info.labels["org.anatase.kernel.nvidia"], "580.95.05")
+        ensure.assert_not_called()
+        run.assert_called_once_with(
+            [
+                "skopeo",
+                "inspect",
+                "--no-tags",
+                "docker://ghcr.io/anatase-org/kernel:f44-x86_64",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
 
     def test_final_build_rejects_missing_oci_package(self) -> None:
         metadata = replace(

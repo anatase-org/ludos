@@ -20,6 +20,7 @@ from typing import Callable
 from .common import (
     ResolvedManifestContext,
     _ensure_image as _ensure_cached_image,
+    _remote_cache_image,
     resolve_manifest_context,
 )
 from .logging import log, stream
@@ -2208,8 +2209,12 @@ def _inspect_oci_image(
     source: Path,
     ci_registry: str = "",
 ) -> ImageInfo:
-    if not _ensure_image(podman, image, ci_registry):
+    if not _image_exists(podman, image):
+        remote_image = _remote_cache_image(ci_registry, image)
+        if remote_image is not None:
+            return _inspect_remote_oci_image(remote_image, source=source)
         raise ConfigError(f"{source}: OCI image is not cached: {image}")
+
     result = subprocess.run(
         [podman, "image", "inspect", image, "--format", "{{json .}}"],
         check=True,
@@ -2220,12 +2225,44 @@ def _inspect_oci_image(
         data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise ConfigError(f"{source}: failed to inspect OCI image: {image}") from exc
+    return _image_info_from_inspect_data(data, image, source=source)
+
+
+def _inspect_remote_oci_image(remote_image: str, *, source: Path) -> ImageInfo:
+    skopeo = shutil.which("skopeo")
+    if not skopeo:
+        raise ConfigError("skopeo must be installed to inspect remote OCI images")
+    result = subprocess.run(
+        [skopeo, "inspect", "--no-tags", f"docker://{remote_image}"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise ConfigError(f"{source}: OCI image is not cached: {remote_image}")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            f"{source}: failed to inspect OCI image: {remote_image}"
+        ) from exc
+    return _image_info_from_inspect_data(data, remote_image, source=source)
+
+
+def _image_info_from_inspect_data(
+    data: dict,
+    image: str,
+    *,
+    source: Path,
+) -> ImageInfo:
     labels = data.get("Labels") or {}
     if not isinstance(labels, dict):
         labels = {}
     digest = _image_digest(data)
     if not digest:
-        raise ConfigError(f"{source}: OCI image has no inspectable digest: {image}")
+        raise ConfigError(
+            f"{source}: OCI image has no inspectable digest: {image}"
+        )
     return ImageInfo(
         digest=digest,
         labels={str(key): str(value) for key, value in labels.items()},
@@ -2233,6 +2270,9 @@ def _inspect_oci_image(
 
 
 def _image_digest(data: dict) -> str:
+    digest = str(data.get("Digest") or "")
+    if digest.startswith("sha256:"):
+        return digest
     repo_digests = data.get("RepoDigests") or ()
     for repo_digest in repo_digests:
         digest = str(repo_digest).rsplit("@", 1)[-1]
