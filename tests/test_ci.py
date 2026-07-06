@@ -92,11 +92,14 @@ class CiParserTests(unittest.TestCase):
     def test_parser_accepts_seed_ci_cache_dir(self) -> None:
         parser = build_parser()
 
-        args = parser.parse_args(["ci", "seed", "--cache-dir", "out-cache"])
+        args = parser.parse_args(
+            ["ci", "seed", "--cache-dir", "out-cache", "--autoremove"]
+        )
 
         self.assertEqual(args.ci_action, "seed")
         self.assertIsNone(args.build_manifest)
         self.assertEqual(args.cache_dir, Path("out-cache"))
+        self.assertTrue(args.autoremove)
 
     def test_prepare_ci_rejects_cache_and_cards_dir(self) -> None:
         parser = build_parser()
@@ -170,7 +173,11 @@ class CiParserTests(unittest.TestCase):
             exit_code = ci_command(args)
 
         self.assertEqual(exit_code, 0)
-        seed.assert_called_once_with(Path("cache/ci/build.yml"), cache_dir=None)
+        seed.assert_called_once_with(
+            Path("cache/ci/build.yml"),
+            cache_dir=None,
+            autoremove=False,
+        )
 
     def test_ci_command_calls_seed_ci_with_default_build_manifest(self) -> None:
         args = build_parser().parse_args(["ci", "seed"])
@@ -179,16 +186,22 @@ class CiParserTests(unittest.TestCase):
             exit_code = ci_command(args)
 
         self.assertEqual(exit_code, 0)
-        seed.assert_called_once_with(None, cache_dir=None)
+        seed.assert_called_once_with(None, cache_dir=None, autoremove=False)
 
-    def test_ci_command_calls_seed_ci_with_cache_dir(self) -> None:
-        args = build_parser().parse_args(["ci", "seed", "--cache-dir", "out-cache"])
+    def test_ci_command_calls_seed_ci_with_cache_dir_and_autoremove(self) -> None:
+        args = build_parser().parse_args(
+            ["ci", "seed", "--cache-dir", "out-cache", "--autoremove"]
+        )
 
         with patch("ludos.__main__.seed_ci") as seed:
             exit_code = ci_command(args)
 
         self.assertEqual(exit_code, 0)
-        seed.assert_called_once_with(None, cache_dir=Path("out-cache"))
+        seed.assert_called_once_with(
+            None,
+            cache_dir=Path("out-cache"),
+            autoremove=True,
+        )
 
 
 class PrepareCiTests(unittest.TestCase):
@@ -775,6 +788,46 @@ class SeedCiTests(unittest.TestCase):
                 [call.args[1] for call in push.call_args_list],
                 ["cards:f44-common", "builders:f44-base"],
             )
+
+    def test_seed_ci_autoremoves_uploaded_images(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_manifest = self._write_seed_manifest(Path(temp))
+
+            with (
+                patch("ludos.ci._ci_remote_image_exists", return_value=False),
+                patch("ludos.ci._local_image_exists", return_value=True),
+                patch("ludos.ci._push_ci_image") as push,
+                patch("ludos.ci._remove_image") as remove,
+                patch("ludos.ci._create_seed_package_image") as create_package,
+                patch("ludos.ci._create_seed_builder_image") as create_builder,
+            ):
+                seed_ci(build_manifest, autoremove=True)
+
+            self.assertEqual(
+                [call.args[1] for call in push.call_args_list],
+                ["cards:f44-common", "builders:f44-base"],
+            )
+            self.assertEqual(
+                [call.args[1] for call in remove.call_args_list],
+                ["cards:f44-common", "builders:f44-base"],
+            )
+            create_package.assert_not_called()
+            create_builder.assert_not_called()
+
+    def test_seed_ci_autoremove_skips_remote_hits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_manifest = self._write_seed_manifest(Path(temp))
+
+            with (
+                patch("ludos.ci._ci_remote_image_exists", return_value=True),
+                patch("ludos.ci._local_image_exists"),
+                patch("ludos.ci._push_ci_image"),
+                patch("ludos.ci._remove_image") as remove,
+                patch("ludos.ci.log"),
+            ):
+                seed_ci(build_manifest, autoremove=True)
+
+            remove.assert_not_called()
 
     def _write_seed_manifest(self, root: Path) -> Path:
         build_manifest = root / "build.yml"

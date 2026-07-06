@@ -17,6 +17,7 @@ from .build import (
     _create_package_image,
     _download_block_packages,
     _image_tag,
+    _remove_image,
     _remove_tree,
     _require_buildah,
     resolve_build_manifest_context,
@@ -204,6 +205,7 @@ def seed_ci(
     build_manifest: Path | None = None,
     *,
     cache_dir: Path | None = None,
+    autoremove: bool = False,
 ) -> None:
     build_manifest = build_manifest or _default_ci_build_manifest(cache_dir)
     metadata = _read_seed_metadata(build_manifest)
@@ -223,6 +225,7 @@ def seed_ci(
                     manifest,
                     plan,
                 ),
+                autoremove=autoremove,
             )
             seeded.add(plan.image)
 
@@ -237,6 +240,7 @@ def seed_ci(
                     manifest,
                     plan,
                 ),
+                autoremove=autoremove,
             )
             seeded.add(plan.builder_image)
 
@@ -300,6 +304,8 @@ def _seed_image(
     image: str,
     ci_registry: str,
     create: Any,
+    *,
+    autoremove: bool = False,
 ) -> None:
     if _ci_remote_image_exists(podman, image, ci_registry):
         log(f"CI image already exists: {_ci_remote_image(ci_registry, image)}")
@@ -307,6 +313,8 @@ def _seed_image(
     if not _local_image_exists(podman, image):
         create()
     _push_ci_image(podman, image, ci_registry)
+    if autoremove:
+        _remove_image(podman, image)
 
 
 def _create_seed_package_image(

@@ -748,6 +748,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory containing the default CI build manifest. Defaults to ./cache.",
     )
+    seed_parser.add_argument(
+        "--autoremove",
+        action="store_true",
+        help="Remove each local seed image after it is uploaded.",
+    )
     seed_parser.set_defaults(func=ci_command)
 
     cleanup = subcommands.add_parser(
@@ -1111,7 +1116,11 @@ def ci_command(args: argparse.Namespace) -> int:
         )
         return 0
     if args.ci_action == "seed":
-        seed_ci(args.build_manifest, cache_dir=args.cache_dir)
+        seed_ci(
+            args.build_manifest,
+            cache_dir=args.cache_dir,
+            autoremove=args.autoremove,
+        )
         return 0
     raise ConfigError(f"unknown ci action: {args.ci_action}")
 
