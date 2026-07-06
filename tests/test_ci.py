@@ -192,11 +192,8 @@ class CiParserTests(unittest.TestCase):
 
 
 class PrepareCiTests(unittest.TestCase):
-    def test_remote_image_exists_checks_manifest_head(self) -> None:
-        with (
-            patch("ludos.ci._registry_basic_auth", return_value="basic-token"),
-            patch("ludos.ci._registry_head", return_value=(200, {})) as head,
-        ):
+    def test_remote_image_exists_uses_shared_registry_check(self) -> None:
+        with patch("ludos.ci._remote_cache_image_exists", return_value=True) as remote:
             exists = _ci_remote_image_exists(
                 "podman",
                 "orchestrator:f44",
@@ -204,46 +201,7 @@ class PrepareCiTests(unittest.TestCase):
             )
 
         self.assertTrue(exists)
-        url, headers = head.call_args.args
-        self.assertEqual(
-            url,
-            "https://ghcr.io/v2/anatase-org/orchestrator/manifests/f44",
-        )
-        self.assertEqual(headers["Authorization"], "Basic basic-token")
-        self.assertIn(
-            "application/vnd.oci.image.manifest.v1+json",
-            headers["Accept"],
-        )
-
-    def test_remote_image_exists_uses_bearer_challenge(self) -> None:
-        challenge = (
-            'Bearer realm="https://ghcr.io/token",'
-            'service="ghcr.io",'
-            'scope="repository:anatase-org/orchestrator:pull"'
-        )
-        with (
-            patch("ludos.ci._registry_basic_auth", return_value="basic-token"),
-            patch(
-                "ludos.ci._registry_bearer_token",
-                return_value="bearer-token",
-            ) as token,
-            patch(
-                "ludos.ci._registry_head",
-                side_effect=[(401, {"www-authenticate": challenge}), (200, {})],
-            ) as head,
-        ):
-            exists = _ci_remote_image_exists(
-                "podman",
-                "orchestrator:f44",
-                "ghcr.io/anatase-org",
-            )
-
-        self.assertTrue(exists)
-        token.assert_called_once_with(challenge, "basic-token")
-        self.assertEqual(
-            head.call_args_list[1].args[1]["Authorization"],
-            "Bearer bearer-token",
-        )
+        remote.assert_called_once_with("ghcr.io/anatase-org/orchestrator:f44")
 
     def test_init_ci_creates_and_pushes_missing_init_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
