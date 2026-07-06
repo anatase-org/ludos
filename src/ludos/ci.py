@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import base64
+import json
 import lzma
+import os
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +44,15 @@ from .model import ConfigError
 
 
 DEFAULT_CI_CACHE_DIR = Path("cache")
+_OCI_MANIFEST_ACCEPT = ", ".join(
+    (
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    )
+)
+_REGISTRY_TIMEOUT = 2.0
 
 
 class _LiteralString(str):
@@ -276,17 +290,144 @@ def _ci_remote_image(ci_registry: str, image: str) -> str:
     return f"{registry}/{repository}:{tag}"
 
 
-def _ci_remote_image_exists(podman: str, image: str, ci_registry: str) -> bool:
+def _ci_remote_image_exists(_podman: str, image: str, ci_registry: str) -> bool:
     remote = _ci_remote_image(ci_registry, image)
-    return (
-        subprocess.run(
-            [podman, "manifest", "inspect", remote],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ).returncode
-        == 0
+    return _registry_manifest_exists(remote)
+
+
+def _registry_manifest_exists(remote: str) -> bool:
+    registry, repository, reference = _split_remote_image(remote)
+    url = (
+        f"https://{registry}/v2/"
+        f"{urllib.parse.quote(repository, safe='/')}/manifests/"
+        f"{urllib.parse.quote(reference, safe='')}"
     )
+    headers = {"Accept": _OCI_MANIFEST_ACCEPT}
+    basic_auth = _registry_basic_auth(registry)
+    if basic_auth:
+        headers["Authorization"] = f"Basic {basic_auth}"
+
+    status, response_headers = _registry_head(url, headers)
+    if status == 401:
+        token = _registry_bearer_token(
+            response_headers.get("www-authenticate", ""),
+            basic_auth,
+        )
+        if token:
+            status, _response_headers = _registry_head(
+                url,
+                {
+                    "Accept": _OCI_MANIFEST_ACCEPT,
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+
+    return status == 200
+
+
+def _registry_head(
+    url: str,
+    headers: dict[str, str],
+) -> tuple[int, dict[str, str]]:
+    request = urllib.request.Request(url, headers=headers, method="HEAD")
+    try:
+        with urllib.request.urlopen(request, timeout=_REGISTRY_TIMEOUT) as response:
+            return response.status, _lower_headers(response.headers.items())
+    except urllib.error.HTTPError as exc:
+        return exc.code, _lower_headers(exc.headers.items())
+    except OSError:
+        return 0, {}
+
+
+def _lower_headers(headers: Any) -> dict[str, str]:
+    return {key.lower(): value for key, value in headers}
+
+
+def _registry_bearer_token(challenge: str, basic_auth: str | None) -> str | None:
+    if not challenge.lower().startswith("bearer "):
+        return None
+    params = urllib.request.parse_keqv_list(
+        urllib.request.parse_http_list(challenge[7:])
+    )
+    realm = params.get("realm")
+    if not realm:
+        return None
+
+    query = {
+        key: value
+        for key in ("service", "scope")
+        if (value := params.get(key))
+    }
+    token_url = realm
+    if query:
+        token_url = f"{realm}?{urllib.parse.urlencode(query)}"
+    headers = {"Accept": "application/json"}
+    if basic_auth:
+        headers["Authorization"] = f"Basic {basic_auth}"
+    request = urllib.request.Request(token_url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=_REGISTRY_TIMEOUT) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    token = payload.get("token") or payload.get("access_token")
+    return token if isinstance(token, str) and token else None
+
+
+def _split_remote_image(remote: str) -> tuple[str, str, str]:
+    registry, path = remote.split("/", 1)
+    repository, reference = path.rsplit(":", 1)
+    return registry, repository, reference
+
+
+def _registry_basic_auth(registry: str) -> str | None:
+    for auth_file in _registry_auth_files():
+        try:
+            data = json.loads(auth_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        auths = data.get("auths")
+        if not isinstance(auths, dict):
+            continue
+        for key, entry in auths.items():
+            if (
+                not isinstance(key, str)
+                or not _auth_key_matches_registry(key, registry)
+            ):
+                continue
+            if not isinstance(entry, dict):
+                continue
+            auth = entry.get("auth")
+            if isinstance(auth, str) and auth:
+                return auth
+            username = entry.get("username")
+            password = entry.get("password")
+            if isinstance(username, str) and isinstance(password, str):
+                return base64.b64encode(f"{username}:{password}".encode()).decode()
+    return None
+
+
+def _registry_auth_files() -> tuple[Path, ...]:
+    paths = []
+    if auth_file := os.environ.get("REGISTRY_AUTH_FILE"):
+        paths.append(Path(auth_file).expanduser())
+    if runtime_dir := os.environ.get("XDG_RUNTIME_DIR"):
+        paths.append(Path(runtime_dir) / "containers" / "auth.json")
+    paths.append(Path.home() / ".config" / "containers" / "auth.json")
+    if docker_config := os.environ.get("DOCKER_CONFIG"):
+        paths.append(Path(docker_config).expanduser() / "config.json")
+    paths.append(Path.home() / ".docker" / "config.json")
+    return tuple(dict.fromkeys(paths))
+
+
+def _auth_key_matches_registry(key: str, registry: str) -> bool:
+    parsed = urllib.parse.urlsplit(key)
+    if parsed.netloc:
+        key = parsed.netloc + parsed.path
+    key = key.strip().rstrip("/")
+    if key.endswith("/v1"):
+        key = key[:-3].rstrip("/")
+    return key == registry
 
 
 def _push_ci_image(podman: str, image: str, ci_registry: str) -> None:
