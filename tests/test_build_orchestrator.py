@@ -61,6 +61,11 @@ class BuildOrchestratorImageTests(unittest.TestCase):
             "localhost/orchestrator:fedora-12345678-20260616 >/dev/null",
             stream.call_args_list[1].kwargs["input_text"],
         )
+        self.assertIn(
+            'rm -rf "$mount_path/var/cache/dnf" '
+            '"$mount_path/var/cache/libdnf5"',
+            stream.call_args_list[1].kwargs["input_text"],
+        )
         run.assert_called_once_with(
             ["podman", "tag", image, "localhost/orchestrator:latest"],
             check=True,

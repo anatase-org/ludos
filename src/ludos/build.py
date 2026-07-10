@@ -1935,6 +1935,7 @@ def _dnf_install_script(
     installroot_line = f"    --installroot={installroot} \\\n" if installroot else ""
     clean_root = installroot or ""
     clean_cache = f"{clean_root}/var/cache/dnf".replace("//", "/")
+    clean_system_cache = f"{clean_root}/var/cache/libdnf5".replace("//", "/")
     clean_logs = f"{clean_root}/var/log/dnf*".replace("//", "/")
     rpm_lines = " \\\n".join(f"    {shlex.quote(path)}" for path in rpm_paths)
     return f"""{cache_comments}set -e
@@ -1942,6 +1943,7 @@ dnf5 -y \\
 {installroot_line}    --releasever={releasever} \\
     --setopt=reposdir=/ludos/dnf/repos \\
     --setopt=cachedir=/ludos/dnf/cache \\
+    --setopt=system_cachedir=/ludos/dnf/cache \\
     --setopt=persistdir=/ludos/dnf/persist \\
     --setopt=logdir=/ludos/dnf/log \\
     --setopt=install_weak_deps=False \\
@@ -1953,7 +1955,7 @@ dnf5 -y \\
     --allowerasing \\
 {rpm_lines} \\
     && \\
-    rm -rf {clean_cache} {clean_logs}
+    rm -rf {clean_cache} {clean_system_cache} {clean_logs}
 """
 
 
@@ -2641,7 +2643,7 @@ def _create_orchestrator_image(
                 ],
                 raw_suffix=f" {package_args}",
             ),
-            'rm -rf "$mount_path/var/cache/dnf"',
+            'rm -rf "$mount_path/var/cache/dnf" "$mount_path/var/cache/libdnf5"',
             'find "$mount_path/var/log" -maxdepth 1 -name "dnf*" '
             "-exec rm -rf {} + 2>/dev/null || true",
             f"{buildah_command} unmount \"$container\" >/dev/null",
@@ -2739,6 +2741,7 @@ def _create_builder_image(
                 f"--releasever={releasever}",
                 "--setopt=reposdir=/ludos/dnf/repos",
                 "--setopt=cachedir=/ludos/dnf/cache",
+                "--setopt=system_cachedir=/ludos/dnf/cache",
                 "--setopt=persistdir=/ludos/dnf/persist",
                 "--setopt=logdir=/ludos/dnf/log",
                 "--setopt=install_weak_deps=False",
@@ -2750,7 +2753,7 @@ def _create_builder_image(
             ],
             raw_suffix=f" {rpm_paths}",
         ),
-        'rm -rf "$mount_path/var/cache/dnf"',
+        'rm -rf "$mount_path/var/cache/dnf" "$mount_path/var/cache/libdnf5"',
         'find "$mount_path/var/log" -maxdepth 1 -name "dnf*" -exec rm -rf {} + 2>/dev/null || true',
     ]
     _create_scratch_image(buildah=buildah, image=image, body=body)
@@ -2793,6 +2796,7 @@ def _create_repo_image(
                 "dnf5",
                 "--setopt=reposdir=/ludos/dnf/repos",
                 "--setopt=cachedir=/ludos/dnf/cache",
+                "--setopt=system_cachedir=/ludos/dnf/cache",
                 "--setopt=persistdir=/ludos/dnf/persist",
                 "--setopt=logdir=/ludos/dnf/log",
                 "--disable-repo=*",
@@ -2843,6 +2847,7 @@ def _resolve_packages(
         "--assumeno",
         "--setopt=reposdir=/ludos/dnf/repos",
         "--setopt=cachedir=/ludos/dnf/cache",
+        "--setopt=system_cachedir=/ludos/dnf/cache",
         "--setopt=persistdir=/ludos/dnf/persist",
         "--setopt=logdir=/ludos/dnf/log",
         "--setopt=install_weak_deps=False",
@@ -3006,6 +3011,7 @@ def _package_rpm_files(
             *orchestrator_dnf_base,
             "--setopt=reposdir=/ludos/dnf/repos",
             "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=system_cachedir=/ludos/dnf/cache",
             "--setopt=persistdir=/ludos/dnf/persist",
             "--setopt=logdir=/ludos/dnf/log",
             "--disable-repo=*",
@@ -3054,6 +3060,7 @@ def _download_block_packages(
                 "-y",
                 "--setopt=reposdir=/ludos/dnf/repos",
                 "--setopt=cachedir=/ludos/dnf/cache",
+                "--setopt=system_cachedir=/ludos/dnf/cache",
                 "--setopt=persistdir=/ludos/dnf/persist",
                 "--setopt=logdir=/ludos/dnf/log",
                 "--disable-repo=*",
@@ -3090,6 +3097,7 @@ def _download_exact_packages(
             "-y",
             "--setopt=reposdir=/ludos/dnf/repos",
             "--setopt=cachedir=/ludos/dnf/cache",
+            "--setopt=system_cachedir=/ludos/dnf/cache",
             "--setopt=persistdir=/ludos/dnf/persist",
             "--setopt=logdir=/ludos/dnf/log",
             "--disable-repo=*",
@@ -4118,6 +4126,7 @@ def _resolve_spec_build_requires(
         "--assumeno",
         "--setopt=reposdir=/ludos/dnf/repos",
         "--setopt=cachedir=/ludos/dnf/cache",
+        "--setopt=system_cachedir=/ludos/dnf/cache",
         "--setopt=persistdir=/ludos/dnf/persist",
         "--setopt=logdir=/ludos/dnf/log",
         "--setopt=install_weak_deps=False",
@@ -4191,6 +4200,7 @@ def _resolve_package_arch_variants(
         *orchestrator_dnf_base,
         "--setopt=reposdir=/ludos/dnf/repos",
         "--setopt=cachedir=/ludos/dnf/cache",
+        "--setopt=system_cachedir=/ludos/dnf/cache",
         "--setopt=persistdir=/ludos/dnf/persist",
         "--setopt=logdir=/ludos/dnf/log",
         "--disable-repo=*",

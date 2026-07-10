@@ -627,7 +627,7 @@ def _create_orchestrator_image(
                 ],
                 raw_suffix=f" {package_args}",
             ),
-            'rm -rf "$mount_path/var/cache/dnf"',
+            'rm -rf "$mount_path/var/cache/dnf" "$mount_path/var/cache/libdnf5"',
             'find "$mount_path/var/log" -maxdepth 1 -name "dnf*" '
             "-exec rm -rf {} + 2>/dev/null || true",
             f"{buildah_command} unmount \"$container\" >/dev/null",
@@ -706,6 +706,7 @@ def _create_repo_image(
                 "dnf5",
                 "--setopt=reposdir=/ludos/dnf/repos",
                 "--setopt=cachedir=/ludos/dnf/cache",
+                "--setopt=system_cachedir=/ludos/dnf/cache",
                 "--setopt=persistdir=/ludos/dnf/persist",
                 "--setopt=logdir=/ludos/dnf/log",
                 "--disable-repo=*",

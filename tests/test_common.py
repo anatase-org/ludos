@@ -2,15 +2,37 @@ from __future__ import annotations
 
 import datetime as _datetime
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
 from ludos.common import (
     _default_cache_version,
+    _create_repo_image,
     _ensure_image,
     _remote_cache_image,
     _remote_cache_image_exists,
 )
+
+
+class RepoImageTests(unittest.TestCase):
+    def test_refresh_uses_mounted_system_cache(self) -> None:
+        with patch("ludos.common._create_scratch_image") as create:
+            _create_repo_image(
+                podman="podman",
+                buildah="buildah",
+                orchestrator="orchestrator:test",
+                root_dir=Path("/workspace"),
+                image="repos:test",
+                repo_name="updates.repo",
+                repo_id="updates",
+                rendered_repo="[updates]\nmetalink=https://example.test\n",
+            )
+
+        body = "\n".join(create.call_args.kwargs["body"])
+        self.assertIn("--setopt=cachedir=/ludos/dnf/cache", body)
+        self.assertIn("--setopt=system_cachedir=/ludos/dnf/cache", body)
+        self.assertIn("makecache --refresh", body)
 
 
 class DefaultCacheVersionTests(unittest.TestCase):
