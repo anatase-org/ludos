@@ -312,7 +312,6 @@ def _patch_source_for_spec(
             packages=spec.packages,
             replace=spec.replace,
             files=spec.files,
-            hash_revision=spec.hash_revision,
             upstream=spec.upstream,
             patch=patch,
         ),

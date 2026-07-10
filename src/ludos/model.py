@@ -92,7 +92,6 @@ class SpecBuild:
     packages: dict[str, tuple[str, ...]] = field(default_factory=dict)
     replace: dict[str, str] = field(default_factory=dict)
     files: tuple[str, ...] = tuple()
-    hash_revision: bool = False
     upstream: UpstreamRef | None = None
     patch: PatchRef | None = None
 
@@ -695,7 +694,6 @@ def _spec_builds_tuple(
         packages = _packages_dict(item, "packages", path, label)
         replace = _spec_replace_dict(item, "replace", path, label)
         files = _spec_files_tuple(item, "files", path, label)
-        hash_revision = _optional_bool(item, "hash-revision", path, label)
         upstream = _upstream_ref(item, "upstream", path, label)
         patch = _patch_ref(item, "patch", path, label)
         specs.append(
@@ -704,7 +702,6 @@ def _spec_builds_tuple(
                 packages=packages,
                 replace=replace,
                 files=files,
-                hash_revision=hash_revision,
                 upstream=upstream,
                 patch=patch,
             )

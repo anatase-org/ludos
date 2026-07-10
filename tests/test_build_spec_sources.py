@@ -43,19 +43,26 @@ class GitSpecSourceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def test_cache_initializes_and_updates_to_new_head(self) -> None:
+    def test_stage_initializes_and_updates_cache_to_looked_up_revision(self) -> None:
         self._write("pkg/test.spec", "Name: test\nVersion: 1\n")
         self._commit("initial spec")
         spec = self._spec("pkg/test.spec", files=("test.spec",))
 
-        first_hash = self._hash(spec)
+        first_hash, first_revisions = self._hash_with_revisions(spec)
         cached_repo = self.cache_dir / _git_source_cache_key(self.repo.as_uri()) / "repo"
+        self.assertFalse(cached_repo.exists())
+
+        self._stage(spec, first_revisions)
+
         self.assertTrue((cached_repo / ".git").is_dir())
         self.assertEqual(self._rev_parse(cached_repo), self._rev_parse(self.repo))
 
         self._write("pkg/test.spec", "Name: test\nVersion: 2\n")
         self._commit("update spec")
-        second_hash = self._hash(spec)
+        second_hash, second_revisions = self._hash_with_revisions(spec)
+        self.assertNotEqual(self._rev_parse(cached_repo), self._rev_parse(self.repo))
+
+        self._stage(spec, second_revisions)
 
         self.assertNotEqual(first_hash, second_hash)
         self.assertEqual(self._rev_parse(cached_repo), self._rev_parse(self.repo))
@@ -66,8 +73,8 @@ class GitSpecSourceTests(unittest.TestCase):
         self._commit("hhd files")
         spec = self._spec("hhd.spec", files=("hhd.spec",))
 
-        self._hash(spec)
-        self._stage(spec)
+        _hash, revisions = self._hash_with_revisions(spec)
+        self._stage(spec, revisions)
 
         self.assertEqual(tuple(path.name for path in self._workspace_files()), ("hhd.spec",))
 
@@ -79,8 +86,8 @@ class GitSpecSourceTests(unittest.TestCase):
         self._commit("directory spec")
         spec = self._spec("pkg/test.spec")
 
-        self._hash(spec)
-        self._stage(spec)
+        _hash, revisions = self._hash_with_revisions(spec)
+        self._stage(spec, revisions)
 
         self.assertEqual(
             tuple(path.name for path in self._workspace_files()),
@@ -172,7 +179,7 @@ class GitSpecSourceTests(unittest.TestCase):
             ["scx-scheds.spec", "scx-tools.spec"],
         )
 
-    def test_hash_ignores_unselected_files_by_default(self) -> None:
+    def test_git_spec_hash_tracks_commits_outside_selected_files(self) -> None:
         self._write("hhd.spec", "Name: hhd\nVersion: 1\n")
         self._write("README.md", "first\n")
         self._commit("initial")
@@ -186,25 +193,76 @@ class GitSpecSourceTests(unittest.TestCase):
         self._commit("selected update")
         third_hash = self._hash(spec)
 
-        self.assertEqual(first_hash, second_hash)
+        self.assertNotEqual(first_hash, second_hash)
         self.assertNotEqual(second_hash, third_hash)
 
-    def test_hash_revision_tracks_head_for_floating_specs(self) -> None:
-        self._write("hhd-git.spec", "Version: {{{ git_dir_version }}}\n")
+    def test_git_spec_hash_tracks_head_without_populating_cache(self) -> None:
+        self._write("hhd-git.spec", "Name: hhd\nVersion: 1\n")
         self._write("README.md", "first\n")
         self._commit("initial")
         spec = self._spec(
             "hhd-git.spec",
             files=("hhd-git.spec",),
-            hash_revision=True,
         )
 
         first_hash = self._hash(spec)
+        cached_repo = self.cache_dir / _git_source_cache_key(self.repo.as_uri()) / "repo"
+        self.assertFalse(cached_repo.exists())
         self._write("README.md", "second\n")
         self._commit("unselected update")
         second_hash = self._hash(spec)
 
         self.assertNotEqual(first_hash, second_hash)
+
+    def test_git_spec_hash_cache_only_uses_cached_head(self) -> None:
+        self._write("hhd-git.spec", "Name: hhd\nVersion: 1\n")
+        self._commit("initial")
+        spec = self._spec("hhd-git.spec")
+        _hash, revisions = self._hash_with_revisions(spec)
+        self._stage(spec, revisions)
+        cached_revision = revisions[0][1]
+        self._write("README.md", "new upstream content\n")
+        self._commit("new head")
+
+        _hash, cached_revisions = _card_specs_hash(
+            self.card_source,
+            (spec,),
+            {},
+            "",
+            self.cache_dir,
+            cache_only=True,
+        )
+
+        self.assertEqual(cached_revisions, ((spec.spec, cached_revision),))
+
+    def test_stage_renders_parse_time_git_revision_macros(self) -> None:
+        self._write(
+            "pkg/hhd-ui-git.spec",
+            "\n".join(
+                (
+                    "%global commit %(git rev-parse --verify HEAD)",
+                    "%global shortcommit %(git rev-parse --short=12 %{commit})",
+                    "%global gitversion %(tag=$(git describe --tags --abbrev=0 "
+                    "--match 'v[0-9]*' %{commit} 2>/dev/null || :); printf x)",
+                    "Name: hhd-ui",
+                    "Version: %{gitversion}",
+                    "",
+                )
+            ),
+        )
+        self._commit("release")
+        self._git(["tag", "v1.2.3"], cwd=self.repo)
+        self._write("README.md", "new source\n")
+        self._commit("snapshot")
+        spec = self._spec("pkg/hhd-ui-git.spec")
+        _hash, revisions = self._hash_with_revisions(spec)
+
+        self._stage(spec, revisions)
+
+        rendered = self._workspace_file("hhd-ui-git.spec").read_text()
+        self.assertNotIn("%(git", rendered)
+        self.assertIn(f"%global commit {self._rev_parse(self.repo)}", rendered)
+        self.assertIn("%global gitversion 1.2.3+git.1.g", rendered)
 
     def test_card_hash_expression_overrides_spec_hash(self) -> None:
         self._write("hhd.spec", "Name: hhd\nVersion: 1\n")
@@ -252,7 +310,6 @@ class GitSpecSourceTests(unittest.TestCase):
         spec = self._spec("hhd.spec", files=("hhd.spec",))
         _hash, revisions = self._hash_with_revisions(spec)
 
-        shutil.rmtree(self.cache_dir)
         self._write("hhd.spec", "Name: hhd\nVersion: 2\n")
         self._commit("new head")
         self._stage(spec, revisions)
@@ -264,10 +321,12 @@ class GitSpecSourceTests(unittest.TestCase):
         self._commit("initial")
         spec = self._spec("hhd.spec", files=("hhd.spec",))
         _hash, revisions = self._hash_with_revisions(spec)
+        self._stage(spec, revisions)
 
         self._write("hhd.spec", "Name: hhd\nVersion: 2\n")
         self._commit("new head")
-        self._hash(spec)
+        _new_hash, new_revisions = self._hash_with_revisions(spec)
+        self._stage(spec, new_revisions)
         cached_repo = self.cache_dir / _git_source_cache_key(self.repo.as_uri()) / "repo"
         self.assertEqual(self._rev_parse(cached_repo), self._rev_parse(self.repo))
 
@@ -286,7 +345,6 @@ class GitSpecSourceTests(unittest.TestCase):
                     "  - spec: git+https://example.com/repo:hhd.spec",
                     "    files:",
                     "      - hhd.spec",
-                    "    hash-revision: true",
                     "    packages:",
                     "      - hhd",
                     "",
@@ -298,7 +356,6 @@ class GitSpecSourceTests(unittest.TestCase):
         card = Card.from_file(card_path)
 
         self.assertEqual(card.specs[0].files, ("hhd.spec",))
-        self.assertTrue(card.specs[0].hash_revision)
 
         scalar_card_path = self.root / "scalar-card.yml"
         scalar_card_path.write_text(
@@ -324,13 +381,11 @@ class GitSpecSourceTests(unittest.TestCase):
         spec_path: str,
         *,
         files: tuple[str, ...] = tuple(),
-        hash_revision: bool = False,
     ) -> SpecBuild:
         return SpecBuild(
             spec=f"git+{self.repo.as_uri()}:{spec_path}",
             packages={"*": ("test",)},
             files=files,
-            hash_revision=hash_revision,
         )
 
     def _hash(self, spec: SpecBuild) -> str:

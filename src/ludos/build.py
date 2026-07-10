@@ -3783,6 +3783,7 @@ def _stage_card_specs(
                 ignore_base_dir=spec_source.base_dir,
             )
         staged_spec_path = staged_source_dir / spec_source.spec_path.name
+        _render_git_spec(staged_spec_path, spec_source)
         _transform_staged_spec(
             staged_spec_path,
             spec.replace,
@@ -3929,6 +3930,101 @@ def _transform_staged_spec(
     text = _prune_arch_sources(text, arch)
     text = _drop_nvidia_kmod_runtime_requires(text)
     spec_path.write_text(text, encoding="utf-8")
+
+
+def _render_git_spec(
+    spec_path: Path,
+    spec_source: SpecSource,
+) -> None:
+    """Render the small set of VCS spec macros used by git spec sources."""
+    if not spec_source.revision:
+        return
+    text = spec_path.read_text(encoding="utf-8")
+    text = _render_git_revision_macros(text, spec_source)
+    spec_path.write_text(text, encoding="utf-8")
+
+
+def _git_spec_revisions(spec_source: SpecSource) -> tuple[str, str]:
+    git = shutil.which("git")
+    if not git:
+        raise ConfigError("git must be installed to render git spec sources")
+    repo_dir = spec_source.base_dir
+    revision = spec_source.revision
+    short_revision = _git_stdout(
+        git, repo_dir, ["rev-parse", "--short=12", revision], "git short revision"
+    )
+    return revision, short_revision
+
+
+def _render_git_revision_macros(text: str, spec_source: SpecSource) -> str:
+    commit_pattern = r"^%global\s+commit\s+%\(git rev-parse --verify HEAD\)\s*$"
+    short_pattern = (
+        r"^%global\s+shortcommit\s+%\(git rev-parse --short=12 %\{commit\}\)\s*$"
+    )
+    version_pattern = r"^%global\s+gitversion\s+%\(tag=\$\(git describe .*$"
+    if not re.search(commit_pattern, text, re.MULTILINE):
+        return text
+    revision, short_revision = _git_spec_revisions(spec_source)
+    git = shutil.which("git")
+    if not git:
+        raise ConfigError("git must be installed to render git spec sources")
+    repo_dir = spec_source.base_dir
+    tag_result = subprocess.run(
+        [
+            git,
+            "-C",
+            str(repo_dir),
+            "describe",
+            "--tags",
+            "--abbrev=0",
+            "--match",
+            "v[0-9]*",
+            revision,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if tag_result.returncode == 0 and tag_result.stdout.strip():
+        tag = tag_result.stdout.strip()
+        version = tag.removeprefix("v")
+        commits = int(
+            _git_stdout(
+                git,
+                repo_dir,
+                ["rev-list", "--count", f"{tag}..{revision}"],
+                "git tag distance",
+            )
+        )
+        if commits:
+            version += f"+git.{commits}.g{short_revision}"
+    else:
+        commits = _git_stdout(
+            git,
+            repo_dir,
+            ["rev-list", "--count", revision],
+            "git commit count",
+        )
+        version = f"0.0.0+git.{commits}.g{short_revision}"
+    text = re.sub(
+        commit_pattern,
+        f"%global commit {revision}",
+        text,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(
+        short_pattern,
+        f"%global shortcommit {short_revision}",
+        text,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(
+        version_pattern,
+        f"%global gitversion {version}",
+        text,
+        flags=re.MULTILINE,
+    )
+    return text
 
 
 def _prune_arch_sources(text: str, arch: str) -> str:
@@ -4574,6 +4670,16 @@ def _card_specs_hash(
             for package in packages:
                 digest.update(package.encode("utf-8"))
                 digest.update(b"\0")
+        if _is_git_source(spec.spec):
+            revision = _git_spec_source_revision(
+                spec.spec,
+                spec_source_cache_dir,
+                cache_only=cache_only,
+            )
+            source_revisions.append((spec.spec, revision))
+            digest.update(revision.encode("utf-8"))
+            digest.update(b"\0")
+            continue
         spec_source = _resolve_spec_source(
             card_source,
             spec.spec,
@@ -4583,9 +4689,6 @@ def _card_specs_hash(
         )
         if spec_source.revision:
             source_revisions.append((spec.spec, spec_source.revision))
-        if spec.hash_revision and spec_source.revision:
-            digest.update(spec_source.revision.encode("utf-8"))
-            digest.update(b"\0")
         spec_dir = spec_source.spec_path.parent
         if spec.files:
             hash_paths = (
@@ -4750,6 +4853,8 @@ def _resolve_git_spec_source(
         raise ConfigError(f"{card_source}: spec '{source}' escapes the git source") from exc
     if not spec_path.is_file():
         raise ConfigError(f"{card_source}: spec '{source}' is missing")
+    if (not cache_only or revision) and _git_spec_needs_history(spec_path):
+        _fetch_git_spec_history(git, repo_dir, source)
     revision = _git_stdout(
         git,
         repo_dir,
@@ -4763,6 +4868,89 @@ def _resolve_git_spec_source(
         revision=revision,
         stage_prefix=Path("spec-sources") / source_key,
     )
+
+
+def _git_spec_source_revision(
+    source: str,
+    spec_source_cache_dir: Path,
+    *,
+    cache_only: bool,
+) -> str:
+    git = shutil.which("git")
+    if not git:
+        raise ConfigError("git must be installed to use git spec sources")
+    repo_url, ref, _spec_relpath = _parse_git_spec_source(source)
+    if ref[0] == "commit":
+        revision = ref[1]
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+            raise ConfigError(f"git spec source '{source}' has invalid commit")
+        return revision.lower()
+    source_key = _git_source_cache_key(repo_url)
+    repo_dir = spec_source_cache_dir / source_key / "repo"
+    if cache_only:
+        if not _is_git_repository(git, repo_dir):
+            raise ConfigError(f"{source}: git spec source is not cached")
+        return _git_stdout(
+            git,
+            repo_dir,
+            ["rev-parse", "HEAD"],
+            "cached git spec source revision",
+        )
+
+    lookup_ref = _git_fetch_ref(ref)
+    log(f"Looking up git spec source revision: {source}")
+    result = subprocess.run(
+        [git, "ls-remote", repo_url, lookup_ref, f"{lookup_ref}^{{}}"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise ConfigError(
+            f"git spec source revision lookup failed with exit status "
+            f"{result.returncode}"
+        )
+    revisions = [
+        line.split("\t", 1)[0]
+        for line in result.stdout.splitlines()
+        if "\t" in line
+    ]
+    if not revisions:
+        raise ConfigError(f"git spec source '{source}' ref was not found")
+    revision = revisions[-1]
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        raise ConfigError(f"git spec source '{source}' returned an invalid revision")
+    return revision.lower()
+
+
+def _git_spec_needs_history(spec_path: Path) -> bool:
+    text = spec_path.read_text(encoding="utf-8")
+    return "%global gitversion %(" in text
+
+
+def _fetch_git_spec_history(git: str, repo_dir: Path, source: str) -> None:
+    for attempt in range(2):
+        shallow = (
+            subprocess.run(
+                [git, "-C", str(repo_dir), "rev-parse", "--is-shallow-repository"],
+                check=False,
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            == "true"
+        )
+        if not shallow:
+            return
+        if attempt == 0:
+            log(f"Fetching git history for spec rendering: {source}")
+        args = [git, "-C", str(repo_dir), "fetch", "--tags", "origin"]
+        args.insert(4, "--unshallow")
+        try:
+            _run_logged_command(args, "git spec source history fetch")
+            return
+        except ConfigError:
+            if attempt:
+                raise
 
 
 def _update_git_source_cache(
