@@ -468,7 +468,7 @@ class PrepareCiTests(unittest.TestCase):
             )
             self.assertEqual(
                 data["flatpaks"]["f44-kate-output"]["images"]["builder"],
-                "builders:f44-flatpak-kate-builder",
+                "builders:f44-flatpak-builder",
             )
             self.assertEqual(
                 data["flatpaks"]["f44-kate-output"]["specs"][0]["spec"],
@@ -625,7 +625,7 @@ class PrepareCiTests(unittest.TestCase):
             output_image="flatpaks:f44-kate-output",
             latest_image="flatpaks:kate",
             build_image="builds:f44-flatpak-kate-build",
-            builder_image="builders:f44-flatpak-kate-builder",
+            builder_image="builders:f44-flatpak-builder",
             spec_build_dir=cache / "f44-x86_64" / "flatpaks" / "kate" / "spec-build",
             artifact_cache_dir=cache / "f44-x86_64" / "build-artifacts" / "flatpaks" / "kate",
             final_build_dir=cache / "f44-x86_64" / "build" / "flatpaks" / "kate",

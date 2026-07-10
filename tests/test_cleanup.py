@@ -154,14 +154,14 @@ class CleanupImageKeepTests(unittest.TestCase):
     def test_keeps_flatpak_builder_images(self) -> None:
         self.assertTrue(
             _keep_named_image(
-                "localhost/builders:f44-x86_64-flatpak-browser-def456",
+                "localhost/builders:f44-x86_64-flatpak-def456",
                 "localhost/builders",
-                "f44-x86_64-flatpak-browser-def456",
+                "f44-x86_64-flatpak-def456",
                 {"localhost/orchestrator", "localhost/repos"},
                 {"localhost/orchestrator", "localhost/installer"},
                 {"localhost/cards", "localhost/builds", "localhost/builders", "localhost/installer"},
                 set(),
-                {"localhost/builders:f44-x86_64-flatpak-browser-def456"},
+                {"localhost/builders:f44-x86_64-flatpak-def456"},
                 "-20260616",
             )
         )
@@ -179,14 +179,14 @@ class CleanupImageKeepTests(unittest.TestCase):
     def test_removes_stale_flatpak_cache_images(self) -> None:
         self.assertFalse(
             _keep_named_image(
-                "localhost/builders:f44-x86_64-flatpak-browser-oldhash",
+                "localhost/builders:f44-x86_64-flatpak-oldhash",
                 "localhost/builders",
-                "f44-x86_64-flatpak-browser-oldhash",
+                "f44-x86_64-flatpak-oldhash",
                 {"localhost/orchestrator", "localhost/repos"},
                 {"localhost/orchestrator", "localhost/installer"},
                 {"localhost/cards", "localhost/builds", "localhost/builders", "localhost/installer"},
                 set(),
-                {"localhost/builders:f44-x86_64-flatpak-browser-current"},
+                {"localhost/builders:f44-x86_64-flatpak-current"},
                 "-20260616",
             )
         )
@@ -203,7 +203,7 @@ class CleanupImageKeepTests(unittest.TestCase):
         flatpak_result = SimpleNamespace(
             output_images=("localhost/flatpaks:f44-x86_64-browser",),
             build_images=("localhost/builds:f44-x86_64-flatpak-browser-jkl012",),
-            builder_images=("localhost/builders:f44-x86_64-flatpak-browser-mno345",),
+            builder_images=("localhost/builders:f44-x86_64-flatpak-mno345",),
         )
 
         with (
@@ -216,7 +216,7 @@ class CleanupImageKeepTests(unittest.TestCase):
             targets = _manifest_cleanup_targets(Path("anatase.yml"), "20260616")
 
         self.assertIn("localhost/builds:f44-x86_64-flatpak-browser-jkl012", targets)
-        self.assertIn("localhost/builders:f44-x86_64-flatpak-browser-mno345", targets)
+        self.assertIn("localhost/builders:f44-x86_64-flatpak-mno345", targets)
         self.assertIn("localhost/flatpaks:f44-x86_64-browser", targets)
 
     def test_manifest_targets_allow_cache_creation_by_default(self) -> None:

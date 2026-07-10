@@ -613,6 +613,13 @@ specs:
             tuple(plan.latest_image for plan in plans),
             ("flatpaks:kate", "flatpaks:ark"),
         )
+        self.assertEqual(plans[0].builder_image, plans[1].builder_image)
+        self.assertRegex(
+            plans[0].builder_image,
+            r"^builders:f44-x86_64-flatpak-[0-9a-f]{8}$",
+        )
+        self.assertNotIn("kate", plans[0].builder_image)
+        self.assertNotIn("ark", plans[1].builder_image)
         self.assertEqual(tuple(plan.branch for plan in plans), ("stable", "stable"))
         self.assertTrue(
             all(

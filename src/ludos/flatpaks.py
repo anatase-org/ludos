@@ -456,7 +456,7 @@ def _prepare_flatpak_build_plan(
     builder_image = _local_image(
         context.local_prefix,
         "builders",
-        f"{context.distro}-flatpak-{app_name}-{builder_hash}",
+        f"{context.distro}-flatpak-{builder_hash}",
     )
     build_image = _local_image(
         context.local_prefix,
