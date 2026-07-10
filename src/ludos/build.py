@@ -3633,6 +3633,8 @@ def _run_build_output_image_build(
         "--volume",
         f"{artifact_cache_dir}:/cache/artifacts",
     ]
+    if os.path.exists("/dev/fuse"):
+        command.extend(["--device", "/dev/fuse"])
     if podman_cache_dir is not None:
         command.extend(["--volume", f"{podman_cache_dir}:/cache/podman"])
     if ccache_dir is not None:

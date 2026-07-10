@@ -133,7 +133,12 @@ class BuildCcacheTests(unittest.TestCase):
             ccache = root / "ccache"
             ccache.mkdir()
 
-            with patch("ludos.build._run_streamed_command", return_value=(0, "")) as run:
+            with (
+                patch("ludos.build.os.path.exists", return_value=True),
+                patch(
+                    "ludos.build._run_streamed_command", return_value=(0, "")
+                ) as run,
+            ):
                 _run_build_output_image_build(
                     podman="podman",
                     build_dir=build_dir,
@@ -151,6 +156,8 @@ class BuildCcacheTests(unittest.TestCase):
         self.assertIn("all", command)
         self.assertIn("--security-opt", command)
         self.assertIn("label=disable", command)
+        self.assertIn("--device", command)
+        self.assertIn("/dev/fuse", command)
         self.assertIn("--layers", command)
         self.assertIn("--pull=false", command)
         self.assertIn(f"{artifact_cache}:/cache/artifacts", command)
