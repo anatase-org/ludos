@@ -4030,7 +4030,11 @@ def _resolve_staged_spec_builder_packages(
     rpmbuild_defines: tuple[str, ...] = tuple(),
 ) -> tuple[str, ...]:
     packages = []
-    for target, spec_paths in _spec_paths_by_build_target(staged_specs):
+    spec_paths_by_target = _spec_paths_by_build_target(staged_specs)
+    mixed_arch_targets = any(
+        target != arch for target, _spec_paths in spec_paths_by_target
+    )
+    for target, spec_paths in spec_paths_by_target:
         log(f"Resolving spec BuildRequires for card: {card_name} ({target})")
         build_requires_kwargs = {}
         if rpmbuild_defines:
@@ -4044,7 +4048,9 @@ def _resolve_staged_spec_builder_packages(
             package_id_by_nevra,
             resolve_cache_dir,
             repo_images,
-            include_dependencies=False,
+            # When native and cross-arch RPMs share a builder, explicitly retain
+            # the native closure so i686 packages cannot satisfy and displace it.
+            include_dependencies=mixed_arch_targets and target == arch,
             **build_requires_kwargs,
         )
         packages.extend(target_builder_packages)
@@ -4418,6 +4424,7 @@ def _i686_rpmbuild_setup_lines() -> list[str]:
         'cat > "$topdir/ludos-meson-i686-cross.ini" <<\'LUDOS_MESON_I686_CROSS\'',
         "[binaries]",
         "c = ['gcc', '-m32']",
+        "cmake = 'cmake'",
         "cpp = ['g++', '-m32']",
         "rust = ['rustc', '--target', 'i686-unknown-linux-gnu']",
         "rust_ld = ['gcc', '-m32']",

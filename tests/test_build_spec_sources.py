@@ -490,6 +490,7 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
 
         script = _specs_build_script(staged_specs, workspace_dir, "x86_64")
 
+        self.assertIn("cmake = 'cmake'", script)
         self.assertIn("i686-redhat-linux", script)
         self.assertIn("export CPLUS_INCLUDE_PATH=", script)
 
@@ -713,6 +714,67 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
                 "cargo-rpm-macros-0:28.4-3.fc44.noarch",
                 "libstdc++-devel-0:16.0.1-0.10.fc44.i686",
                 "rust-std-static-0:1.94.1-1.fc44.i686",
+            ),
+        )
+
+    def test_mixed_arch_builds_retain_native_builddep_dependencies(self) -> None:
+        workspace_dir = Path("/workspace")
+        staged_specs = (
+            StagedSpec(
+                spec=SpecBuild(spec="mangohud.spec"),
+                spec_path=workspace_dir / "mangohud.spec",
+                source_dir=workspace_dir,
+                packages=("mangohud", "mangohud.i686"),
+                targets=("x86_64", "i686"),
+            ),
+        )
+        build_requires_calls = []
+
+        def build_requires(*args, include_dependencies: bool) -> tuple[str, ...]:
+            target = args[4]
+            build_requires_calls.append((target, include_dependencies))
+            if target == "x86_64":
+                return (
+                    "wayland-devel-0:1.24.0-3.fc44.x86_64",
+                    "libffi-devel-0:3.4.8-2.fc44.x86_64",
+                )
+            if include_dependencies:
+                return (
+                    "wayland-devel-0:1.24.0-3.fc44.i686",
+                    "libffi-devel-0:3.4.8-2.fc44.x86_64",
+                )
+            return ("wayland-devel-0:1.24.0-3.fc44.i686",)
+
+        with (
+            patch("ludos.build._resolve_spec_build_requires", build_requires),
+            patch(
+                "ludos.build._resolve_package_arch_variants",
+                return_value=("libffi-devel-0:3.4.8-2.fc44.i686",),
+            ),
+        ):
+            packages = _resolve_staged_spec_builder_packages(
+                [],
+                "44",
+                workspace_dir,
+                staged_specs,
+                "x86_64",
+                {},
+                Path("/cache"),
+                (),
+                card_name="gaming",
+            )
+
+        self.assertEqual(
+            build_requires_calls,
+            [("x86_64", True), ("i686", False), ("i686", True)],
+        )
+        self.assertEqual(
+            packages,
+            (
+                "wayland-devel-0:1.24.0-3.fc44.x86_64",
+                "libffi-devel-0:3.4.8-2.fc44.x86_64",
+                "wayland-devel-0:1.24.0-3.fc44.i686",
+                "libffi-devel-0:3.4.8-2.fc44.i686",
             ),
         )
 
