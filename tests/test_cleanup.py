@@ -332,7 +332,7 @@ class CleanupImageKeepTests(unittest.TestCase):
                 "podman",
                 "2026.27",
                 "",
-                ("localhost/installers:anatase",),
+                ("installers:anatase",),
             )
 
         self.assertEqual(
@@ -349,12 +349,12 @@ class CleanupPurgeTests(unittest.TestCase):
         images = [
             {
                 "Id": "image1",
-                "Names": ["images:anatase", "other:keep"],
+                "Names": ["localhost/images:anatase", "localhost/other:keep"],
                 "Size": 1024,
             },
             {
                 "Id": "image2",
-                "Names": ["flatpaks:browser"],
+                "Names": ["localhost/flatpaks:browser"],
                 "Size": 2048,
             },
             {
@@ -366,7 +366,7 @@ class CleanupPurgeTests(unittest.TestCase):
                 "Id": "image4",
                 "Names": [],
                 "Dangling": True,
-                "History": ["builds:f44-x86_64-base-oldhash"],
+                "History": ["localhost/builds:f44-x86_64-base-oldhash"],
                 "Size": 512,
             },
             {
@@ -391,8 +391,8 @@ class CleanupPurgeTests(unittest.TestCase):
         self.assertEqual(
             tuple(target.ref for target in targets),
             (
-                "images:anatase",
-                "flatpaks:browser",
+                "localhost/images:anatase",
+                "localhost/flatpaks:browser",
                 "image4",
             ),
         )
@@ -401,12 +401,12 @@ class CleanupPurgeTests(unittest.TestCase):
         images = [
             {
                 "Id": "image1",
-                "Names": ["images:anatase"],
+                "Names": ["localhost/images:anatase"],
                 "Size": 1024,
             },
             {
                 "Id": "image2",
-                "Names": ["test-images:anatase"],
+                "Names": ["localhost/test-images:anatase"],
                 "Size": 1024,
             },
         ]
@@ -423,10 +423,43 @@ class CleanupPurgeTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(target.ref for target in targets),
-            ("test-images:anatase",),
+            ("localhost/test-images:anatase",),
         )
 
-    def test_cleanup_purge_skips_manifest_resolution(self) -> None:
+    def test_purge_includes_repositories_resolved_from_manifests(self) -> None:
+        images = [
+            {
+                "Id": "image1",
+                "Names": ["localhost/custom-images:anatase"],
+                "Size": 1024,
+            },
+            {
+                "Id": "image2",
+                "Names": ["localhost/unmanaged:keep"],
+                "Size": 1024,
+            },
+        ]
+
+        with patch(
+            "ludos.cleanup.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["podman", "images", "--format", "json"],
+                0,
+                stdout=json.dumps(images),
+            ),
+        ):
+            targets = _purge_local_images(
+                "podman",
+                "",
+                ("custom-images:anatase",),
+            )
+
+        self.assertEqual(
+            tuple(target.ref for target in targets),
+            ("localhost/custom-images:anatase",),
+        )
+
+    def test_cleanup_purge_resolves_manifest_targets(self) -> None:
         target = CleanupTarget(
             "localhost/images:anatase",
             "localhost/images:anatase",
@@ -443,12 +476,14 @@ class CleanupPurgeTests(unittest.TestCase):
                 "ludos.cleanup._purge_local_images",
                 return_value=(target,),
             ) as purge_images,
-            patch("ludos.cleanup.resolve_manifest_images") as resolve_manifest,
-            patch("ludos.cleanup.resolve_manifest_flatpak_images") as resolve_flatpaks,
+            patch(
+                "ludos.cleanup._manifest_cleanup_targets",
+                return_value=("custom-images:anatase",),
+            ) as resolve_manifest,
         ):
             self.assertEqual(
                 cleanup_local_images(
-                    version="bad/name",
+                    version="2026.28",
                     manifests=(Path("anatase.yml"),),
                     dry_run=True,
                     purge=True,
@@ -456,6 +491,13 @@ class CleanupPurgeTests(unittest.TestCase):
                 0,
             )
 
-        purge_images.assert_called_once_with("podman", "")
-        resolve_manifest.assert_not_called()
-        resolve_flatpaks.assert_not_called()
+        resolve_manifest.assert_called_once_with(
+            Path("anatase.yml"),
+            "2026.28",
+            cache_only=False,
+        )
+        purge_images.assert_called_once_with(
+            "podman",
+            "",
+            ("custom-images:anatase",),
+        )

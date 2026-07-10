@@ -782,7 +782,10 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.add_argument(
         "--purge",
         action="store_true",
-        help="Remove all local Ludos images in the selected local prefix without resolving manifests.",
+        help=(
+            "Remove all local Ludos images in the selected local prefix, "
+            "including images resolved from manifests."
+        ),
     )
     cleanup.add_argument(
         "manifests",

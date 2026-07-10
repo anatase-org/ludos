@@ -54,8 +54,22 @@ def cleanup_local_images(
         raise ConfigError("podman must be installed to clean up local images")
 
     clean_local_prefix = _cleanup_local_prefix(local_prefix)
+    clean_version = _cleanup_version(version)
+    manifest_targets = tuple(
+        target
+        for manifest in manifests
+        for target in _manifest_cleanup_targets(
+            manifest,
+            clean_version,
+            cache_only=cache_only,
+        )
+    )
     if purge:
-        stale_images = _purge_local_images(podman, clean_local_prefix)
+        stale_images = _purge_local_images(
+            podman,
+            clean_local_prefix,
+            manifest_targets,
+        )
         if not stale_images:
             log("No local Ludos images found to purge")
             _log_intermediate_cleanup_hint()
@@ -69,16 +83,6 @@ def cleanup_local_images(
         _log_intermediate_cleanup_hint()
         return 0
 
-    clean_version = _cleanup_version(version)
-    manifest_targets = tuple(
-        target
-        for manifest in manifests
-        for target in _manifest_cleanup_targets(
-            manifest,
-            clean_version,
-            cache_only=cache_only,
-        )
-    )
     stale_images = _stale_local_images(
         podman, clean_version, clean_local_prefix, manifest_targets
     )
@@ -237,11 +241,13 @@ def _stale_local_images(
         f"{local_prefix}{repository}"
         for repository in RESOLVED_CLEANUP_REPOSITORIES
     }
-    manifest_keep_refs = set(manifest_targets)
+    manifest_keep_refs = {
+        _normalize_local_image_ref(target) for target in manifest_targets
+    }
     final_aliases = _final_aliases(manifest_keep_refs)
     manifest_repositories = {
         repository
-        for target in manifest_targets
+        for target in manifest_keep_refs
         if (parsed := _split_image_name(target)) is not None
         for repository, _tag in (parsed,)
     }
@@ -263,12 +269,13 @@ def _stale_local_images(
         image_size = _image_size(image)
         names = _image_names(image)
         for name in names:
-            parsed = _split_image_name(name)
+            parsed = _split_image_name(_normalize_local_image_ref(name))
             if parsed is None:
                 continue
             repository, tag = parsed
+            normalized_name = _normalize_local_image_ref(name)
             if _keep_named_image(
-                name,
+                normalized_name,
                 repository,
                 tag,
                 versioned_cache_repositories,
@@ -302,7 +309,11 @@ def _stale_local_images(
     return tuple(stale)
 
 
-def _purge_local_images(podman: str, local_prefix: str) -> tuple[CleanupTarget, ...]:
+def _purge_local_images(
+    podman: str,
+    local_prefix: str,
+    manifest_targets: tuple[str, ...] = tuple(),
+) -> tuple[CleanupTarget, ...]:
     managed_repositories = {
         f"{local_prefix}{repository}"
         for repository in (
@@ -310,6 +321,15 @@ def _purge_local_images(podman: str, local_prefix: str) -> tuple[CleanupTarget, 
             *FINAL_CLEANUP_REPOSITORIES,
         )
     }
+    managed_repositories.update(
+        repository
+        for target in manifest_targets
+        if (
+            parsed := _split_image_name(_normalize_local_image_ref(target))
+        )
+        is not None
+        for repository, _tag in (parsed,)
+    )
     result = subprocess.run(
         [podman, "images", "--format", "json"],
         check=True,
@@ -328,7 +348,7 @@ def _purge_local_images(podman: str, local_prefix: str) -> tuple[CleanupTarget, 
         image_size = _image_size(image)
         names = _image_names(image)
         for name in names:
-            parsed = _split_image_name(name)
+            parsed = _split_image_name(_normalize_local_image_ref(name))
             if parsed is None:
                 continue
             repository, _tag = parsed
@@ -341,7 +361,10 @@ def _purge_local_images(podman: str, local_prefix: str) -> tuple[CleanupTarget, 
         if names or not image_id or not image.get("Dangling"):
             continue
         if not any(
-            (parsed := _split_image_name(history)) is not None
+            (
+                parsed := _split_image_name(_normalize_local_image_ref(history))
+            )
+            is not None
             and parsed[0] in managed_repositories
             for history in _image_history(image)
         ):
@@ -490,7 +513,7 @@ def _image_ids_by_name(images: list[object]) -> dict[str, str]:
         if not isinstance(image_id, str) or not image_id:
             continue
         for name in _image_names(image):
-            result[name] = image_id
+            result[_normalize_local_image_ref(name)] = image_id
     return result
 
 
@@ -536,8 +559,15 @@ def _is_manifest_dangling_image(
     return (
         not _image_names(image)
         and bool(image.get("Dangling"))
-        and any(history in manifest_keep_refs for history in _image_history(image))
+        and any(
+            _normalize_local_image_ref(history) in manifest_keep_refs
+            for history in _image_history(image)
+        )
     )
+
+
+def _normalize_local_image_ref(name: str) -> str:
+    return name.removeprefix("localhost/")
 
 
 def _split_image_name(name: str) -> tuple[str, str] | None:
