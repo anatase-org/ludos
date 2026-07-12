@@ -276,6 +276,9 @@ class CiEnvTests(unittest.TestCase):
             with (
                 patch("ludos.ci._manifest_tag", return_value="20260713"),
                 patch(
+                    "ludos.ci._default_cache_version", return_value="20260713"
+                ),
+                patch(
                     "ludos.ci._inspect_remote_labels",
                     return_value={
                         "org.opencontainers.image.version": "20260713"
@@ -285,7 +288,10 @@ class CiEnvTests(unittest.TestCase):
                 output = write_ci_env(manifest, "ghcr.io/test/anatase:latest")
 
             self.assertEqual(output, env)
-            self.assertEqual(env.read_text(encoding="utf-8"), "dist=.1\n")
+            self.assertEqual(
+                env.read_text(encoding="utf-8"),
+                "version=20260713\ndist=.1\n",
+            )
 
     def test_increments_existing_dist(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -293,6 +299,9 @@ class CiEnvTests(unittest.TestCase):
             manifest = root / "anatase.yml"
             with (
                 patch("ludos.ci._manifest_tag", return_value="20260713"),
+                patch(
+                    "ludos.ci._default_cache_version", return_value="20260713"
+                ),
                 patch(
                     "ludos.ci._inspect_remote_labels",
                     return_value={"custom.version": "20260713.8"},
@@ -306,7 +315,7 @@ class CiEnvTests(unittest.TestCase):
 
             self.assertEqual(
                 (root / ".env").read_text(encoding="utf-8"),
-                "dist=.9\n",
+                "version=20260713\ndist=.9\n",
             )
 
     def test_rejects_invalid_version_suffix(self) -> None:
@@ -334,6 +343,9 @@ class CiEnvTests(unittest.TestCase):
             with (
                 patch("ludos.ci._manifest_tag", return_value="20260713"),
                 patch(
+                    "ludos.ci._default_cache_version", return_value="20260713"
+                ),
+                patch(
                     "ludos.ci._inspect_remote_labels",
                     return_value={
                         "org.opencontainers.image.version": "20260706.3"
@@ -344,7 +356,7 @@ class CiEnvTests(unittest.TestCase):
 
             self.assertEqual(
                 (root / ".env").read_text(encoding="utf-8"),
-                "dist=\n",
+                "version=20260713\ndist=\n",
             )
 
     def test_rejects_missing_label(self) -> None:

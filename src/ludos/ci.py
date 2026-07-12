@@ -76,43 +76,44 @@ def write_ci_env(
     label: str = DEFAULT_VERSION_LABEL,
 ) -> Path:
     manifest_path = manifest_path.expanduser().resolve()
-    tag = _manifest_tag(manifest_path)
+    cache_version = _default_cache_version()
+    tag = _manifest_tag(manifest_path, version=cache_version)
     labels = _inspect_remote_labels(ref)
-    version = labels.get(label)
-    if version is None:
+    image_tag = labels.get(label)
+    if image_tag is None:
         raise ConfigError(f"OCI image has no '{label}' label: {ref}")
 
-    if version == tag:
+    if image_tag == tag:
         dist = ".1"
-    elif version.startswith(tag):
-        suffix = version[len(tag) :]
+    elif image_tag.startswith(tag):
+        suffix = image_tag[len(tag) :]
         if not suffix.startswith(".") or not suffix[1:]:
             raise ConfigError(
-                f"OCI image label '{label}' has invalid version suffix: {version}"
+                f"OCI image label '{label}' has invalid version suffix: {image_tag}"
             )
         try:
             dist = f".{int(suffix[1:]) + 1}"
         except ValueError as exc:
             raise ConfigError(
-                f"OCI image label '{label}' has invalid version suffix: {version}"
+                f"OCI image label '{label}' has invalid version suffix: {image_tag}"
             ) from exc
     else:
         dist = ""
 
     output = manifest_path.parent / ".env"
-    text=f"dist={dist}\n"
+    text = f"version={cache_version}\ndist={dist}\n"
     output.write_text(text, encoding="utf-8")
     log(f"Wrote CI environment: {output}\n{text}")
     return output
 
 
-def _manifest_tag(manifest_path: Path) -> str:
+def _manifest_tag(manifest_path: Path, version: str) -> str:
     manifest = Manifest.from_file(manifest_path)
     if not manifest.tag:
         raise ConfigError(f"{manifest_path}: missing 'tag'")
 
     env = {key: str(value) for key, value in manifest.env.items()}
-    env["version"] = _default_cache_version()
+    env["version"] = version
     env["releasever"] = _substitute_variables(manifest.releasever, env)
     env = {
         key: _substitute_variables(value, env)
