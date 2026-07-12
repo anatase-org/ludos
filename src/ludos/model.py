@@ -198,6 +198,7 @@ class Manifest:
     bootstrap: str
     repos: tuple[RepoRef, ...]
     cards: tuple[str, ...]
+    tag: str = ""
     flatpaks: tuple[str, ...] = tuple()
     name: str = ""
     orchestrator_deps: tuple[str, ...] = tuple()
@@ -222,6 +223,7 @@ class Manifest:
             bootstrap=_required_string(data, "bootstrap", path),
             repos=_repo_refs_tuple(data, "repos", path),
             cards=_required_string_tuple(data, "cards", path),
+            tag=_optional_string(data, "tag", path),
             flatpaks=flatpaks,
             name=_optional_string(data, "name", path),
             local_prefix=_optional_string(data, "local_prefix", path),

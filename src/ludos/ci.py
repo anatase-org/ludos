@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import json
 import lzma
+import shutil
 import subprocess
 from dataclasses import fields, is_dataclass
 from pathlib import Path
@@ -28,19 +30,22 @@ from .common import (
     _apply_repo_priority as _apply_repo_priority_from_context,
     _create_orchestrator_image,
     _create_repo_image,
+    _default_cache_version,
     _extract_image_paths,
     _image_exists as _local_image_exists,
     _remote_cache_image_exists,
     _require_buildah as _require_context_buildah,
     _run_streamed_command,
+    _substitute_variables,
     resolve_manifest_context,
 )
 from .flatpaks import FlatpakBuildPlan, plan_manifest_flatpaks_with_context
 from .logging import log
-from .model import ConfigError
+from .model import ConfigError, Manifest
 
 
 DEFAULT_CI_CACHE_DIR = Path("cache")
+DEFAULT_VERSION_LABEL = "org.opencontainers.image.version"
 
 
 class _LiteralString(str):
@@ -62,6 +67,81 @@ _CiBuildManifestDumper.add_representer(
     _LiteralString,
     _represent_literal_string,
 )
+
+
+def write_ci_env(
+    manifest_path: Path,
+    ref: str,
+    *,
+    label: str = DEFAULT_VERSION_LABEL,
+) -> Path:
+    manifest_path = manifest_path.expanduser().resolve()
+    tag = _manifest_tag(manifest_path)
+    labels = _inspect_remote_labels(ref)
+    version = labels.get(label)
+    if version is None:
+        raise ConfigError(f"OCI image has no '{label}' label: {ref}")
+
+    if version == tag:
+        dist = ".1"
+    elif version.startswith(tag):
+        suffix = version[len(tag) :]
+        if not suffix.startswith(".") or not suffix[1:]:
+            raise ConfigError(
+                f"OCI image label '{label}' has invalid version suffix: {version}"
+            )
+        try:
+            dist = f".{int(suffix[1:]) + 1}"
+        except ValueError as exc:
+            raise ConfigError(
+                f"OCI image label '{label}' has invalid version suffix: {version}"
+            ) from exc
+    else:
+        dist = ""
+
+    output = manifest_path.parent / ".env"
+    text=f"dist={dist}\n"
+    output.write_text(text, encoding="utf-8")
+    log(f"Wrote CI environment: {output}\n{text}")
+    return output
+
+
+def _manifest_tag(manifest_path: Path) -> str:
+    manifest = Manifest.from_file(manifest_path)
+    if not manifest.tag:
+        raise ConfigError(f"{manifest_path}: missing 'tag'")
+
+    env = {key: str(value) for key, value in manifest.env.items()}
+    env["version"] = _default_cache_version()
+    env["releasever"] = _substitute_variables(manifest.releasever, env)
+    env = {
+        key: _substitute_variables(value, env)
+        for key, value in env.items()
+    }
+    return _substitute_variables(manifest.tag, env)
+
+
+def _inspect_remote_labels(ref: str) -> dict[str, str]:
+    skopeo = shutil.which("skopeo")
+    if not skopeo:
+        raise ConfigError("skopeo must be installed to inspect remote OCI images")
+    transport_ref = ref if "://" in ref else f"docker://{ref}"
+    result = subprocess.run(
+        [skopeo, "inspect", "--no-tags", transport_ref],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise ConfigError(f"failed to inspect remote OCI image: {ref}")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"failed to inspect remote OCI image: {ref}") from exc
+    labels = data.get("Labels") or {}
+    if not isinstance(labels, dict):
+        return {}
+    return {str(key): str(value) for key, value in labels.items()}
 
 
 def prepare_ci(

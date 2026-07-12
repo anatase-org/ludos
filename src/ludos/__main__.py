@@ -10,7 +10,7 @@ from pathlib import Path
 from .bootc import DEFAULT_OCI_WRITERS, bootc_create, ostree_import
 from .build import build_manifest
 from .cleanup import cleanup_local_images
-from .ci import init_ci, prepare_ci, seed_ci
+from .ci import DEFAULT_VERSION_LABEL, init_ci, prepare_ci, seed_ci, write_ci_env
 from .flatpaks import build_flatpak, build_flatpaks
 from .installer import bootc_installer
 from .logging import LOGO_STR, configure_logging, configure_tracebacks, error, log
@@ -667,6 +667,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create and consume CI fan-out manifests.",
     )
     ci_subcommands = ci.add_subparsers(dest="ci_action", required=True)
+    env_parser = ci_subcommands.add_parser(
+        "env",
+        help="Write CI environment values derived from an existing image.",
+    )
+    env_parser.add_argument(
+        "manifest",
+        type=Path,
+        help="Path to a Ludos YAML manifest.",
+    )
+    env_parser.add_argument(
+        "ref",
+        help="Remote OCI image reference to inspect.",
+    )
+    env_parser.add_argument(
+        "--label",
+        default=DEFAULT_VERSION_LABEL,
+        help=f"OCI version label to compare. Defaults to {DEFAULT_VERSION_LABEL}.",
+    )
+    env_parser.set_defaults(func=ci_command)
     init_parser = ci_subcommands.add_parser(
         "init",
         help="Create and upload CI repository and orchestrator images.",
@@ -1100,6 +1119,9 @@ def bootc_command(args: argparse.Namespace) -> int:
 
 
 def ci_command(args: argparse.Namespace) -> int:
+    if args.ci_action == "env":
+        write_ci_env(args.manifest, args.ref, label=args.label)
+        return 0
     if args.ci_action == "init":
         init_ci(
             tuple(args.manifests),

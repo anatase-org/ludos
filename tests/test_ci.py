@@ -19,11 +19,43 @@ from ludos.build import (
     PackageImagePlan,
     ResolvedBuildMetadata,
 )
-from ludos.ci import _ci_remote_image_exists, init_ci, prepare_ci, seed_ci
+from ludos.ci import (
+    _ci_remote_image_exists,
+    _inspect_remote_labels,
+    _manifest_tag,
+    init_ci,
+    prepare_ci,
+    seed_ci,
+    write_ci_env,
+)
 from ludos.model import ConfigError, SpecBuild
 
 
 class CiParserTests(unittest.TestCase):
+    def test_parser_accepts_env_ci_options(self) -> None:
+        args = build_parser().parse_args(
+            ["ci", "env", "anatase.yml", "ghcr.io/test/anatase:latest"]
+        )
+
+        self.assertEqual(args.ci_action, "env")
+        self.assertEqual(args.manifest, Path("anatase.yml"))
+        self.assertEqual(args.ref, "ghcr.io/test/anatase:latest")
+        self.assertEqual(args.label, "org.opencontainers.image.version")
+
+    def test_parser_accepts_custom_env_label(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "env",
+                "anatase.yml",
+                "ghcr.io/test/anatase:latest",
+                "--label",
+                "com.example.version",
+            ]
+        )
+
+        self.assertEqual(args.label, "com.example.version")
+
     def test_parser_accepts_init_ci_options(self) -> None:
         parser = build_parser()
 
@@ -140,6 +172,21 @@ class CiParserTests(unittest.TestCase):
             full=False,
         )
 
+    def test_ci_command_calls_write_ci_env(self) -> None:
+        args = build_parser().parse_args(
+            ["ci", "env", "anatase.yml", "ghcr.io/test/anatase:latest"]
+        )
+
+        with patch("ludos.__main__.write_ci_env") as write:
+            exit_code = ci_command(args)
+
+        self.assertEqual(exit_code, 0)
+        write.assert_called_once_with(
+            Path("anatase.yml"),
+            "ghcr.io/test/anatase:latest",
+            label="org.opencontainers.image.version",
+        )
+
     def test_ci_command_calls_init_ci(self) -> None:
         args = build_parser().parse_args(
             [
@@ -201,6 +248,140 @@ class CiParserTests(unittest.TestCase):
             None,
             cache_dir=Path("out-cache"),
             autoremove=True,
+        )
+
+
+class CiEnvTests(unittest.TestCase):
+    def test_manifest_tag_uses_generated_version_and_manifest_defaults(self) -> None:
+        manifest = SimpleNamespace(
+            env={"releasever": 44, "dist": "", "tag": "$version$dist"},
+            releasever="$releasever",
+            tag="$tag",
+        )
+        with (
+            patch("ludos.model.Manifest.from_file", return_value=manifest),
+            patch("ludos.ci._default_cache_version", return_value="20260713"),
+        ):
+            tag = _manifest_tag(Path("anatase.yml"))
+
+        self.assertEqual(tag, "20260713")
+
+    def test_writes_first_dist_from_scratch_when_label_equals_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("manifest", encoding="utf-8")
+            env = root / ".env"
+            env.write_text("old=value\ndist=.99\n", encoding="utf-8")
+            with (
+                patch("ludos.ci._manifest_tag", return_value="20260713"),
+                patch(
+                    "ludos.ci._inspect_remote_labels",
+                    return_value={
+                        "org.opencontainers.image.version": "20260713"
+                    },
+                ),
+            ):
+                output = write_ci_env(manifest, "ghcr.io/test/anatase:latest")
+
+            self.assertEqual(output, env)
+            self.assertEqual(env.read_text(encoding="utf-8"), "dist=.1\n")
+
+    def test_increments_existing_dist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            with (
+                patch("ludos.ci._manifest_tag", return_value="20260713"),
+                patch(
+                    "ludos.ci._inspect_remote_labels",
+                    return_value={"custom.version": "20260713.8"},
+                ),
+            ):
+                write_ci_env(
+                    manifest,
+                    "ghcr.io/test/anatase:latest",
+                    label="custom.version",
+                )
+
+            self.assertEqual(
+                (root / ".env").read_text(encoding="utf-8"),
+                "dist=.9\n",
+            )
+
+    def test_rejects_invalid_version_suffix(self) -> None:
+        for version in ("20260713dev", "20260713.dev"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temp:
+                manifest = Path(temp) / "anatase.yml"
+                with (
+                    patch("ludos.ci._manifest_tag", return_value="20260713"),
+                    patch(
+                        "ludos.ci._inspect_remote_labels",
+                        return_value={
+                            "org.opencontainers.image.version": version
+                        },
+                    ),
+                ):
+                    with self.assertRaises(ConfigError):
+                        write_ci_env(manifest, "ghcr.io/test/anatase:latest")
+
+                self.assertFalse((Path(temp) / ".env").exists())
+
+    def test_clears_dist_for_a_different_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            with (
+                patch("ludos.ci._manifest_tag", return_value="20260713"),
+                patch(
+                    "ludos.ci._inspect_remote_labels",
+                    return_value={
+                        "org.opencontainers.image.version": "20260706.3"
+                    },
+                ),
+            ):
+                write_ci_env(manifest, "ghcr.io/test/anatase:latest")
+
+            self.assertEqual(
+                (root / ".env").read_text(encoding="utf-8"),
+                "dist=\n",
+            )
+
+    def test_rejects_missing_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            manifest = Path(temp) / "anatase.yml"
+            with (
+                patch("ludos.ci._manifest_tag", return_value="20260713"),
+                patch("ludos.ci._inspect_remote_labels", return_value={}),
+            ):
+                with self.assertRaisesRegex(ConfigError, "has no"):
+                    write_ci_env(manifest, "ghcr.io/test/anatase:latest")
+
+    def test_inspects_remote_image_labels_with_skopeo(self) -> None:
+        result = SimpleNamespace(
+            returncode=0,
+            stdout='{"Labels":{"org.opencontainers.image.version":"20260713.2"}}',
+        )
+        with (
+            patch("ludos.ci.shutil.which", return_value="/usr/bin/skopeo"),
+            patch("ludos.ci.subprocess.run", return_value=result) as run,
+        ):
+            labels = _inspect_remote_labels("ghcr.io/test/anatase:latest")
+
+        self.assertEqual(
+            labels,
+            {"org.opencontainers.image.version": "20260713.2"},
+        )
+        run.assert_called_once_with(
+            [
+                "/usr/bin/skopeo",
+                "inspect",
+                "--no-tags",
+                "docker://ghcr.io/test/anatase:latest",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
         )
 
 
