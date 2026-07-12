@@ -551,6 +551,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to chunks YAML. Defaults to chunks.yml next to the first manifest.",
     )
     create_parser.add_argument(
+        "--previous-manifest",
+        default=None,
+        metavar="URI",
+        help="Remote OCI image whose layer plan should seed rechunking.",
+    )
+    create_parser.add_argument(
         "--cache",
         action="store_true",
         help="Only use cached repository and card images. Fail if any are missing.",
@@ -1089,6 +1095,7 @@ def bootc_command(args: argparse.Namespace) -> int:
         return bootc_create(
             tuple(args.manifests),
             chunks=args.chunks,
+            previous_manifest=args.previous_manifest,
             cache_dir=args.cache_dir,
             cache_version=args.version,
             cache_only=args.cache,

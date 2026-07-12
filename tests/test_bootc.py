@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ from ludos.bootc import (
     _bootc_encapsulate_supports_jobs,
     _manifest_artifact_name,
     _export_rechunked_oci,
+    _fetch_previous_manifest,
     _git_revision,
     _oci_export_line_rewriter,
     _parse_commit,
@@ -41,6 +43,8 @@ class BootcCommandTests(unittest.TestCase):
                 "create",
                 "--chunks",
                 "custom-chunks.yml",
+                "--previous-manifest",
+                "i.anatase.org/anatase:stable",
                 "--cache-dir",
                 "custom-cache",
                 "--version",
@@ -59,6 +63,9 @@ class BootcCommandTests(unittest.TestCase):
         self.assertEqual(args.command, "bootc")
         self.assertEqual(args.bootc_action, "create")
         self.assertEqual(args.chunks, Path("custom-chunks.yml"))
+        self.assertEqual(
+            args.previous_manifest, "i.anatase.org/anatase:stable"
+        )
         self.assertEqual(args.cache_dir, Path("custom-cache"))
         self.assertEqual(args.version, "20260618")
         self.assertTrue(args.cache)
@@ -139,6 +146,44 @@ class BootcCommandTests(unittest.TestCase):
     def test_bootc_create_rejects_non_positive_writers(self) -> None:
         with self.assertRaisesRegex(ConfigError, "writers must be at least 1"):
             bootc_create((Path("anatase.yml"),), writers=0)
+
+    def test_fetch_previous_manifest_uses_skopeo_inspect_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "rechunk" / "previous-manifest.json"
+            inspected = {
+                "Labels": {
+                    "org.anatase.ludos.info": '{"version": 2, "layers": [["base"]]}'
+                },
+                "LayersData": [],
+            }
+            completed = subprocess.CompletedProcess(
+                ["skopeo", "inspect"],
+                0,
+                stdout=json.dumps(inspected),
+            )
+
+            with (
+                patch("ludos.bootc.shutil.which", return_value="/usr/bin/skopeo"),
+                patch("ludos.bootc.subprocess.run", return_value=completed) as run,
+            ):
+                result = _fetch_previous_manifest(
+                    "i.anatase.org/anatase:stable", output
+                )
+                written = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, output)
+        self.assertEqual(written, inspected)
+        run.assert_called_once_with(
+            [
+                "/usr/bin/skopeo",
+                "inspect",
+                "--no-tags",
+                "docker://i.anatase.org/anatase:stable",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
 
     def test_safe_oci_name_sanitizes_image_ref(self) -> None:
         self.assertEqual(
@@ -235,6 +280,7 @@ class BootcCommandTests(unittest.TestCase):
                 patch("ludos.bootc._cleanup_dnf_workspaces", side_effect=mark("cleanup")),
                 patch("ludos.bootc.ostree_import") as ostree_import_mock,
                 patch("ludos.bootc._git_revision", return_value="a" * 40),
+                patch("ludos.bootc._fetch_previous_manifest") as fetch_mock,
                 patch("ludos.bootc.rechunk_main") as rechunk_mock,
                 patch("ludos.bootc._export_rechunked_oci") as export_mock,
             ):
@@ -251,6 +297,7 @@ class BootcCommandTests(unittest.TestCase):
                 result = bootc_create(
                     (manifest_a, manifest_b),
                     chunks=chunks,
+                    previous_manifest="i.anatase.org/anatase:stable",
                     cache_dir=root / "cache",
                     ci=True,
                     ccache=False,
@@ -291,6 +338,10 @@ class BootcCommandTests(unittest.TestCase):
                 ),
             ]
         )
+        fetch_mock.assert_called_once_with(
+            "i.anatase.org/anatase:stable",
+            (root / "cache" / "rechunk" / "previous-manifest.json").resolve(),
+        )
         rechunk_mock.assert_has_calls(
             [
                 call(
@@ -323,6 +374,14 @@ class BootcCommandTests(unittest.TestCase):
                     git_dir=str(root),
                     ostree_image="localhost/anatase:f44-x86_64",
                     podman="podman",
+                    previous_manifest=str(
+                        (
+                            root
+                            / "cache"
+                            / "rechunk"
+                            / "previous-manifest.json"
+                        ).resolve()
+                    ),
                 ),
                 call(
                     repo=str((root / "cache" / "ostree").resolve()),
@@ -351,6 +410,14 @@ class BootcCommandTests(unittest.TestCase):
                     git_dir=str(root),
                     ostree_image="localhost/other:f44-x86_64",
                     podman="podman",
+                    previous_manifest=str(
+                        (
+                            root
+                            / "cache"
+                            / "rechunk"
+                            / "previous-manifest.json"
+                        ).resolve()
+                    ),
                 ),
             ]
         )

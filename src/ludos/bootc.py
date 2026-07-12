@@ -44,6 +44,7 @@ def bootc_create(
     manifests: tuple[Path, ...],
     *,
     chunks: Path | None = None,
+    previous_manifest: str | None = None,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = False,
@@ -113,6 +114,10 @@ def bootc_create(
     work_root = cache_root / "rechunk"
     oci_dir.mkdir(parents=True, exist_ok=True)
     work_root.mkdir(parents=True, exist_ok=True)
+    previous_manifest_path = None
+    if previous_manifest:
+        previous_manifest_path = work_root / "previous-manifest.json"
+        _fetch_previous_manifest(previous_manifest, previous_manifest_path)
 
     for manifest, result in zip(metadata, results):
         image = result.output_image
@@ -136,7 +141,7 @@ def bootc_create(
         ostree_import(image, **import_kwargs)
 
         log(f"Rechunking {image} using {chunks_path}")
-        rechunk_main(
+        rechunk_kwargs = dict(
             repo=str(ostree_dir),
             ref=DEFAULT_OSTREE_REF,
             contentmeta_fn=str(contentmeta),
@@ -148,6 +153,9 @@ def bootc_create(
             ostree_image=image,
             podman=result.podman,
         )
+        if previous_manifest_path:
+            rechunk_kwargs["previous_manifest"] = str(previous_manifest_path)
+        rechunk_main(**rechunk_kwargs)
 
         _export_rechunked_oci(
             podman=result.podman,
@@ -160,6 +168,33 @@ def bootc_create(
         )
 
     return 0
+
+
+def _fetch_previous_manifest(ref: str, output: Path) -> Path:
+    skopeo = shutil.which("skopeo")
+    if skopeo is None:
+        raise ConfigError("skopeo must be installed to inspect a previous manifest")
+
+    transport_ref = ref if "://" in ref else f"docker://{ref}"
+    log(f"Inspecting previous bootc manifest: {ref}")
+    result = subprocess.run(
+        [skopeo, "inspect", "--no-tags", transport_ref],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise ConfigError(f"failed to inspect previous manifest: {ref}")
+    try:
+        manifest = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"skopeo returned an invalid previous manifest: {ref}") from exc
+    if not isinstance(manifest, dict):
+        raise ConfigError(f"skopeo returned an invalid previous manifest: {ref}")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(manifest), encoding="utf-8")
+    return output
 
 
 def ostree_import(
