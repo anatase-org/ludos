@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--version",
         default=None,
-        help="Repository/package cache version to load. Defaults to the current UTC ISO week as YYYY.WW and creates missing cache images.",
+        help="Repository/package cache version to load. Defaults to the current UTC week's Monday as YYYYMMDD and creates missing cache images.",
     )
     build.add_argument(
         "--ci",
@@ -564,7 +564,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument(
         "--version",
         default=None,
-        help="Repository/package cache version to load. Defaults to the current UTC ISO week as YYYY.WW and creates missing cache images.",
+        help="Repository/package cache version to load. Defaults to the current UTC week's Monday as YYYYMMDD and creates missing cache images.",
     )
     create_parser.add_argument(
         "--ci",
@@ -686,7 +686,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument(
         "--version",
         default=None,
-        help="Repository/package cache version to load. Defaults to the current UTC ISO week.",
+        help="Repository/package cache version to load. Defaults to the current UTC week's Monday as YYYYMMDD.",
     )
     init_parser.add_argument(
         "--no-ccache",
@@ -718,7 +718,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument(
         "--version",
         default=None,
-        help="Repository/package cache version to load. Defaults to the current UTC ISO week as YYYY.WW and creates missing cache images.",
+        help="Repository/package cache version to load. Defaults to the current UTC week's Monday as YYYYMMDD and creates missing cache images.",
     )
     prepare_parser.add_argument(
         "--no-ccache",
@@ -762,7 +762,7 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.add_argument(
         "--version",
         default=None,
-        help="Cache version to keep. Defaults to the current UTC ISO week as YYYY.WW.",
+        help="Cache version to keep. Defaults to the current UTC week's Monday as YYYYMMDD.",
     )
     cleanup.add_argument(
         "--local-prefix",

@@ -857,8 +857,9 @@ def _default_cache_version(
         now = now.replace(tzinfo=_datetime.UTC)
     else:
         now = now.astimezone(_datetime.UTC)
-    iso_year, iso_week, _iso_day = now.isocalendar()
-    return f"{iso_year:04d}.{iso_week:02d}"
+    iso_day = now.isoweekday()
+    monday = now.date() - _datetime.timedelta(days=iso_day - 1)
+    return monday.strftime("%Y%m%d")
 
 
 def _substitute_variables(value: str, variables: dict[str, str]) -> str:

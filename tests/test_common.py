@@ -36,7 +36,7 @@ class RepoImageTests(unittest.TestCase):
 
 
 class DefaultCacheVersionTests(unittest.TestCase):
-    def test_uses_utc_iso_week(self) -> None:
+    def test_uses_current_monday_date(self) -> None:
         timestamp = _datetime.datetime(
             2026,
             7,
@@ -46,7 +46,7 @@ class DefaultCacheVersionTests(unittest.TestCase):
             tzinfo=_datetime.UTC,
         )
 
-        self.assertEqual(_default_cache_version(timestamp), "2026.27")
+        self.assertEqual(_default_cache_version(timestamp), "20260629")
 
     def test_rolls_over_on_monday_utc(self) -> None:
         sunday = _datetime.datetime(
@@ -68,8 +68,8 @@ class DefaultCacheVersionTests(unittest.TestCase):
             tzinfo=_datetime.UTC,
         )
 
-        self.assertEqual(_default_cache_version(sunday), "2026.26")
-        self.assertEqual(_default_cache_version(monday), "2026.27")
+        self.assertEqual(_default_cache_version(sunday), "20260622")
+        self.assertEqual(_default_cache_version(monday), "20260629")
 
     def test_converts_aware_timestamp_to_utc(self) -> None:
         copenhagen_monday = _datetime.datetime(
@@ -81,7 +81,19 @@ class DefaultCacheVersionTests(unittest.TestCase):
             tzinfo=_datetime.timezone(_datetime.timedelta(hours=2)),
         )
 
-        self.assertEqual(_default_cache_version(copenhagen_monday), "2026.26")
+        self.assertEqual(_default_cache_version(copenhagen_monday), "20260622")
+
+    def test_uses_monday_calendar_year_at_year_boundary(self) -> None:
+        new_year = _datetime.datetime(
+            2027,
+            1,
+            1,
+            12,
+            0,
+            tzinfo=_datetime.UTC,
+        )
+
+        self.assertEqual(_default_cache_version(new_year), "20261228")
 
 
 class CachedImageTests(unittest.TestCase):
