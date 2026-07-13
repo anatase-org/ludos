@@ -30,7 +30,35 @@ from .model import ConfigError, InstallerConfig, InstallerFlatpaksConfig, Manife
 DEFAULT_LABEL_BASE = "LUDOS"
 FAT_LABEL_MAX = 11
 CONTAINER_WORKDIR = "/ludos/installer"
-EROFS_COMPRESSION = "zstd,3"
+# From reddit:
+# zstd -b1 -e22 enwik8
+#  1#enwik8            : 100000000 ->  40667563 (x2.459),  363.0 MB/s, 1312.6 MB/s
+#  2#enwik8            : 100000000 ->  37332782 (x2.679),  274.6 MB/s, 1191.7 MB/s
+#  3#enwik8            : 100000000 ->  35461800 (x2.820),  220.2 MB/s, 1095.3 MB/s # sane default for scatch
+#  4#enwik8            : 100000000 ->  34754903 (x2.877),  187.3 MB/s  1058.0 MB/s
+#  5#enwik8            : 100000000 ->  33663781 (x2.971),  100.1 MB/s, 1063.0 MB/s
+#  6#enwik8            : 100000000 ->  32571332 (x3.070),   76.0 MB/s, 1151.3 MB/s
+#  7#enwik8            : 100000000 ->  31933763 (x3.131),   69.5 MB/s, 1057.9 MB/s
+#  8#enwik8            : 100000000 ->  31542878 (x3.170),   55.5 MB/s, 1100.0 MB/s
+#  9#enwik8            : 100000000 ->  31034682 (x3.222),   51.0 MB/s, 1152.9 MB/s 
+# 10#enwik8            : 100000000 ->  30619017 (x3.266),   37.6 MB/s, 1113.6 MB/s
+# 11#enwik8            : 100000000 ->  30416549 (x3.288),   22.3 MB/s, 1107.4 MB/s
+# 12#enwik8            : 100000000 ->  30338917 (x3.296),   18.7 MB/s,  839.1 MB/s
+# 13#enwik8            : 100000000 ->  29972260 (x3.336),   7.06 MB/s, 1128.1 MB/s
+# 14#enwik8            : 100000000 ->  29795318 (x3.356),   5.36 MB/s, 1108.0 MB/s
+# 15#enwik8            : 100000000 ->  29436415 (x3.397),   4.02 MB/s, 1160.5 MB/s
+# 16#enwik8            : 100000000 ->  28437242 (x3.517),   3.90 MB/s, 1149.6 MB/s
+# 17#enwik8            : 100000000 ->  27710189 (x3.609),   3.07 MB/s, 1150.2 MB/s
+# 18#enwik8            : 100000000 ->  27320373 (x3.660),   2.62 MB/s, 1151.6 MB/s
+# 19#enwik8            : 100000000 ->  26952099 (x3.710),   2.21 MB/s,  766.3 MB/s
+# 20#enwik8            : 100000000 ->  25983520 (x3.849),   1.79 MB/s,  975.8 MB/s
+# 21#enwik8            : 100000000 ->  25535719 (x3.916),   1.62 MB/s,  883.5 MB/s
+# 22#enwik8            : 100000000 ->  25333641 (x3.947),   1.46 MB/s,  893.1 MB/s
+# Level 9 saves around 100mb:
+# - 3) 4.8G 1m19s (browser reports 5.14 GB)
+# - 9) 4.7G 2m33s (browser reports 5.02 GB)
+EROFS_COMPRESSION = "zstd,9"
+EROFS_COMPRESSION_SCRATCH = "zstd,3"
 EROFS_FEATURES = "ztailpacking,fragments"
 BIOS_GRUB_DIR = Path("boot/grub/i386-pc")
 BIOS_ELTORITO_IMAGE = BIOS_GRUB_DIR / "eltorito.img"
@@ -65,7 +93,11 @@ EROFS_DEFAULT_PROFILE = ErofsProfile(
     compression=EROFS_COMPRESSION,
     features=EROFS_FEATURES,
 )
-EROFS_SCRATCH_PROFILE = ErofsProfile(name="scratch", compression="lz4")
+EROFS_SCRATCH_PROFILE = ErofsProfile(
+    name="default",
+    compression=EROFS_COMPRESSION_SCRATCH,
+    features=EROFS_FEATURES,
+)
 
 
 @dataclass(frozen=True)
