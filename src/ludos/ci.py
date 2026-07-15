@@ -191,12 +191,6 @@ def prepare_ci(
             cache_only=False,
             workers=workers,
         )
-        if full
-        or not _ci_remote_image_exists(
-            context.podman,
-            plan.output_image,
-            getattr(context, "ci_registry", ""),
-        )
     )
     output = cache_root / "ci" / "build.yml"
     _build_output, encoded_output = _write_ci_build_manifest(
@@ -618,27 +612,63 @@ def _write_ci_build_manifest(
     flatpaks: tuple[dict[str, Any], ...],
     full: bool = False,
 ) -> tuple[Path, Path]:
+    included_metadata = tuple(
+        (manifest_path, manifest_metadata)
+        for (manifest_path, _context), manifest_metadata in zip(
+            manifest_contexts,
+            metadata,
+        )
+        if full
+        or not _ci_remote_image_exists(
+            manifest_metadata.podman,
+            manifest_metadata.output_image,
+            getattr(manifest_metadata, "ci_registry", ""),
+        )
+    )
+    contexts_by_manifest = {
+        str(manifest_path): context
+        for manifest_path, context in manifest_contexts
+    }
+    included_flatpaks = tuple(
+        entry
+        for entry in flatpaks
+        if full
+        or not _ci_remote_image_exists(
+            contexts_by_manifest[str(entry["manifest"])].podman,
+            str(entry["images"]["output"]),
+            getattr(
+                contexts_by_manifest[str(entry["manifest"])],
+                "ci_registry",
+                "",
+            ),
+        )
+    )
+    cards, builders, builds = _missing_ci_dependency_images(
+        manifest_contexts=manifest_contexts,
+        metadata=tuple(
+            (manifest_path, manifest_metadata)
+            for (manifest_path, _context), manifest_metadata in zip(
+                manifest_contexts,
+                metadata,
+            )
+        ),
+        flatpaks=flatpaks,
+    )
     payload = {
         "version": 1,
+        "cards": cards,
+        "builders": builders,
+        "builds": builds,
         "images": {
             _image_id(manifest_metadata.output_image): _image_entry(
                 manifest_path,
                 manifest_metadata,
             )
-            for (manifest_path, _context), manifest_metadata in zip(
-                manifest_contexts,
-                metadata,
-            )
-            if full
-            or not _ci_remote_image_exists(
-                manifest_metadata.podman,
-                manifest_metadata.output_image,
-                getattr(manifest_metadata, "ci_registry", ""),
-            )
+            for manifest_path, manifest_metadata in included_metadata
         },
         "flatpaks": {
             _image_id(entry["images"]["output"]): entry
-            for entry in flatpaks
+            for entry in included_flatpaks
         },
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -654,6 +684,109 @@ def _write_ci_build_manifest(
     encoded_tmp.write_bytes(encoded)
     encoded_tmp.replace(encoded_output)
     return output, encoded_output
+
+
+def _missing_ci_dependency_images(
+    *,
+    manifest_contexts: tuple[tuple[Path, ResolvedManifestContext], ...],
+    metadata: tuple[tuple[Path, ResolvedBuildMetadata], ...],
+    flatpaks: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    candidates: dict[str, dict[str, tuple[str, str, dict[str, Any]]]] = {
+        "cards": {},
+        "builders": {},
+        "builds": {},
+    }
+
+    def add(
+        section: str,
+        podman: str,
+        ci_registry: str,
+        image: str,
+        entry: dict[str, Any],
+    ) -> None:
+        candidates[section].setdefault(image, (podman, ci_registry, entry))
+
+    for manifest_path, manifest in metadata:
+        manifest_metadata = _build_entry(manifest)
+        for plan in manifest.package_images:
+            if plan.packages:
+                card_entry = _to_plain(plan)
+                card_entry["manifest"] = str(manifest_path)
+                card_entry["metadata"] = manifest_metadata
+                add(
+                    "cards",
+                    manifest.podman,
+                    manifest.ci_registry,
+                    plan.image,
+                    card_entry,
+                )
+        for plan in manifest.build_images:
+            build_entry = _to_plain(plan)
+            build_entry["manifest"] = str(manifest_path)
+            build_entry["metadata"] = manifest_metadata
+            builder_entry = dict(build_entry)
+            builder_entry["image"] = plan.builder_image
+            builder_entry["build_image"] = plan.image
+            add(
+                "builders",
+                manifest.podman,
+                manifest.ci_registry,
+                plan.builder_image,
+                builder_entry,
+            )
+            add(
+                "builds",
+                manifest.podman,
+                manifest.ci_registry,
+                plan.image,
+                build_entry,
+            )
+
+    contexts_by_manifest = {
+        str(manifest_path): context
+        for manifest_path, context in manifest_contexts
+    }
+    for entry in flatpaks:
+        context = contexts_by_manifest[str(entry["manifest"])]
+        ci_registry = getattr(context, "ci_registry", "")
+        builder_image = str(entry["images"]["builder"])
+        build_image = str(entry["images"]["build"])
+        flatpak_metadata = _to_plain(entry)
+        add(
+            "builders",
+            context.podman,
+            ci_registry,
+            builder_image,
+            {"image": builder_image, "metadata": flatpak_metadata},
+        )
+        add(
+            "builds",
+            context.podman,
+            ci_registry,
+            build_image,
+            {"image": build_image, "metadata": flatpak_metadata},
+        )
+
+    checks = tuple(
+        (podman, image, ci_registry)
+        for images in candidates.values()
+        for image, (podman, ci_registry, _entry) in images.items()
+    )
+
+    exists_by_check = {
+        check: _ci_remote_image_exists(check[0], check[1], check[2])
+        for check in checks
+    }
+
+    def missing(section: str) -> dict[str, Any]:
+        return {
+            _image_id(image): entry
+            for image, (podman, ci_registry, entry) in candidates[section].items()
+            if not exists_by_check[(podman, image, ci_registry)]
+        }
+
+    return missing("cards"), missing("builders"), missing("builds")
 
 
 def _size_kib(path: Path) -> int:

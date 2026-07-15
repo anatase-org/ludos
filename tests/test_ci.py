@@ -661,11 +661,25 @@ class PrepareCiTests(unittest.TestCase):
                 cache_only=False,
                 workers=DEFAULT_PREPARE_WORKERS,
             )
-            remote_exists.assert_has_calls(
+            self.assertCountEqual(
+                remote_exists.call_args_list,
                 [
-                    call(context.podman, plan.output_image, "ghcr.io/anatase-org"),
                     call(metadata.podman, metadata.output_image, "ghcr.io/anatase-org"),
-                ]
+                    call(context.podman, plan.output_image, "ghcr.io/anatase-org"),
+                    call(metadata.podman, "cards:f44-common", "ghcr.io/anatase-org"),
+                    call(metadata.podman, "builders:f44-base", "ghcr.io/anatase-org"),
+                    call(metadata.podman, "builds:f44-base", "ghcr.io/anatase-org"),
+                    call(
+                        context.podman,
+                        "builders:f44-flatpak-builder",
+                        "ghcr.io/anatase-org",
+                    ),
+                    call(
+                        context.podman,
+                        "builds:f44-flatpak-kate-build",
+                        "ghcr.io/anatase-org",
+                    ),
+                ],
             )
             remove_tree.assert_called_once_with(
                 cache.resolve() / "ci" / "dnf" / "0-anatase",
@@ -687,6 +701,40 @@ class PrepareCiTests(unittest.TestCase):
             )
             self.assertEqual(data["version"], 1)
             self.assertNotIn("manifests", data)
+            self.assertEqual(
+                data["cards"]["f44-common"]["image"],
+                "cards:f44-common",
+            )
+            self.assertEqual(
+                data["cards"]["f44-common"]["packages"],
+                ["bash-0:1-1.fc44.x86_64"],
+            )
+            self.assertEqual(
+                data["builders"]["f44-base"]["builder_packages"],
+                ["rpm-build-0:1-1.fc44.x86_64"],
+            )
+            self.assertEqual(
+                data["builders"]["f44-base"]["build_image"],
+                "builds:f44-base",
+            )
+            self.assertEqual(
+                data["builds"]["f44-base"]["builder_image"],
+                "builders:f44-base",
+            )
+            self.assertEqual(
+                data["builders"]["f44-flatpak-builder"]["metadata"]["app"],
+                "kate",
+            )
+            self.assertEqual(
+                data["builds"]["f44-flatpak-kate-build"]["metadata"]["specs"][0][
+                    "spec"
+                ],
+                "kate.spec",
+            )
+            self.assertEqual(
+                data["builds"]["f44-base"]["metadata"]["output_image"],
+                "images:f44-anatase",
+            )
             self.assertEqual(data["images"]["f44-anatase"]["path"], str(manifest))
             self.assertEqual(
                 data["images"]["f44-anatase"]["build"]["package_images"][
@@ -764,8 +812,79 @@ class PrepareCiTests(unittest.TestCase):
                 output = prepare_ci((manifest,), cache_dir=cache)
 
             data = yaml.safe_load(output.read_text(encoding="utf-8"))
+            self.assertEqual(data["cards"], {})
+            self.assertEqual(data["builders"], {})
+            self.assertEqual(data["builds"], {})
             self.assertEqual(data["images"], {})
             self.assertEqual(data["flatpaks"], {})
+
+    def test_prepare_ci_lists_missing_dependencies_for_existing_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+            context = self._context(root)
+            metadata = self._metadata(root, context)
+            plan = self._flatpak_plan(root, cache)
+
+            def remote_exists(_podman: str, image: str, _registry: str) -> bool:
+                return image in {metadata.output_image, plan.output_image}
+
+            with (
+                patch("ludos.ci.resolve_build_manifest_context", return_value=context),
+                patch(
+                    "ludos.ci.resolve_build_manifests_from_contexts",
+                    return_value=(metadata,),
+                ),
+                patch(
+                    "ludos.ci.plan_manifest_flatpaks_with_context",
+                    return_value=(plan,),
+                ),
+                patch(
+                    "ludos.ci._ci_remote_image_exists",
+                    side_effect=remote_exists,
+                ),
+                patch("ludos.ci._remove_tree"),
+                patch("ludos.ci.log"),
+            ):
+                output = prepare_ci((manifest,), cache_dir=cache)
+
+            data = yaml.safe_load(output.read_text(encoding="utf-8"))
+            self.assertEqual(data["images"], {})
+            self.assertEqual(data["flatpaks"], {})
+            self.assertEqual(
+                tuple(data["cards"]),
+                ("f44-common",),
+            )
+            self.assertEqual(
+                tuple(data["builders"]),
+                ("f44-base", "f44-flatpak-builder"),
+            )
+            self.assertEqual(
+                tuple(data["builds"]),
+                ("f44-base", "f44-flatpak-kate-build"),
+            )
+            self.assertEqual(
+                data["cards"]["f44-common"]["manifest"],
+                str(manifest),
+            )
+            self.assertEqual(
+                data["builders"]["f44-base"]["builder_packages"],
+                ["rpm-build-0:1-1.fc44.x86_64"],
+            )
+            self.assertEqual(
+                data["builds"]["f44-base"]["block"],
+                "base",
+            )
+            self.assertEqual(
+                data["builds"]["f44-flatpak-kate-build"]["metadata"]["app"],
+                "kate",
+            )
+            self.assertEqual(
+                data["builds"]["f44-base"]["metadata"]["output_image"],
+                metadata.output_image,
+            )
 
     def test_prepare_ci_full_keeps_already_built_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -796,7 +915,27 @@ class PrepareCiTests(unittest.TestCase):
             data = yaml.safe_load(output.read_text(encoding="utf-8"))
             self.assertIn("f44-anatase", data["images"])
             self.assertIn("f44-kate-output", data["flatpaks"])
-            remote_exists.assert_not_called()
+            self.assertEqual(data["cards"], {})
+            self.assertEqual(data["builders"], {})
+            self.assertEqual(data["builds"], {})
+            self.assertCountEqual(
+                remote_exists.call_args_list,
+                [
+                    call(metadata.podman, "cards:f44-common", "ghcr.io/anatase-org"),
+                    call(metadata.podman, "builders:f44-base", "ghcr.io/anatase-org"),
+                    call(metadata.podman, "builds:f44-base", "ghcr.io/anatase-org"),
+                    call(
+                        context.podman,
+                        "builders:f44-flatpak-builder",
+                        "ghcr.io/anatase-org",
+                    ),
+                    call(
+                        context.podman,
+                        "builds:f44-flatpak-kate-build",
+                        "ghcr.io/anatase-org",
+                    ),
+                ],
+            )
 
     def test_prepare_ci_checks_remote_cache_registry(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -831,11 +970,25 @@ class PrepareCiTests(unittest.TestCase):
             ):
                 prepare_ci((manifest,), cache_dir=cache)
 
-        remote_exists.assert_has_calls(
+        self.assertCountEqual(
+            remote_exists.call_args_list,
             [
-                call(context.podman, plan.output_image, "ghcr.io/anatase-org"),
                 call(context.podman, metadata.output_image, "ghcr.io/anatase-org"),
-            ]
+                call(context.podman, plan.output_image, "ghcr.io/anatase-org"),
+                call(context.podman, "cards:f44-common", "ghcr.io/anatase-org"),
+                call(context.podman, "builders:f44-base", "ghcr.io/anatase-org"),
+                call(context.podman, "builds:f44-base", "ghcr.io/anatase-org"),
+                call(
+                    context.podman,
+                    "builders:f44-flatpak-builder",
+                    "ghcr.io/anatase-org",
+                ),
+                call(
+                    context.podman,
+                    "builds:f44-flatpak-kate-build",
+                    "ghcr.io/anatase-org",
+                ),
+            ],
         )
 
     def test_prepare_ci_keeps_existing_output_on_failure(self) -> None:
