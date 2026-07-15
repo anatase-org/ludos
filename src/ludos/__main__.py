@@ -10,7 +10,14 @@ from pathlib import Path
 from .bootc import DEFAULT_OCI_WRITERS, bootc_create, ostree_import
 from .build import build_manifest
 from .cleanup import cleanup_local_images
-from .ci import DEFAULT_VERSION_LABEL, init_ci, prepare_ci, seed_ci, write_ci_env
+from .ci import (
+    DEFAULT_PREPARE_WORKERS,
+    DEFAULT_VERSION_LABEL,
+    init_ci,
+    prepare_ci,
+    seed_ci,
+    write_ci_env,
+)
 from .flatpaks import build_flatpak, build_flatpaks
 from .installer import bootc_installer
 from .logging import LOGO_STR, configure_logging, configure_tracebacks, error, log
@@ -755,6 +762,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include already-built final images and flatpaks in the CI metadata.",
     )
+    prepare_parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_PREPARE_WORKERS,
+        help=(
+            "Number of parallel builder-package resolvers. Defaults to the smaller "
+            "of 4 and the available CPU count."
+        ),
+    )
     prepare_parser.set_defaults(func=ci_command)
     seed_parser = ci_subcommands.add_parser(
         "seed",
@@ -1145,6 +1161,7 @@ def ci_command(args: argparse.Namespace) -> int:
             cache_version=args.version,
             ccache=not args.no_ccache,
             full=args.full,
+            workers=args.workers,
         )
         return 0
     if args.ci_action == "seed":

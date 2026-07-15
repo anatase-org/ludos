@@ -10,6 +10,7 @@ import struct
 import subprocess
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -325,31 +326,53 @@ def plan_manifest_flatpaks_with_context(
     *,
     manifest_path: Path,
     cache_only: bool = False,
+    workers: int = 1,
 ) -> tuple[FlatpakBuildPlan, ...]:
     if context.validation.missing_flatpaks:
         missing = ", ".join(context.validation.missing_flatpaks)
         raise ConfigError(
             f"{manifest_path}: missing flatpak definitions: {missing}"
         )
-    return _manifest_flatpak_build_plans(context, cache_only=cache_only)
+    return _manifest_flatpak_build_plans(
+        context,
+        cache_only=cache_only,
+        workers=workers,
+    )
 
 
 def _manifest_flatpak_build_plans(
     context: ResolvedManifestContext,
     *,
     cache_only: bool,
+    workers: int = 1,
 ) -> tuple[FlatpakBuildPlan, ...]:
+    if workers < 1:
+        raise ConfigError("workers must be a positive integer")
     flatpak_refs = context.validation.manifest.flatpaks
     if not flatpak_refs:
         return tuple()
-    return tuple(
-        _prepare_flatpak_build_plan(
-            context,
-            _manifest_flatpak_path(flatpak_ref, context.root_dir),
-            cache_only=cache_only,
-        )
+
+    flatpak_paths = tuple(
+        _manifest_flatpak_path(flatpak_ref, context.root_dir)
         for flatpak_ref in flatpak_refs
     )
+
+    def prepare(flatpak_path: Path) -> FlatpakBuildPlan:
+        return _prepare_flatpak_build_plan(
+            context,
+            flatpak_path,
+            cache_only=cache_only,
+        )
+
+    if workers > 1 and len(flatpak_paths) > 1:
+        resolver_workers = min(workers, len(flatpak_paths))
+        log(
+            f"Resolving {len(flatpak_paths)} flatpaks with "
+            f"{resolver_workers} workers"
+        )
+        with ThreadPoolExecutor(max_workers=resolver_workers) as executor:
+            return tuple(executor.map(prepare, flatpak_paths))
+    return tuple(map(prepare, flatpak_paths))
 
 
 def _build_flatpak_with_context(
@@ -392,7 +415,7 @@ def _prepare_flatpak_build_plan(
     flatpak_arch = _flatpak_arch(context.arch)
     ref_kind = "runtime" if card.flatpak.runtime else "app"
     app_ref = f"{ref_kind}/{card.flatpak.app_id}/{flatpak_arch}/{branch}"
-    log(f"Building flatpak {card.flatpak.app_id} for {context.distro}")
+    log(f"Resolving flatpak {card.flatpak.app_id} for {context.distro}")
     substitution_env = _flatpak_build_env(context.manifest_env, card.env)
     build_env = dict(substitution_env)
     specs = _substitute_specs(card.specs, substitution_env)

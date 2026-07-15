@@ -20,6 +20,7 @@ from ludos.build import (
     ResolvedBuildMetadata,
 )
 from ludos.ci import (
+    DEFAULT_PREPARE_WORKERS,
     _ci_remote_image_exists,
     _inspect_remote_labels,
     _manifest_tag,
@@ -93,6 +94,8 @@ class CiParserTests(unittest.TestCase):
                 "20260629",
                 "--no-ccache",
                 "--full",
+                "--workers",
+                "8",
                 "anatase.yml",
             ]
         )
@@ -103,6 +106,12 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.version, "20260629")
         self.assertTrue(args.no_ccache)
         self.assertTrue(args.full)
+        self.assertEqual(args.workers, 8)
+
+    def test_parser_defaults_prepare_workers(self) -> None:
+        args = build_parser().parse_args(["ci", "prepare", "anatase.yml"])
+
+        self.assertEqual(args.workers, DEFAULT_PREPARE_WORKERS)
 
     def test_parser_accepts_seed_ci_options(self) -> None:
         parser = build_parser()
@@ -156,6 +165,8 @@ class CiParserTests(unittest.TestCase):
                 "--version",
                 "20260629",
                 "--no-ccache",
+                "--workers",
+                "8",
                 "anatase.yml",
             ]
         )
@@ -170,6 +181,7 @@ class CiParserTests(unittest.TestCase):
             cache_version="20260629",
             ccache=False,
             full=False,
+            workers=8,
         )
 
     def test_ci_command_calls_write_ci_env(self) -> None:
@@ -641,11 +653,13 @@ class PrepareCiTests(unittest.TestCase):
             resolve_build.assert_called_once_with(
                 ((manifest, context),),
                 cache_only=False,
+                workers=DEFAULT_PREPARE_WORKERS,
             )
             plan_flatpaks.assert_called_once_with(
                 context,
                 manifest_path=manifest,
                 cache_only=False,
+                workers=DEFAULT_PREPARE_WORKERS,
             )
             remote_exists.assert_has_calls(
                 [
@@ -851,6 +865,13 @@ class PrepareCiTests(unittest.TestCase):
     def test_prepare_ci_requires_manifest(self) -> None:
         with self.assertRaisesRegex(ConfigError, "at least one manifest"):
             prepare_ci(tuple())
+
+    def test_prepare_ci_requires_positive_workers(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigError,
+            "workers must be a positive integer",
+        ):
+            prepare_ci((Path("anatase.yml"),), workers=0)
 
     def _context(self, root: Path) -> SimpleNamespace:
         return SimpleNamespace(

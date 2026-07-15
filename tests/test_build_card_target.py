@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -398,6 +399,49 @@ class TargetCardBuildTests(unittest.TestCase):
             self.assertEqual(Path(metadata.dnf_persist_dir), workspace / "persist")
             self.assertEqual(Path(metadata.dnf_log_dir), workspace / "log")
             self.assertTrue(workspace.exists())
+        finally:
+            _cleanup_dnf_workspaces((metadata,))
+
+    def test_metadata_resolves_builder_cards_in_thread_pool(self) -> None:
+        self._write_build_manifest()
+        main_thread = threading.get_ident()
+        resolver_threads = set()
+
+        def resolve_packages(
+            _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
+        ):
+            if "rpm-build" in packages or "cargo" in packages:
+                resolver_threads.add(threading.get_ident())
+            resolved = tuple(f"{package}-0:1-1.fc44.x86_64" for package in packages)
+            for package, resolved_package in zip(packages, resolved):
+                package_id_by_nevra[resolved_package] = (package, "x86_64")
+            return resolved
+
+        with (
+            patch("ludos.build.shutil.which", side_effect=lambda command: command),
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._extract_image_paths"),
+            patch("ludos.build._apply_repo_priority"),
+            patch(
+                "ludos.build._card_specs_hash",
+                return_value=("spechash", tuple()),
+            ),
+            patch("ludos.build._stage_card_specs", return_value=tuple()),
+            patch(
+                "ludos.build._resolve_staged_spec_builder_packages",
+                return_value=("spec-builddep",),
+            ),
+            patch("ludos.build._resolve_packages", side_effect=resolve_packages),
+        ):
+            metadata = _resolve_manifest_metadata(self.manifest, workers=2)
+
+        try:
+            self.assertEqual(
+                [plan.block for plan in metadata.build_images],
+                ["base-scx", "gaming-hhd"],
+            )
+            self.assertTrue(resolver_threads)
+            self.assertNotIn(main_thread, resolver_threads)
         finally:
             _cleanup_dnf_workspaces((metadata,))
 

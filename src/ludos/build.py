@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
@@ -390,12 +391,14 @@ def resolve_build_manifest_from_context(
     manifest_path: Path,
     cache_only: bool = False,
     card: str | None = None,
+    workers: int = 1,
 ) -> ResolvedBuildMetadata:
     return _resolve_manifest_metadata(
         manifest_path,
         cache_only=cache_only,
         target_card=card,
         context=context,
+        workers=workers,
     )
 
 
@@ -404,6 +407,7 @@ def resolve_build_manifests_from_contexts(
     *,
     cache_only: bool = False,
     card: str | None = None,
+    workers: int = 1,
 ) -> tuple[ResolvedBuildMetadata, ...]:
     if not manifest_contexts:
         raise ConfigError("at least one manifest is required")
@@ -415,6 +419,7 @@ def resolve_build_manifests_from_contexts(
             manifest_path=manifest_path,
             cache_only=cache_only,
             card=card,
+            workers=workers,
         )
         for manifest_path, context in manifest_contexts
     )
@@ -430,7 +435,10 @@ def _resolve_manifest_metadata(
     target_card: str | None = None,
     dnf_workspace_dirs: list[Path] | None = None,
     context: ResolvedManifestContext | None = None,
+    workers: int = 1,
 ) -> ResolvedBuildMetadata:
+    if workers < 1:
+        raise ConfigError("workers must be a positive integer")
     if context is None:
         context = resolve_build_manifest_context(
             manifest_path,
@@ -863,12 +871,21 @@ def _resolve_manifest_metadata(
             f"{len(package_blocks)} install blocks"
         )
 
-    builder_images = {}
-    builder_package_map = {}
-    build_declared_package_map = {}
-    for card_name in card_names:
-        if card_name not in build_card_names:
-            continue
+    builder_card_names = tuple(
+        card_name for card_name in card_names if card_name in build_card_names
+    )
+    base_package_id_by_nevra = dict(package_id_by_nevra)
+
+    def resolve_builder_card(
+        card_name: str,
+    ) -> tuple[
+        str,
+        tuple[str, ...],
+        tuple[tuple[str, str], ...],
+        str,
+        dict[str, tuple[str, str]],
+    ]:
+        builder_package_ids = dict(base_package_id_by_nevra)
         build_deps = _build_deps(card_build_deps.get(card_name, tuple()))
         if not build_deps:
             raise ConfigError(f"build card '{card_name}' must define build-deps")
@@ -877,7 +894,7 @@ def _resolve_manifest_metadata(
             orchestrator_dnf_base,
             releasever,
             build_deps,
-            package_id_by_nevra,
+            builder_package_ids,
             dnf_resolve_dir,
             tuple(repo_images),
         )
@@ -902,7 +919,7 @@ def _resolve_manifest_metadata(
                 spec_scan_dir,
                 staged_specs,
                 arch,
-                package_id_by_nevra,
+                builder_package_ids,
                 dnf_resolve_dir,
                 tuple(repo_images),
                 card_name=card_name,
@@ -917,28 +934,64 @@ def _resolve_manifest_metadata(
             orchestrator_dnf_base,
             releasever,
             builder_package_requests,
-            package_id_by_nevra,
+            builder_package_ids,
             dnf_resolve_dir,
             tuple(repo_images),
         )
         if not builder_packages:
             raise ConfigError(f"dnf did not resolve builder packages for {card_name}")
-        builder_package_map[card_name] = builder_packages
+        declared_package_ids = []
         if card_name in card_specs:
-            declared_package_ids = []
             for spec in card_build_specs.get(card_name, card_specs[card_name]):
                 declared_package_ids.extend(
                     _package_request_ids(_spec_packages_for_arch(spec, arch), arch)
                 )
-            build_declared_package_map[card_name] = tuple(
-                dict.fromkeys(declared_package_ids)
-            )
         builder_hash = _nevra_hash(builder_packages)
         builder_image = _local_image(
             local_prefix,
             "builders",
             f"{distro}-{builder_hash}",
         )
+        added_package_ids = {
+            package: package_id
+            for package, package_id in builder_package_ids.items()
+            if base_package_id_by_nevra.get(package) != package_id
+        }
+        return (
+            card_name,
+            builder_packages,
+            tuple(dict.fromkeys(declared_package_ids)),
+            builder_image,
+            added_package_ids,
+        )
+
+    if workers > 1 and len(builder_card_names) > 1:
+        resolver_workers = min(workers, len(builder_card_names))
+        log(
+            f"Resolving {len(builder_card_names)} builder cards with "
+            f"{resolver_workers} workers"
+        )
+        with ThreadPoolExecutor(max_workers=resolver_workers) as executor:
+            builder_resolutions = tuple(
+                executor.map(resolve_builder_card, builder_card_names)
+            )
+    else:
+        builder_resolutions = tuple(map(resolve_builder_card, builder_card_names))
+
+    builder_images = {}
+    builder_package_map = {}
+    build_declared_package_map = {}
+    for (
+        card_name,
+        builder_packages,
+        declared_package_ids,
+        builder_image,
+        added_package_ids,
+    ) in builder_resolutions:
+        package_id_by_nevra.update(added_package_ids)
+        builder_package_map[card_name] = builder_packages
+        if declared_package_ids:
+            build_declared_package_map[card_name] = declared_package_ids
         builder_images[card_name] = builder_image
 
     package_images_by_block = {}

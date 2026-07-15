@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from ludos.flatpaks import (
     _ensure_flatpak_rpm_builds,
     _prepare_flatpak_build_plan,
     _flatpak_rpmbuild_defines,
+    plan_manifest_flatpaks_with_context,
     _run_flatpak_image_build,
     _stage_flatpak_files,
     _substitute_specs,
@@ -369,6 +371,46 @@ class FlatpakParserTests(unittest.TestCase):
                 ("images", plans),
             ],
         )
+
+    def test_plan_manifest_flatpaks_uses_thread_pool_and_preserves_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            context = SimpleNamespace(
+                validation=SimpleNamespace(
+                    missing_flatpaks=tuple(),
+                    manifest=SimpleNamespace(
+                        flatpaks=("flatpaks/kate", "flatpaks/ark/card.yaml")
+                    ),
+                ),
+                root_dir=root,
+            )
+            main_thread = threading.get_ident()
+            resolver_threads = set()
+
+            def prepare(
+                _context: object,
+                flatpak_path: Path,
+                **_kwargs: object,
+            ) -> Path:
+                resolver_threads.add(threading.get_ident())
+                return flatpak_path
+
+            with patch(
+                "ludos.flatpaks._prepare_flatpak_build_plan",
+                side_effect=prepare,
+            ):
+                plans = plan_manifest_flatpaks_with_context(
+                    context,
+                    manifest_path=root / "anatase.yml",
+                    workers=2,
+                )
+
+        self.assertEqual(
+            plans,
+            (root / "flatpaks/kate", root / "flatpaks/ark/card.yaml"),
+        )
+        self.assertTrue(resolver_threads)
+        self.assertNotIn(main_thread, resolver_threads)
 
     def test_build_flatpaks_rejects_manifest_without_flatpaks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import lzma
+import os
 import shutil
 import subprocess
 from dataclasses import fields, is_dataclass
@@ -46,6 +47,7 @@ from .model import ConfigError, Manifest
 
 
 DEFAULT_CI_CACHE_DIR = Path("cache")
+DEFAULT_PREPARE_WORKERS = min(4, os.cpu_count() or 1)
 DEFAULT_VERSION_LABEL = "org.opencontainers.image.version"
 
 
@@ -153,9 +155,12 @@ def prepare_ci(
     cache_version: str | None = None,
     ccache: bool = True,
     full: bool = False,
+    workers: int = DEFAULT_PREPARE_WORKERS,
 ) -> Path:
     if not manifest_paths:
         raise ConfigError("at least one manifest is required")
+    if workers < 1:
+        raise ConfigError("workers must be a positive integer")
 
     cache_root = _resolve_cache_root(manifest_paths, cache_dir)
     manifest_contexts: list[tuple[Path, ResolvedManifestContext]] = []
@@ -175,6 +180,7 @@ def prepare_ci(
     metadata = resolve_build_manifests_from_contexts(
         tuple(manifest_contexts),
         cache_only=False,
+        workers=workers,
     )
     flatpaks = tuple(
         _flatpak_entry(manifest_path, context, plan)
@@ -183,6 +189,7 @@ def prepare_ci(
             context,
             manifest_path=manifest_path,
             cache_only=False,
+            workers=workers,
         )
         if full
         or not _ci_remote_image_exists(
