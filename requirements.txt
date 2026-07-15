@@ -6,9 +6,9 @@
 #
 -e .
     # via -r requirements.in
-boto3==1.43.36
+boto3==1.43.48
     # via ludos
-botocore==1.43.36
+botocore==1.43.48
     # via
     #   boto3
     #   s3transfer
@@ -16,27 +16,27 @@ jmespath==1.1.0
     # via
     #   boto3
     #   botocore
-markdown-it-py==3.0.0
+markdown-it-py==4.2.0
     # via rich
 mdurl==0.1.2
     # via markdown-it-py
-numpy==2.1.2
+numpy==2.5.1
     # via ludos
-pillow==12.2.0
+pillow==12.3.0
     # via ludos
-pygments==2.18.0
+pygments==2.20.0
     # via rich
 python-dateutil==2.9.0.post0
     # via botocore
-pyyaml==6.0.2
+pyyaml==6.0.3
     # via ludos
-rich==13.9.3
+rich==15.0.0
     # via ludos
-s3transfer==0.19.0
+s3transfer==0.19.1
     # via boto3
 six==1.17.0
     # via python-dateutil
-tqdm==4.66.6
+tqdm==4.68.4
     # via ludos
 urllib3==2.7.0
     # via botocore
