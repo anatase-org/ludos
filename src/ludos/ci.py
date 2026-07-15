@@ -54,7 +54,6 @@ from .common import (
 from .flatpaks import (
     FlatpakBuildPlan,
     FlatpakCard,
-    _ensure_flatpak_builders,
     _ensure_flatpak_images,
     _ensure_flatpak_rpm_builds,
     plan_manifest_flatpaks_with_context,
@@ -514,7 +513,14 @@ def _build_ci_package(
             entry["flatpak"],
             metadata,
         )
-        _ensure_flatpak_builders(context, (plan,), cache_only=True)
+        if not _ensure_image(
+            context.podman,
+            plan.builder_image,
+            context.ci_registry,
+        ):
+            raise ConfigError(
+                f"flatpak builder image is missing: {plan.builder_image}"
+            )
         _ensure_flatpak_rpm_builds(context, (plan,), cache_only=False)
         image = plan.build_image
     else:

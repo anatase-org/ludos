@@ -25,6 +25,7 @@ from ludos.ci import (
     DEFAULT_SEED_BUFFER_RATIO,
     SeedDiskSpaceError,
     _ci_remote_image_exists,
+    _build_ci_package,
     _create_seed_builder_image,
     _inspect_remote_labels,
     _manifest_tag,
@@ -1460,6 +1461,49 @@ class BuildCiTests(unittest.TestCase):
         self.assertEqual(
             remove.call_args_list,
             [call("podman", "images:latest"), call("podman", "images:exact")],
+        )
+
+    def test_flatpak_package_build_pulls_prepared_builder_directly(self) -> None:
+        metadata = SimpleNamespace(
+            podman="podman",
+            ci_registry="registry.example",
+        )
+        context = SimpleNamespace(
+            podman="podman",
+            ci_registry="registry.example",
+        )
+        plan = SimpleNamespace(
+            builder_image="builders:flatpak",
+            build_image="builds:flatpak",
+        )
+        with (
+            patch("ludos.ci._metadata_from_mapping", return_value=metadata),
+            patch("ludos.ci._restore_ci_build_context"),
+            patch("ludos.ci._prepared_flatpak_context", return_value=context),
+            patch("ludos.ci._prepared_flatpak_plan", return_value=plan),
+            patch("ludos.ci._ensure_image", return_value=True) as ensure,
+            patch("ludos.ci._ensure_flatpak_rpm_builds") as build,
+            patch("ludos.ci._upload_ci_output") as upload,
+        ):
+            _build_ci_package(
+                Path("cache/ci/build.yml"),
+                "flatpak",
+                {"metadata": {}, "flatpak": {}},
+                restored_contexts=set(),
+                autoremove=False,
+            )
+
+        ensure.assert_called_once_with(
+            "podman",
+            "builders:flatpak",
+            "registry.example",
+        )
+        build.assert_called_once_with(context, (plan,), cache_only=False)
+        upload.assert_called_once_with(
+            "podman",
+            "builds:flatpak",
+            "registry.example",
+            autoremove=False,
         )
 
 
