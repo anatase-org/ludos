@@ -52,7 +52,7 @@ from .model import ConfigError, Manifest
 
 DEFAULT_CI_CACHE_DIR = Path("cache")
 DEFAULT_PREPARE_WORKERS = min(4, os.cpu_count() or 1)
-DEFAULT_SEED_BUFFER_RATIO = 1.5
+DEFAULT_SEED_BUFFER_RATIO = 3
 DEFAULT_VERSION_LABEL = "org.opencontainers.image.version"
 
 
@@ -312,10 +312,12 @@ def seed_ci(
     cache_dir: Path | None = None,
     autoremove: bool = False,
     workers: int = DEFAULT_PREPARE_WORKERS,
-    buffer_ratio: float = DEFAULT_SEED_BUFFER_RATIO,
+    buffer_ratio: float | None = None,
 ) -> None:
     if workers < 1:
         raise ConfigError("workers must be a positive integer")
+    if buffer_ratio is None:
+        buffer_ratio = workers * DEFAULT_SEED_BUFFER_RATIO
     if not math.isfinite(buffer_ratio) or buffer_ratio <= 0:
         raise ConfigError("buffer ratio must be a positive finite number")
     build_manifest = build_manifest or _default_ci_build_manifest(cache_dir)

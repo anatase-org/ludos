@@ -3,10 +3,29 @@ from __future__ import annotations
 import unittest
 from unittest.mock import ANY, call, patch
 
-from ludos.build import _create_orchestrator_image
+from ludos.build import _create_orchestrator_image, _create_scratch_image
+from ludos.model import ConfigError
 
 
 class BuildOrchestratorImageTests(unittest.TestCase):
+    def test_quiet_scratch_build_reports_captured_failure_output(self) -> None:
+        with patch(
+            "ludos.build._run_streamed_command",
+            return_value=(1, "transaction failed\ndisk full\n"),
+        ) as stream:
+            with self.assertRaisesRegex(
+                ConfigError,
+                "(?s)localhost/builders:test.*transaction failed\\ndisk full",
+            ):
+                _create_scratch_image(
+                    buildah="buildah",
+                    image="localhost/builders:test",
+                    body=[],
+                    quiet=True,
+                )
+
+        self.assertTrue(stream.call_args.kwargs["quiet"])
+
     def test_tags_latest_when_retagging_base_orchestrator(self) -> None:
         source = "quay.io/fedora/fedora:42"
         image = "localhost/orchestrator:fedora-base-20260616"

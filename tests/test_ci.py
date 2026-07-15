@@ -148,7 +148,7 @@ class CiParserTests(unittest.TestCase):
         self.assertIsNone(args.build_manifest)
         self.assertIsNone(args.cache_dir)
         self.assertEqual(args.workers, DEFAULT_PREPARE_WORKERS)
-        self.assertEqual(args.buffer_ratio, DEFAULT_SEED_BUFFER_RATIO)
+        self.assertIsNone(args.buffer_ratio)
 
     def test_parser_accepts_seed_ci_cache_dir(self) -> None:
         parser = build_parser()
@@ -246,7 +246,17 @@ class CiParserTests(unittest.TestCase):
         )
 
     def test_ci_command_calls_seed_ci(self) -> None:
-        args = build_parser().parse_args(["ci", "seed", "cache/ci/build.yml"])
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "seed",
+                "cache/ci/build.yml",
+                "--workers",
+                "8",
+                "--buffer-ratio",
+                "2.5",
+            ]
+        )
 
         with patch("ludos.__main__.seed_ci") as seed:
             exit_code = ci_command(args)
@@ -256,8 +266,8 @@ class CiParserTests(unittest.TestCase):
             Path("cache/ci/build.yml"),
             cache_dir=None,
             autoremove=False,
-            workers=DEFAULT_PREPARE_WORKERS,
-            buffer_ratio=DEFAULT_SEED_BUFFER_RATIO,
+            workers=8,
+            buffer_ratio=2.5,
         )
 
     def test_ci_command_calls_seed_ci_with_default_build_manifest(self) -> None:
@@ -272,7 +282,7 @@ class CiParserTests(unittest.TestCase):
             cache_dir=None,
             autoremove=False,
             workers=DEFAULT_PREPARE_WORKERS,
-            buffer_ratio=DEFAULT_SEED_BUFFER_RATIO,
+            buffer_ratio=DEFAULT_PREPARE_WORKERS * DEFAULT_SEED_BUFFER_RATIO,
         )
 
     def test_ci_command_calls_seed_ci_with_cache_dir_and_autoremove(self) -> None:
@@ -289,7 +299,7 @@ class CiParserTests(unittest.TestCase):
             cache_dir=Path("out-cache"),
             autoremove=True,
             workers=DEFAULT_PREPARE_WORKERS,
-            buffer_ratio=DEFAULT_SEED_BUFFER_RATIO,
+            buffer_ratio=DEFAULT_PREPARE_WORKERS * DEFAULT_SEED_BUFFER_RATIO,
         )
 
     def test_main_returns_7_for_seed_disk_space_error(self) -> None:
@@ -1329,6 +1339,18 @@ class SeedCiTests(unittest.TestCase):
             seed_ci(Path("build.yml"), workers=0)
         with self.assertRaisesRegex(ConfigError, "buffer ratio must be"):
             seed_ci(Path("build.yml"), buffer_ratio=0)
+
+    def test_seed_ci_defaults_buffer_ratio_from_workers(self) -> None:
+        with (
+            patch("ludos.ci._read_seed_entries", return_value=tuple()),
+            patch("ludos.ci._prepare_seed_rpms", return_value={}) as prepare,
+        ):
+            seed_ci(Path("build.yml"), workers=2)
+
+        prepare.assert_called_once_with(
+            tuple(),
+            buffer_ratio=2 * DEFAULT_SEED_BUFFER_RATIO,
+        )
 
     def test_seed_ci_uses_prefiltered_manifest_without_remote_checks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

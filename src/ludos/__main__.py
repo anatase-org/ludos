@@ -808,10 +808,10 @@ def build_parser() -> argparse.ArgumentParser:
     seed_parser.add_argument(
         "--buffer-ratio",
         type=float,
-        default=DEFAULT_SEED_BUFFER_RATIO,
+        default=None,
         help=(
             "Required free disk space as a multiple of missing RPM download "
-            "bytes. Defaults to 1.5."
+            f"bytes. Defaults to --workers × {DEFAULT_SEED_BUFFER_RATIO}."
         ),
     )
     seed_parser.set_defaults(func=ci_command)
@@ -1185,12 +1185,15 @@ def ci_command(args: argparse.Namespace) -> int:
         )
         return 0
     if args.ci_action == "seed":
+        buffer_ratio = args.buffer_ratio
+        if buffer_ratio is None:
+            buffer_ratio = args.workers * DEFAULT_SEED_BUFFER_RATIO
         seed_ci(
             args.build_manifest,
             cache_dir=args.cache_dir,
             autoremove=args.autoremove,
             workers=args.workers,
-            buffer_ratio=args.buffer_ratio,
+            buffer_ratio=buffer_ratio,
         )
         return 0
     raise ConfigError(f"unknown ci action: {args.ci_action}")

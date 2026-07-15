@@ -3270,13 +3270,20 @@ def _create_scratch_image(
             "container=",
         ]
     )
-    returncode, _output = _run_streamed_command(
+    returncode, output = _run_streamed_command(
         [buildah, "unshare", "/bin/sh", "-s"],
         input_text=script + "\n",
         quiet=quiet,
     )
     if returncode != 0:
-        raise ConfigError(f"scratch image build failed with exit status {returncode}")
+        message = (
+            f"scratch image build failed for {image} "
+            f"with exit status {returncode}"
+        )
+        details = "\n".join(output.rstrip().splitlines()[-80:])
+        if details:
+            message = f"{message}:\n{details}"
+        raise ConfigError(message)
 
 
 def _run_prepare_block(
@@ -5623,8 +5630,7 @@ def _run_streamed_command(
 
         assert process.stdout is not None
         for line in process.stdout:
-            if not quiet:
-                output_lines.append(line)
+            output_lines.append(line)
             if line_rewriter is not None:
                 line = line_rewriter(line)
             if not quiet:
