@@ -305,12 +305,16 @@ def seed_ci(
     autoremove: bool = False,
 ) -> None:
     build_manifest = build_manifest or _default_ci_build_manifest(cache_dir)
-    for section, manifest, image, packages in _read_seed_entries(build_manifest):
+    entries = _read_seed_entries(build_manifest)
+    total = len(entries)
+    progress_width = max(2, len(str(total)))
+    for index, (section, manifest, image, packages) in enumerate(entries, start=1):
         _seed_image(
             manifest,
             image,
             packages,
             builder=section == "builders",
+            progress=f"({index:0{progress_width}d}/{total:0{progress_width}d})",
             autoremove=autoremove,
         )
 
@@ -375,9 +379,11 @@ def _seed_image(
     packages: tuple[str, ...],
     *,
     builder: bool,
+    progress: str,
     autoremove: bool = False,
 ) -> None:
     _require_ci_registry(manifest.ci_registry)
+    log(f"{progress} Creating {image} Image")
     if not _local_image_exists(manifest.podman, image):
         create = (
             _create_seed_builder_image
@@ -399,7 +405,6 @@ def _create_seed_package_image(
         list(manifest.orchestrator_dnf_base),
         packages,
     )
-    log(f"Creating card package image: {image}")
     _create_package_image(
         buildah=_require_buildah(manifest.buildah),
         image=image,
@@ -419,7 +424,6 @@ def _create_seed_builder_image(
         package_dir=Path(manifest.package_dir),
         resolve_dependencies=True,
     )
-    log(f"Creating builder image: {image}")
     _create_builder_image(
         podman=manifest.podman,
         buildah=_require_buildah(manifest.buildah),

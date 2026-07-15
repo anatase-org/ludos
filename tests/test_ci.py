@@ -1178,6 +1178,7 @@ class SeedCiTests(unittest.TestCase):
                 patch("ludos.ci._push_ci_image") as push,
                 patch("ludos.ci._create_seed_package_image") as create_package,
                 patch("ludos.ci._create_seed_builder_image") as create_builder,
+                patch("ludos.ci.log") as log,
             ):
                 seed_ci(build_manifest)
 
@@ -1192,6 +1193,14 @@ class SeedCiTests(unittest.TestCase):
             )
             create_package.assert_not_called()
             create_builder.assert_not_called()
+            self.assertEqual(
+                [call.args[0] for call in log.call_args_list if "Creating" in call.args[0]],
+                [
+                    "(01/03) Creating cards:f44-common Image",
+                    "(02/03) Creating builders:f44-base Image",
+                    "(03/03) Creating builders:f44-flatpak-kate Image",
+                ],
+            )
 
     def test_seed_ci_creates_listed_images_missing_locally(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1202,6 +1211,7 @@ class SeedCiTests(unittest.TestCase):
                 patch("ludos.ci._push_ci_image") as push,
                 patch("ludos.ci._create_seed_package_image") as create_package,
                 patch("ludos.ci._create_seed_builder_image") as create_builder,
+                patch("ludos.ci.log") as log,
             ):
                 seed_ci(build_manifest)
 
@@ -1230,6 +1240,14 @@ class SeedCiTests(unittest.TestCase):
                     "cards:f44-common",
                     "builders:f44-base",
                     "builders:f44-flatpak-kate",
+                ],
+            )
+            self.assertEqual(
+                [call.args[0] for call in log.call_args_list if "Creating" in call.args[0]],
+                [
+                    "(01/03) Creating cards:f44-common Image",
+                    "(02/03) Creating builders:f44-base Image",
+                    "(03/03) Creating builders:f44-flatpak-kate Image",
                 ],
             )
 
