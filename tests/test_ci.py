@@ -32,6 +32,7 @@ from ludos.ci import (
     _metadata_from_seed_entry,
     _prepare_seed_rpms,
     _read_seed_entries,
+    _rebase_ci_entry,
     _seed_rpm_download_sizes,
     _upload_ci_output,
     build_ci,
@@ -1344,6 +1345,81 @@ class PrepareCiTests(unittest.TestCase):
 
 
 class BuildCiTests(unittest.TestCase):
+    def test_rebase_ci_entry_uses_current_checkout_and_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            prepared_root = base / "hosted" / "work" / "anatase"
+            prepared_cache = base / "hosted" / "cache"
+            current_root = base / "self-hosted" / "work" / "anatase"
+            build_manifest = current_root / "cache" / "ci" / "build.yml"
+            entry = {
+                "metadata": {
+                    "root_dir": str(prepared_root),
+                    "cache_dir": str(prepared_cache / "f44-x86_64"),
+                    "repo_dir": str(prepared_cache / "ci" / "dnf" / "repos"),
+                    "card_sources": [
+                        ["base-scx", str(prepared_root / "cards" / "base" / "scx" / "card.yml")]
+                    ],
+                    "card_file_sets": [
+                        [
+                            "base-scx",
+                            str(prepared_root / "cards" / "base" / "scx" / "card.yml"),
+                            [],
+                        ]
+                    ],
+                    "orchestrator_dnf_base": [
+                        f"{prepared_root}/repos:/workspace/repos:ro"
+                    ],
+                },
+                "flatpak": {
+                    "source": "flatpaks/okular/card.yaml",
+                    "paths": {
+                        "flatpak_dir": str(prepared_root / "flatpaks" / "okular"),
+                        "spec_build_dir": str(
+                            prepared_cache / "f44-x86_64" / "flatpaks" / "okular"
+                        ),
+                    },
+                    "upstream": "https://example.com/source",
+                },
+            }
+
+            with patch("ludos.ci.Path.cwd", return_value=current_root):
+                rebased = _rebase_ci_entry(
+                    build_manifest,
+                    entry,
+                    metadata_key="metadata",
+                )
+
+        self.assertIsInstance(rebased, dict)
+        metadata = rebased["metadata"]
+        flatpak = rebased["flatpak"]
+        self.assertEqual(metadata["root_dir"], str(current_root))
+        self.assertEqual(
+            metadata["repo_dir"],
+            str(current_root / "cache" / "ci" / "dnf" / "repos"),
+        )
+        self.assertEqual(
+            metadata["card_sources"][0][1],
+            str(current_root / "cards" / "base" / "scx" / "card.yml"),
+        )
+        self.assertEqual(
+            metadata["card_file_sets"][0][1],
+            str(current_root / "cards" / "base" / "scx" / "card.yml"),
+        )
+        self.assertEqual(
+            metadata["orchestrator_dnf_base"][0],
+            f"{current_root}/repos:/workspace/repos:ro",
+        )
+        self.assertEqual(
+            flatpak["paths"]["flatpak_dir"],
+            str(current_root / "flatpaks" / "okular"),
+        )
+        self.assertEqual(
+            flatpak["paths"]["spec_build_dir"],
+            str(current_root / "cache" / "f44-x86_64" / "flatpaks" / "okular"),
+        )
+        self.assertEqual(flatpak["upstream"], "https://example.com/source")
+
     def test_build_ci_runs_composable_selection_in_dependency_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             build_manifest = Path(temp) / "build.yml"

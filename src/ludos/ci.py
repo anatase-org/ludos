@@ -495,6 +495,7 @@ def _build_ci_package(
 ) -> None:
     if not isinstance(entry, dict):
         raise ConfigError(f"{build_manifest}: invalid builds entry '{build_id}'")
+    entry = _rebase_ci_entry(build_manifest, entry, metadata_key="metadata")
     metadata = _metadata_from_mapping(
         build_manifest,
         build_id,
@@ -543,6 +544,7 @@ def _build_ci_manifest_image(
     restored_contexts: set[tuple[str, str, tuple[str, ...]]],
     autoremove: bool,
 ) -> None:
+    entry = _rebase_ci_entry(build_manifest, entry, metadata_key="build")
     metadata = _metadata_from_seed_entry(build_manifest, build_id, entry)
     _restore_ci_build_context(
         metadata,
@@ -581,6 +583,7 @@ def _build_ci_flatpak(
 ) -> None:
     if not isinstance(entry, dict):
         raise ConfigError(f"{build_manifest}: invalid flatpaks entry '{build_id}'")
+    entry = _rebase_ci_entry(build_manifest, entry, metadata_key="build")
     metadata = _metadata_from_mapping(
         build_manifest,
         build_id,
@@ -681,6 +684,62 @@ def _string_mapping(value: object) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
     return {str(key): str(item) for key, item in value.items()}
+
+
+def _rebase_ci_entry(
+    build_manifest: Path,
+    entry: object,
+    *,
+    metadata_key: str,
+) -> object:
+    if not isinstance(entry, dict):
+        return entry
+    metadata = entry.get(metadata_key)
+    if not isinstance(metadata, dict):
+        return entry
+
+    prepared_root_text = str(metadata.get("root_dir", ""))
+    prepared_root = Path(prepared_root_text)
+    if not prepared_root_text or not prepared_root.is_absolute():
+        return entry
+
+    current_root = Path.cwd().resolve()
+    current_cache_root = build_manifest.expanduser().resolve().parent.parent
+    roots = [(prepared_root, current_root)]
+
+    prepared_cache_text = str(metadata.get("cache_dir", ""))
+    prepared_cache_dir = Path(prepared_cache_text)
+    if prepared_cache_text and prepared_cache_dir.is_absolute():
+        roots.append((prepared_cache_dir.parent, current_cache_root))
+
+    roots.sort(key=lambda item: len(item[0].parts), reverse=True)
+    return _rebase_prepared_value(entry, tuple(roots))
+
+
+def _rebase_prepared_value(
+    value: object,
+    roots: tuple[tuple[Path, Path], ...],
+) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _rebase_prepared_value(item, roots)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_rebase_prepared_value(item, roots) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    path = Path(value)
+    if not path.is_absolute():
+        return value
+    for prepared_root, current_root in roots:
+        try:
+            relative = path.relative_to(prepared_root)
+        except ValueError:
+            continue
+        return str(current_root / relative)
+    return value
 
 
 def _restore_ci_build_context(
