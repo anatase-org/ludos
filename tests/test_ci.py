@@ -102,7 +102,6 @@ class CiParserTests(unittest.TestCase):
                 "cache",
                 "--version",
                 "20260629",
-                "--no-ccache",
                 "--full",
                 "--workers",
                 "8",
@@ -114,7 +113,6 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.manifests, [Path("anatase.yml")])
         self.assertEqual(args.cache_dir, Path("cache"))
         self.assertEqual(args.version, "20260629")
-        self.assertTrue(args.no_ccache)
         self.assertTrue(args.full)
         self.assertEqual(args.workers, 8)
 
@@ -187,10 +185,10 @@ class CiParserTests(unittest.TestCase):
         self.assertTrue(args.flatpaks)
         self.assertTrue(args.autoremove)
 
-    def test_prepare_ci_rejects_cache_and_cards_dir(self) -> None:
+    def test_prepare_ci_rejects_unsupported_options(self) -> None:
         parser = build_parser()
 
-        for option in ("--cache", "--cards-dir"):
+        for option in ("--cache", "--cards-dir", "--no-ccache"):
             with self.subTest(option=option):
                 argv = ["ci", "prepare", option]
                 if option == "--cards-dir":
@@ -209,7 +207,6 @@ class CiParserTests(unittest.TestCase):
                 "cache",
                 "--version",
                 "20260629",
-                "--no-ccache",
                 "--workers",
                 "8",
                 "anatase.yml",
@@ -224,7 +221,6 @@ class CiParserTests(unittest.TestCase):
             (Path("anatase.yml"),),
             cache_dir=Path("cache"),
             cache_version="20260629",
-            ccache=False,
             full=False,
             workers=8,
         )
@@ -327,7 +323,15 @@ class CiParserTests(unittest.TestCase):
 
     def test_ci_command_calls_build_ci(self) -> None:
         args = build_parser().parse_args(
-            ["ci", "build", "first", "0", "--images", "--autoremove"]
+            [
+                "ci",
+                "build",
+                "first",
+                "0",
+                "--images",
+                "--autoremove",
+                "--ccache",
+            ]
         )
 
         with patch("ludos.__main__.build_ci") as build:
@@ -340,6 +344,7 @@ class CiParserTests(unittest.TestCase):
             images=True,
             flatpaks=False,
             autoremove=True,
+            ccache=True,
         )
 
     def test_main_returns_7_for_seed_disk_space_error(self) -> None:
@@ -736,7 +741,6 @@ class PrepareCiTests(unittest.TestCase):
                     (manifest,),
                     cache_dir=cache,
                     cache_version="20260629",
-                    ccache=False,
                 )
 
             self.assertEqual(output, cache.resolve() / "ci" / "build.yml")
@@ -890,6 +894,10 @@ class PrepareCiTests(unittest.TestCase):
                 "resolved_packages",
                 data["images"][image_id]["build"],
             )
+            self.assertNotIn(
+                "ccache_dir",
+                data["images"][image_id]["build"],
+            )
             self.assertEqual(
                 data["flatpaks"]["f44-kate-output"]["source"],
                 "flatpaks/kate/card.yaml",
@@ -915,6 +923,7 @@ class PrepareCiTests(unittest.TestCase):
                 dict,
             )
             source = output.read_text(encoding="utf-8")
+            self.assertNotIn("ccache_dir:", source)
             self.assertIn("&id", source)
             self.assertIn("*id", source)
             restored = _metadata_from_seed_entry(
@@ -924,6 +933,18 @@ class PrepareCiTests(unittest.TestCase):
             )
             self.assertEqual(restored.output_image, ci_metadata.output_image)
             self.assertEqual(restored.package_images, ci_metadata.package_images)
+            self.assertIsNone(restored.ccache_dir)
+            restored_with_ccache = _metadata_from_seed_entry(
+                output,
+                image_id,
+                data["images"][image_id],
+                ccache=True,
+            )
+            self.assertEqual(
+                restored_with_ccache.ccache_dir,
+                str(cache / "ccache"),
+            )
+            self.assertTrue((cache / "ccache").is_dir())
             self.assertEqual(restored.build_images, ci_metadata.build_images)
             self.assertEqual(restored.oci_images, ci_metadata.oci_images)
 
@@ -1439,7 +1460,7 @@ class BuildCiTests(unittest.TestCase):
 
             def record(section: str):
                 def run(_manifest, build_id, _entry, **_kwargs):
-                    calls.append((section, build_id))
+                    calls.append((section, build_id, _kwargs["ccache"]))
 
                 return run
 
@@ -1456,15 +1477,16 @@ class BuildCiTests(unittest.TestCase):
                     build_manifest=build_manifest,
                     builds=True,
                     flatpaks=True,
+                    ccache=True,
                 )
 
         self.assertEqual(
             calls,
             [
-                ("build", "a"),
-                ("build", "b"),
-                ("image", "image"),
-                ("flatpak", "flatpak"),
+                ("build", "a", True),
+                ("build", "b", True),
+                ("image", "image", True),
+                ("flatpak", "flatpak", True),
             ],
         )
 
@@ -1977,7 +1999,6 @@ class SeedCiTests(unittest.TestCase):
                                 "card_build_dir": str(root / "cards"),
                                 "spec_source_cache_dir": str(root / "spec-sources"),
                                 "build_artifact_cache_dir": str(root / "artifacts"),
-                                "ccache_dir": None,
                                 "dnf_workspace_dir": str(root / "dnf"),
                                 "dnf_cache_dir": str(root / "dnf/cache"),
                                 "dnf_persist_dir": str(root / "dnf/persist"),

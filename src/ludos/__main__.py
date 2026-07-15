@@ -751,11 +751,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repository/package cache version to load. Defaults to the current UTC week's Monday as YYYYMMDD and creates missing cache images.",
     )
     prepare_parser.add_argument(
-        "--no-ccache",
-        action="store_true",
-        help="Do not mount or enable shared ccache/sccache directories for builder runs.",
-    )
-    prepare_parser.add_argument(
         "--full",
         action="store_true",
         help="Include already-built final images and flatpaks in the CI metadata.",
@@ -840,6 +835,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--autoremove",
         action="store_true",
         help="Remove each local output after it is uploaded.",
+    )
+    ci_build_parser.add_argument(
+        "--ccache",
+        action="store_true",
+        help="Mount and enable shared ccache/sccache directories for builder runs.",
     )
     ci_build_parser.set_defaults(func=ci_command)
 
@@ -1205,7 +1205,6 @@ def ci_command(args: argparse.Namespace) -> int:
             tuple(args.manifests),
             cache_dir=args.cache_dir,
             cache_version=args.version,
-            ccache=not args.no_ccache,
             full=args.full,
             workers=args.workers,
         )
@@ -1229,6 +1228,7 @@ def ci_command(args: argparse.Namespace) -> int:
             images=args.images,
             flatpaks=args.flatpaks,
             autoremove=args.autoremove,
+            ccache=args.ccache,
         )
         return 0
     raise ConfigError(f"unknown ci action: {args.ci_action}")

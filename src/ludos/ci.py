@@ -187,7 +187,6 @@ def prepare_ci(
     *,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
-    ccache: bool = True,
     full: bool = False,
     workers: int = DEFAULT_PREPARE_WORKERS,
 ) -> Path:
@@ -206,7 +205,7 @@ def prepare_ci(
             cache_dir=cache_root,
             cache_version=cache_version,
             cache_only=True,
-            ccache=ccache,
+            ccache=False,
             dnf_workspace_dir=workspace,
         )
         manifest_contexts.append((manifest_path, context))
@@ -388,6 +387,7 @@ def build_ci(
     images: bool = False,
     flatpaks: bool = False,
     autoremove: bool = False,
+    ccache: bool = False,
 ) -> None:
     if not build_ids and not (builds or images or flatpaks):
         raise ConfigError("at least one CI build ID or section flag is required")
@@ -412,6 +412,7 @@ def build_ci(
                     build_id,
                     entry,
                     autoremove=autoremove,
+                    ccache=ccache,
                 )
             elif section == "images":
                 _build_ci_manifest_image(
@@ -420,6 +421,7 @@ def build_ci(
                     entry,
                     restored_contexts=restored_contexts,
                     autoremove=autoremove,
+                    ccache=ccache,
                 )
             else:
                 _build_ci_flatpak(
@@ -428,6 +430,7 @@ def build_ci(
                     entry,
                     restored_contexts=restored_contexts,
                     autoremove=autoremove,
+                    ccache=ccache,
                 )
 
 
@@ -492,6 +495,7 @@ def _build_ci_package(
     entry: object,
     *,
     autoremove: bool,
+    ccache: bool = False,
 ) -> None:
     if not isinstance(entry, dict):
         raise ConfigError(f"{build_manifest}: invalid builds entry '{build_id}'")
@@ -500,6 +504,7 @@ def _build_ci_package(
         build_manifest,
         build_id,
         entry.get("metadata"),
+        ccache=ccache,
     )
     if isinstance(entry.get("flatpak"), dict):
         context = _prepared_flatpak_context(metadata, entry["flatpak"])
@@ -543,9 +548,15 @@ def _build_ci_manifest_image(
     *,
     restored_contexts: set[tuple[str, str, tuple[str, ...]]],
     autoremove: bool,
+    ccache: bool = False,
 ) -> None:
     entry = _rebase_ci_entry(build_manifest, entry, metadata_key="build")
-    metadata = _metadata_from_seed_entry(build_manifest, build_id, entry)
+    metadata = _metadata_from_seed_entry(
+        build_manifest,
+        build_id,
+        entry,
+        ccache=ccache,
+    )
     _restore_ci_build_context(
         metadata,
         restored_contexts,
@@ -580,6 +591,7 @@ def _build_ci_flatpak(
     *,
     restored_contexts: set[tuple[str, str, tuple[str, ...]]],
     autoremove: bool,
+    ccache: bool = False,
 ) -> None:
     if not isinstance(entry, dict):
         raise ConfigError(f"{build_manifest}: invalid flatpaks entry '{build_id}'")
@@ -588,6 +600,7 @@ def _build_ci_flatpak(
         build_manifest,
         build_id,
         entry.get("build"),
+        ccache=ccache,
     )
     _restore_ci_build_context(metadata, restored_contexts)
     context = _prepared_flatpak_context(metadata, entry)
@@ -1082,19 +1095,38 @@ def _metadata_from_seed_entry(
     build_manifest: Path,
     key: object,
     value: object,
+    *,
+    ccache: bool = False,
 ) -> ResolvedBuildMetadata:
     if not isinstance(value, dict) or not isinstance(value.get("build"), dict):
         raise ConfigError(f"{build_manifest}: image '{key}' is missing build metadata")
-    return _metadata_from_mapping(build_manifest, key, value["build"])
+    return _metadata_from_mapping(
+        build_manifest,
+        key,
+        value["build"],
+        ccache=ccache,
+    )
 
 
 def _metadata_from_mapping(
     build_manifest: Path,
     key: object,
     build: object,
+    *,
+    ccache: bool = False,
 ) -> ResolvedBuildMetadata:
     if not isinstance(build, dict):
         raise ConfigError(f"{build_manifest}: image '{key}' is missing build metadata")
+    serialized_cache_dir = str(build.get("cache_dir", ""))
+    ccache_dir = None
+    if ccache:
+        if not serialized_cache_dir:
+            raise ConfigError(
+                f"{build_manifest}: image '{key}' is missing its cache directory"
+            )
+        ccache_path = Path(serialized_cache_dir).parent / "ccache"
+        ccache_path.mkdir(parents=True, exist_ok=True)
+        ccache_dir = str(ccache_path)
     return ResolvedBuildMetadata(
         image=str(build.get("image", "")),
         distro=str(build.get("distro", "")),
@@ -1119,16 +1151,12 @@ def _metadata_from_mapping(
         oci_images=_oci_image_plans(build.get("oci_images")),
         package_dir=str(build.get("package_dir", "")),
         repo_dir=str(build.get("repo_dir", "")),
-        cache_dir=str(build.get("cache_dir", "")),
+        cache_dir=serialized_cache_dir,
         build_dir=str(build.get("build_dir", "")),
         card_build_dir=str(build.get("card_build_dir", "")),
         spec_source_cache_dir=str(build.get("spec_source_cache_dir", "")),
         build_artifact_cache_dir=str(build.get("build_artifact_cache_dir", "")),
-        ccache_dir=(
-            None
-            if build.get("ccache_dir") is None
-            else str(build.get("ccache_dir"))
-        ),
+        ccache_dir=ccache_dir,
         dnf_workspace_dir=str(build.get("dnf_workspace_dir", "")),
         dnf_cache_dir=str(build.get("dnf_cache_dir", "")),
         dnf_persist_dir=str(build.get("dnf_persist_dir", "")),
@@ -1556,6 +1584,7 @@ def _build_entry(metadata: ResolvedBuildMetadata) -> dict[str, Any]:
             {
                 "requested_packages",
                 "resolved_packages",
+                "ccache_dir",
             }
         ),
     )
