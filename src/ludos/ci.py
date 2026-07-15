@@ -252,7 +252,6 @@ def init_ci(
     *,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
-    ccache: bool = True,
     recreate: bool = False,
 ) -> None:
     if not manifest_paths:
@@ -320,7 +319,6 @@ def init_ci(
                 cache_dir=cache_root,
                 cache_version=cache_version,
                 cache_only=False,
-                ccache=ccache,
                 dnf_workspace_dirs=dnf_workspace_dirs,
                 image_exists=image_exists,
                 create_orchestrator_image=create_orchestrator_image,

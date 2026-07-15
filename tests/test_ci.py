@@ -79,7 +79,6 @@ class CiParserTests(unittest.TestCase):
                 "cache",
                 "--version",
                 "20260629",
-                "--no-ccache",
                 "--recreate",
                 "anatase.yml",
             ]
@@ -89,7 +88,6 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.manifests, [Path("anatase.yml")])
         self.assertEqual(args.cache_dir, Path("cache"))
         self.assertEqual(args.version, "20260629")
-        self.assertTrue(args.no_ccache)
         self.assertTrue(args.recreate)
 
     def test_parser_accepts_prepare_ci_options(self) -> None:
@@ -254,7 +252,6 @@ class CiParserTests(unittest.TestCase):
                 "cache",
                 "--version",
                 "20260629",
-                "--no-ccache",
                 "anatase.yml",
             ]
         )
@@ -267,7 +264,6 @@ class CiParserTests(unittest.TestCase):
             (Path("anatase.yml"),),
             cache_dir=Path("cache"),
             cache_version="20260629",
-            ccache=False,
             recreate=False,
         )
 

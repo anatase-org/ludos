@@ -724,11 +724,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repository/package cache version to load. Defaults to the current UTC week's Monday as YYYYMMDD.",
     )
     init_parser.add_argument(
-        "--no-ccache",
-        action="store_true",
-        help="Do not mount or enable shared ccache/sccache directories.",
-    )
-    init_parser.add_argument(
         "--recreate",
         action="store_true",
         help="Recreate local orchestrator images even when they already exist in CI.",
@@ -1202,7 +1197,6 @@ def ci_command(args: argparse.Namespace) -> int:
             tuple(args.manifests),
             cache_dir=args.cache_dir,
             cache_version=args.version,
-            ccache=not args.no_ccache,
             recreate=args.recreate,
         )
         return 0
