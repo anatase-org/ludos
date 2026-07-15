@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
+import ludos.common as common
 from ludos.common import (
     _default_cache_version,
     _create_repo_image,
@@ -13,6 +14,7 @@ from ludos.common import (
     _remote_cache_image,
     _remote_cache_image_exists,
 )
+from ludos.model import ConfigError
 
 
 class RepoImageTests(unittest.TestCase):
@@ -221,3 +223,105 @@ class CachedImageTests(unittest.TestCase):
             head.call_args_list[1].args[1]["Authorization"],
             "Bearer bearer-token",
         )
+
+    def test_remote_image_exists_caches_bearer_token_by_challenge(self) -> None:
+        challenge = (
+            'Bearer realm="https://ghcr.io/token",'
+            'service="ghcr.io",'
+            'scope="repository:anatase-org/builds:pull"'
+        )
+        with (
+            patch.dict(common._registry_bearer_tokens, {}, clear=True),
+            patch.dict(common._registry_bearer_token_locks, {}, clear=True),
+            patch("ludos.common._registry_basic_auth", return_value="basic-token"),
+            patch(
+                "ludos.common._registry_bearer_token",
+                return_value="bearer-token",
+            ) as token,
+            patch(
+                "ludos.common._registry_head",
+                side_effect=[
+                    (401, {"www-authenticate": challenge}),
+                    (200, {}),
+                    (401, {"www-authenticate": challenge}),
+                    (200, {}),
+                ],
+            ),
+        ):
+            self.assertTrue(
+                _remote_cache_image_exists("ghcr.io/anatase-org/builds:first")
+            )
+            self.assertTrue(
+                _remote_cache_image_exists("ghcr.io/anatase-org/builds:second")
+            )
+
+        token.assert_called_once_with(challenge, "basic-token")
+
+    def test_remote_image_exists_retries_transient_responses(self) -> None:
+        with (
+            patch("ludos.common._registry_basic_auth", return_value=None),
+            patch(
+                "ludos.common._registry_head",
+                side_effect=[
+                    (503, {"retry-after": "0.1"}),
+                    (429, {}),
+                    (200, {}),
+                ],
+            ) as head,
+            patch("ludos.common.time.sleep") as sleep,
+        ):
+            exists = _remote_cache_image_exists(
+                "ghcr.io/anatase-org/builds:f44",
+            )
+
+        self.assertTrue(exists)
+        self.assertEqual(head.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [call(0.1), call(0.5)])
+
+    def test_remote_image_exists_fails_after_transient_retries(self) -> None:
+        with (
+            patch("ludos.common._registry_basic_auth", return_value=None),
+            patch("ludos.common._registry_head", return_value=(503, {})) as head,
+            patch("ludos.common.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(ConfigError, "registry unavailable"):
+                _remote_cache_image_exists(
+                    "ghcr.io/anatase-org/builds:f44",
+                )
+
+        self.assertEqual(head.call_count, common._REGISTRY_RETRY_ATTEMPTS)
+        self.assertEqual(sleep.call_count, common._REGISTRY_RETRY_ATTEMPTS - 1)
+
+    def test_remote_image_exists_does_not_retry_missing_manifest(self) -> None:
+        with (
+            patch("ludos.common._registry_basic_auth", return_value=None),
+            patch("ludos.common._registry_head", return_value=(404, {})) as head,
+            patch("ludos.common.time.sleep") as sleep,
+        ):
+            exists = _remote_cache_image_exists(
+                "ghcr.io/anatase-org/builds:missing",
+            )
+
+        self.assertFalse(exists)
+        head.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_registry_bearer_token_retries_unavailable_service(self) -> None:
+        with (
+            patch(
+                "ludos.common._registry_token_request",
+                side_effect=[
+                    (503, {}, None),
+                    (200, {}, {"token": "bearer-token"}),
+                ],
+            ) as request,
+            patch("ludos.common.time.sleep") as sleep,
+        ):
+            token = common._registry_bearer_token(
+                'Bearer realm="https://ghcr.io/token",service="ghcr.io"',
+                None,
+            )
+
+        self.assertEqual(token, "bearer-token")
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(0.25)

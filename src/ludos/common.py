@@ -11,6 +11,8 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,6 +40,13 @@ _OCI_MANIFEST_ACCEPT = ", ".join(
     )
 )
 _REGISTRY_TIMEOUT = 2.0
+_REGISTRY_RETRY_ATTEMPTS = 4
+_REGISTRY_RETRY_BASE_DELAY = 0.25
+_REGISTRY_RETRY_MAX_DELAY = 2.0
+_REGISTRY_TRANSIENT_STATUSES = frozenset({0, 408, 425, 429})
+_registry_bearer_tokens: dict[tuple[str, str], str] = {}
+_registry_bearer_token_locks: dict[tuple[str, str], threading.Lock] = {}
+_registry_bearer_tokens_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -446,14 +455,14 @@ def _remote_cache_image_exists(remote: str) -> bool:
     if basic_auth:
         headers["Authorization"] = f"Basic {basic_auth}"
 
-    status, response_headers = _registry_head(url, headers)
+    status, response_headers = _registry_head_with_backoff(url, headers)
     if status == 401:
-        token = _registry_bearer_token(
+        token = _cached_registry_bearer_token(
             response_headers.get("www-authenticate", ""),
             basic_auth,
         )
         if token:
-            status, _response_headers = _registry_head(
+            status, _response_headers = _registry_head_with_backoff(
                 url,
                 {
                     "Accept": _OCI_MANIFEST_ACCEPT,
@@ -461,7 +470,40 @@ def _remote_cache_image_exists(remote: str) -> bool:
                 },
             )
 
+    if _registry_status_is_transient(status):
+        raise ConfigError(f"registry unavailable while checking image: {remote}")
     return status == 200
+
+
+def _registry_head_with_backoff(
+    url: str,
+    headers: dict[str, str],
+) -> tuple[int, dict[str, str]]:
+    for attempt in range(_REGISTRY_RETRY_ATTEMPTS):
+        status, response_headers = _registry_head(url, headers)
+        if not _registry_status_is_transient(status):
+            return status, response_headers
+        if attempt + 1 < _REGISTRY_RETRY_ATTEMPTS:
+            _registry_backoff(attempt, response_headers)
+    return status, response_headers
+
+
+def _registry_status_is_transient(status: int) -> bool:
+    return status in _REGISTRY_TRANSIENT_STATUSES or 500 <= status <= 599
+
+
+def _registry_backoff(attempt: int, headers: dict[str, str]) -> None:
+    delay = min(
+        _REGISTRY_RETRY_BASE_DELAY * (2**attempt),
+        _REGISTRY_RETRY_MAX_DELAY,
+    )
+    retry_after = headers.get("retry-after", "").strip()
+    if retry_after:
+        try:
+            delay = min(max(float(retry_after), 0.0), _REGISTRY_RETRY_MAX_DELAY)
+        except ValueError:
+            pass
+    time.sleep(delay)
 
 
 def _registry_head(
@@ -503,14 +545,69 @@ def _registry_bearer_token(challenge: str, basic_auth: str | None) -> str | None
     headers = {"Accept": "application/json"}
     if basic_auth:
         headers["Authorization"] = f"Basic {basic_auth}"
-    request = urllib.request.Request(token_url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=_REGISTRY_TIMEOUT) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, ValueError):
+
+    status = 0
+    response_headers: dict[str, str] = {}
+    payload: object = None
+    for attempt in range(_REGISTRY_RETRY_ATTEMPTS):
+        status, response_headers, payload = _registry_token_request(
+            token_url,
+            headers,
+        )
+        if not _registry_status_is_transient(status):
+            break
+        if attempt + 1 < _REGISTRY_RETRY_ATTEMPTS:
+            _registry_backoff(attempt, response_headers)
+    if _registry_status_is_transient(status):
+        raise ConfigError("registry token service unavailable")
+    if status != 200 or not isinstance(payload, dict):
         return None
     token = payload.get("token") or payload.get("access_token")
     return token if isinstance(token, str) and token else None
+
+
+def _registry_token_request(
+    url: str,
+    headers: dict[str, str],
+) -> tuple[int, dict[str, str], object]:
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=_REGISTRY_TIMEOUT) as response:
+            try:
+                payload = json.loads(response.read().decode("utf-8"))
+            except ValueError:
+                payload = None
+            return response.status, _lower_headers(response.headers.items()), payload
+    except urllib.error.HTTPError as exc:
+        response_headers = (
+            _lower_headers(exc.headers.items())
+            if exc.headers is not None
+            else {}
+        )
+        return exc.code, response_headers, None
+    except OSError:
+        return 0, {}, None
+
+
+def _cached_registry_bearer_token(
+    challenge: str,
+    basic_auth: str | None,
+) -> str | None:
+    key = (challenge, basic_auth or "")
+    with _registry_bearer_tokens_lock:
+        if token := _registry_bearer_tokens.get(key):
+            return token
+        token_lock = _registry_bearer_token_locks.setdefault(key, threading.Lock())
+
+    with token_lock:
+        with _registry_bearer_tokens_lock:
+            if token := _registry_bearer_tokens.get(key):
+                return token
+        token = _registry_bearer_token(challenge, basic_auth)
+        if token:
+            with _registry_bearer_tokens_lock:
+                _registry_bearer_tokens[key] = token
+        return token
 
 
 def _split_remote_image(remote: str) -> tuple[str, str, str]:

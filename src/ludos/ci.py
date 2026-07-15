@@ -6,6 +6,7 @@ import lzma
 import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -199,6 +200,7 @@ def prepare_ci(
         metadata=metadata,
         flatpaks=flatpaks,
         full=full,
+        workers=workers,
     )
     log(f"Wrote CI build manifest: {output}")
     log(
@@ -611,6 +613,7 @@ def _write_ci_build_manifest(
     metadata: tuple[ResolvedBuildMetadata, ...],
     flatpaks: tuple[dict[str, Any], ...],
     full: bool = False,
+    workers: int = DEFAULT_PREPARE_WORKERS,
 ) -> tuple[Path, Path]:
     included_metadata = tuple(
         (manifest_path, manifest_metadata)
@@ -653,6 +656,7 @@ def _write_ci_build_manifest(
             )
         ),
         flatpaks=flatpaks,
+        workers=workers,
     )
     payload = {
         "version": 1,
@@ -691,6 +695,7 @@ def _missing_ci_dependency_images(
     manifest_contexts: tuple[tuple[Path, ResolvedManifestContext], ...],
     metadata: tuple[tuple[Path, ResolvedBuildMetadata], ...],
     flatpaks: tuple[dict[str, Any], ...],
+    workers: int,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     candidates: dict[str, dict[str, tuple[str, str, dict[str, Any]]]] = {
         "cards": {},
@@ -774,10 +779,13 @@ def _missing_ci_dependency_images(
         for image, (podman, ci_registry, _entry) in images.items()
     )
 
-    exists_by_check = {
-        check: _ci_remote_image_exists(check[0], check[1], check[2])
-        for check in checks
-    }
+    def exists(check: tuple[str, str, str]) -> tuple[tuple[str, str, str], bool]:
+        return check, _ci_remote_image_exists(check[0], check[1], check[2])
+
+    exists_by_check: dict[tuple[str, str, str], bool] = {}
+    if checks:
+        with ThreadPoolExecutor(max_workers=min(workers, len(checks))) as executor:
+            exists_by_check.update(executor.map(exists, checks))
 
     def missing(section: str) -> dict[str, Any]:
         return {
