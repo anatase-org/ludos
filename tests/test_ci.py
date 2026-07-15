@@ -694,6 +694,26 @@ class PrepareCiTests(unittest.TestCase):
                 output.read_bytes(),
             )
             log.assert_any_call(f"Wrote CI build manifest: {output}")
+            log.assert_any_call("Checking current registry for image existence")
+            decision_messages = [
+                item.args[0]
+                for item in log.call_args_list
+                if item.args
+                and item.args[0].startswith(("Reusing ", "Creating "))
+                and item.args[0].endswith(" Image")
+            ]
+            self.assertCountEqual(
+                decision_messages,
+                [
+                    "Creating images:f44-anatase Image",
+                    "Creating flatpaks:f44-kate-output Image",
+                    "Creating cards:f44-common Image",
+                    "Creating builders:f44-base Image",
+                    "Creating builds:f44-base Image",
+                    "Creating builders:f44-flatpak-builder Image",
+                    "Creating builds:f44-flatpak-kate-build Image",
+                ],
+            )
             log.assert_any_call(
                 "Wrote encoded CI build manifest: "
                 f"{output.with_suffix('.yml.encoded')} "

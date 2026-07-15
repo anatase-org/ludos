@@ -615,6 +615,7 @@ def _write_ci_build_manifest(
     full: bool = False,
     workers: int = DEFAULT_PREPARE_WORKERS,
 ) -> tuple[Path, Path]:
+    log("Checking current registry for image existence")
     included_metadata = tuple(
         (manifest_path, manifest_metadata)
         for (manifest_path, _context), manifest_metadata in zip(
@@ -622,7 +623,7 @@ def _write_ci_build_manifest(
             metadata,
         )
         if full
-        or not _ci_remote_image_exists(
+        or not _logged_ci_remote_image_exists(
             manifest_metadata.podman,
             manifest_metadata.output_image,
             getattr(manifest_metadata, "ci_registry", ""),
@@ -636,7 +637,7 @@ def _write_ci_build_manifest(
         entry
         for entry in flatpaks
         if full
-        or not _ci_remote_image_exists(
+        or not _logged_ci_remote_image_exists(
             contexts_by_manifest[str(entry["manifest"])].podman,
             str(entry["images"]["output"]),
             getattr(
@@ -780,7 +781,7 @@ def _missing_ci_dependency_images(
     )
 
     def exists(check: tuple[str, str, str]) -> tuple[tuple[str, str, str], bool]:
-        return check, _ci_remote_image_exists(check[0], check[1], check[2])
+        return check, _logged_ci_remote_image_exists(check[0], check[1], check[2])
 
     exists_by_check: dict[tuple[str, str, str], bool] = {}
     if checks:
@@ -795,6 +796,17 @@ def _missing_ci_dependency_images(
         }
 
     return missing("cards"), missing("builders"), missing("builds")
+
+
+def _logged_ci_remote_image_exists(
+    podman: str,
+    image: str,
+    ci_registry: str,
+) -> bool:
+    exists = _ci_remote_image_exists(podman, image, ci_registry)
+    action = "Reusing" if exists else "Creating"
+    log(f"{action} {image} Image")
+    return exists
 
 
 def _size_kib(path: Path) -> int:
