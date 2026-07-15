@@ -305,41 +305,14 @@ def seed_ci(
     autoremove: bool = False,
 ) -> None:
     build_manifest = build_manifest or _default_ci_build_manifest(cache_dir)
-    metadata = _read_seed_metadata(build_manifest)
-    for manifest in metadata:
-        _require_ci_registry(manifest.ci_registry)
-
-    seeded: set[str] = set()
-    for manifest in metadata:
-        for plan in manifest.package_images:
-            if not plan.packages or plan.image in seeded:
-                continue
-            _seed_image(
-                manifest.podman,
-                plan.image,
-                manifest.ci_registry,
-                lambda manifest=manifest, plan=plan: _create_seed_package_image(
-                    manifest,
-                    plan,
-                ),
-                autoremove=autoremove,
-            )
-            seeded.add(plan.image)
-
-        for plan in manifest.build_images:
-            if plan.builder_image in seeded:
-                continue
-            _seed_image(
-                manifest.podman,
-                plan.builder_image,
-                manifest.ci_registry,
-                lambda manifest=manifest, plan=plan: _create_seed_builder_image(
-                    manifest,
-                    plan,
-                ),
-                autoremove=autoremove,
-            )
-            seeded.add(plan.builder_image)
+    for section, manifest, image, packages in _read_seed_entries(build_manifest):
+        _seed_image(
+            manifest,
+            image,
+            packages,
+            builder=section == "builders",
+            autoremove=autoremove,
+        )
 
 
 def _resolve_cache_root(
@@ -397,35 +370,39 @@ def _is_orchestrator_image(image: str) -> bool:
 
 
 def _seed_image(
-    podman: str,
+    manifest: ResolvedBuildMetadata,
     image: str,
-    ci_registry: str,
-    create: Any,
+    packages: tuple[str, ...],
     *,
+    builder: bool,
     autoremove: bool = False,
 ) -> None:
-    if _ci_remote_image_exists(podman, image, ci_registry):
-        log(f"CI image already exists: {_ci_remote_image(ci_registry, image)}")
-        return
-    if not _local_image_exists(podman, image):
-        create()
-    _push_ci_image(podman, image, ci_registry)
+    _require_ci_registry(manifest.ci_registry)
+    if not _local_image_exists(manifest.podman, image):
+        create = (
+            _create_seed_builder_image
+            if builder
+            else _create_seed_package_image
+        )
+        create(manifest, image, packages)
+    _push_ci_image(manifest.podman, image, manifest.ci_registry)
     if autoremove:
-        _remove_image(podman, image)
+        _remove_image(manifest.podman, image)
 
 
 def _create_seed_package_image(
     manifest: ResolvedBuildMetadata,
-    plan: PackageImagePlan,
+    image: str,
+    packages: tuple[str, ...],
 ) -> None:
     rpm_files = _download_block_packages(
         list(manifest.orchestrator_dnf_base),
-        plan.packages,
+        packages,
     )
-    log(f"Creating card package image: {plan.image}")
+    log(f"Creating card package image: {image}")
     _create_package_image(
         buildah=_require_buildah(manifest.buildah),
-        image=plan.image,
+        image=image,
         package_dir=Path(manifest.package_dir),
         rpm_files=rpm_files,
     )
@@ -433,15 +410,16 @@ def _create_seed_package_image(
 
 def _create_seed_builder_image(
     manifest: ResolvedBuildMetadata,
-    plan: BuildImagePlan,
+    image: str,
+    packages: tuple[str, ...],
 ) -> None:
     builder_rpm_files = _download_block_packages(
         list(manifest.orchestrator_dnf_base),
-        plan.builder_packages,
+        packages,
         package_dir=Path(manifest.package_dir),
         resolve_dependencies=True,
     )
-    log(f"Creating builder image: {plan.builder_image}")
+    log(f"Creating builder image: {image}")
     _create_builder_image(
         podman=manifest.podman,
         buildah=_require_buildah(manifest.buildah),
@@ -451,24 +429,41 @@ def _create_seed_builder_image(
         dnf_cache_dir=Path(manifest.dnf_cache_dir),
         dnf_persist_dir=Path(manifest.dnf_persist_dir),
         dnf_log_dir=Path(manifest.dnf_log_dir),
-        image=plan.builder_image,
+        image=image,
         package_dir=Path(manifest.package_dir),
         rpm_files=builder_rpm_files,
         releasever=manifest.releasever,
     )
 
 
-def _read_seed_metadata(build_manifest: Path) -> tuple[ResolvedBuildMetadata, ...]:
+def _read_seed_entries(
+    build_manifest: Path,
+) -> tuple[tuple[str, ResolvedBuildMetadata, str, tuple[str, ...]], ...]:
     data = yaml.safe_load(build_manifest.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("version") != 1:
         raise ConfigError(f"{build_manifest}: unsupported CI build manifest")
-    images = data.get("images")
-    if not isinstance(images, dict):
-        raise ConfigError(f"{build_manifest}: 'images' must be a mapping")
-    return tuple(
-        _metadata_from_seed_entry(build_manifest, key, value)
-        for key, value in images.items()
-    )
+    entries = []
+    for section in ("cards", "builders"):
+        values = data.get(section)
+        if not isinstance(values, dict):
+            raise ConfigError(f"{build_manifest}: '{section}' must be a mapping")
+        for key, value in values.items():
+            if not isinstance(value, dict):
+                raise ConfigError(f"{build_manifest}: invalid {section} entry '{key}'")
+            metadata = value.get("metadata")
+            image = str(value.get("image", ""))
+            if not isinstance(metadata, dict) or not image:
+                raise ConfigError(f"{build_manifest}: invalid {section} entry '{key}'")
+            manifest = _metadata_from_seed_entry(
+                build_manifest,
+                key,
+                {"build": metadata},
+            )
+            packages = tuple(
+                str(package) for package in value.get("packages", ())
+            )
+            entries.append((section, manifest, image, packages))
+    return tuple(entries)
 
 
 def _metadata_from_seed_entry(
@@ -703,6 +698,7 @@ def _missing_ci_dependency_images(
         "builders": {},
         "builds": {},
     }
+    metadata_by_manifest: dict[str, dict[str, Any]] = {}
 
     def add(
         section: str,
@@ -715,6 +711,7 @@ def _missing_ci_dependency_images(
 
     for manifest_path, manifest in metadata:
         manifest_metadata = _build_entry(manifest)
+        metadata_by_manifest[str(manifest_path)] = manifest_metadata
         for plan in manifest.package_images:
             if plan.packages:
                 card_entry = _to_plain(plan)
@@ -734,6 +731,7 @@ def _missing_ci_dependency_images(
             builder_entry = dict(build_entry)
             builder_entry["image"] = plan.builder_image
             builder_entry["build_image"] = plan.image
+            builder_entry["packages"] = list(plan.builder_packages)
             add(
                 "builders",
                 manifest.podman,
@@ -759,19 +757,29 @@ def _missing_ci_dependency_images(
         builder_image = str(entry["images"]["builder"])
         build_image = str(entry["images"]["build"])
         flatpak_metadata = _to_plain(entry)
+        manifest_metadata = metadata_by_manifest[str(entry["manifest"])]
         add(
             "builders",
             context.podman,
             ci_registry,
             builder_image,
-            {"image": builder_image, "metadata": flatpak_metadata},
+            {
+                "image": builder_image,
+                "packages": list(entry["builder_packages"]),
+                "metadata": manifest_metadata,
+                "flatpak": flatpak_metadata,
+            },
         )
         add(
             "builds",
             context.podman,
             ci_registry,
             build_image,
-            {"image": build_image, "metadata": flatpak_metadata},
+            {
+                "image": build_image,
+                "metadata": manifest_metadata,
+                "flatpak": flatpak_metadata,
+            },
         )
 
     checks = tuple(

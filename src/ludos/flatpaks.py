@@ -479,12 +479,12 @@ def _prepare_flatpak_build_plan(
     builder_image = _local_image(
         context.local_prefix,
         "builders",
-        f"{context.distro}-flatpak-{builder_hash}",
+        f"{context.distro}-{builder_hash}",
     )
     build_image = _local_image(
         context.local_prefix,
         "builds",
-        f"{context.distro}-flatpak-{app_name}-{spec_hash}",
+        f"{context.distro}-{app_name}-{spec_hash}",
     )
     metadata = _flatpak_metadata(
         card.flatpak,

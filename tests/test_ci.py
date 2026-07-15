@@ -742,11 +742,11 @@ class PrepareCiTests(unittest.TestCase):
                 "builders:f44-base",
             )
             self.assertEqual(
-                data["builders"]["f44-flatpak-builder"]["metadata"]["app"],
+                data["builders"]["f44-flatpak-builder"]["flatpak"]["app"],
                 "kate",
             )
             self.assertEqual(
-                data["builds"]["f44-flatpak-kate-build"]["metadata"]["specs"][0][
+                data["builds"]["f44-flatpak-kate-build"]["flatpak"]["specs"][0][
                     "spec"
                 ],
                 "kate.spec",
@@ -898,7 +898,7 @@ class PrepareCiTests(unittest.TestCase):
                 "base",
             )
             self.assertEqual(
-                data["builds"]["f44-flatpak-kate-build"]["metadata"]["app"],
+                data["builds"]["f44-flatpak-kate-build"]["flatpak"]["app"],
                 "kate",
             )
             self.assertEqual(
@@ -1168,35 +1168,12 @@ class PrepareCiTests(unittest.TestCase):
 
 
 class SeedCiTests(unittest.TestCase):
-    def test_seed_ci_skips_remote_images_without_pulling_or_creating(self) -> None:
+    def test_seed_ci_uses_prefiltered_manifest_without_remote_checks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             build_manifest = self._write_seed_manifest(Path(temp))
 
             with (
                 patch("ludos.ci._ci_remote_image_exists", return_value=True) as remote,
-                patch("ludos.ci._local_image_exists") as local,
-                patch("ludos.ci._push_ci_image") as push,
-                patch("ludos.ci._create_seed_package_image") as create_package,
-                patch("ludos.ci._create_seed_builder_image") as create_builder,
-                patch("ludos.ci.log"),
-            ):
-                seed_ci(build_manifest)
-
-            self.assertEqual(
-                [call.args[1] for call in remote.call_args_list],
-                ["cards:f44-common", "builders:f44-base"],
-            )
-            local.assert_not_called()
-            push.assert_not_called()
-            create_package.assert_not_called()
-            create_builder.assert_not_called()
-
-    def test_seed_ci_pushes_local_images_missing_remotely(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            build_manifest = self._write_seed_manifest(Path(temp))
-
-            with (
-                patch("ludos.ci._ci_remote_image_exists", return_value=False),
                 patch("ludos.ci._local_image_exists", return_value=True),
                 patch("ludos.ci._push_ci_image") as push,
                 patch("ludos.ci._create_seed_package_image") as create_package,
@@ -1204,19 +1181,23 @@ class SeedCiTests(unittest.TestCase):
             ):
                 seed_ci(build_manifest)
 
+            remote.assert_not_called()
             self.assertEqual(
                 [call.args[1] for call in push.call_args_list],
-                ["cards:f44-common", "builders:f44-base"],
+                [
+                    "cards:f44-common",
+                    "builders:f44-base",
+                    "builders:f44-flatpak-kate",
+                ],
             )
             create_package.assert_not_called()
             create_builder.assert_not_called()
 
-    def test_seed_ci_creates_local_images_missing_remotely_and_locally(self) -> None:
+    def test_seed_ci_creates_listed_images_missing_locally(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             build_manifest = self._write_seed_manifest(Path(temp))
 
             with (
-                patch("ludos.ci._ci_remote_image_exists", return_value=False),
                 patch("ludos.ci._local_image_exists", return_value=False),
                 patch("ludos.ci._push_ci_image") as push,
                 patch("ludos.ci._create_seed_package_image") as create_package,
@@ -1225,10 +1206,31 @@ class SeedCiTests(unittest.TestCase):
                 seed_ci(build_manifest)
 
             self.assertEqual(create_package.call_count, 1)
-            self.assertEqual(create_builder.call_count, 1)
+            self.assertEqual(
+                create_package.call_args.args[1:],
+                ("cards:f44-common", ("bash-0:1-1.fc44.x86_64",)),
+            )
+            self.assertEqual(create_builder.call_count, 2)
+            self.assertEqual(
+                [item.args[1:] for item in create_builder.call_args_list],
+                [
+                    (
+                        "builders:f44-base",
+                        ("rpm-build-0:1-1.fc44.x86_64",),
+                    ),
+                    (
+                        "builders:f44-flatpak-kate",
+                        ("flatpak-rpm-macros-0:1-1.fc44.x86_64",),
+                    ),
+                ],
+            )
             self.assertEqual(
                 [call.args[1] for call in push.call_args_list],
-                ["cards:f44-common", "builders:f44-base"],
+                [
+                    "cards:f44-common",
+                    "builders:f44-base",
+                    "builders:f44-flatpak-kate",
+                ],
             )
 
     def test_seed_ci_autoremoves_uploaded_images(self) -> None:
@@ -1236,7 +1238,6 @@ class SeedCiTests(unittest.TestCase):
             build_manifest = self._write_seed_manifest(Path(temp))
 
             with (
-                patch("ludos.ci._ci_remote_image_exists", return_value=False),
                 patch("ludos.ci._local_image_exists", return_value=True),
                 patch("ludos.ci._push_ci_image") as push,
                 patch("ludos.ci._remove_image") as remove,
@@ -1247,36 +1248,91 @@ class SeedCiTests(unittest.TestCase):
 
             self.assertEqual(
                 [call.args[1] for call in push.call_args_list],
-                ["cards:f44-common", "builders:f44-base"],
+                [
+                    "cards:f44-common",
+                    "builders:f44-base",
+                    "builders:f44-flatpak-kate",
+                ],
             )
             self.assertEqual(
                 [call.args[1] for call in remove.call_args_list],
-                ["cards:f44-common", "builders:f44-base"],
+                [
+                    "cards:f44-common",
+                    "builders:f44-base",
+                    "builders:f44-flatpak-kate",
+                ],
             )
             create_package.assert_not_called()
             create_builder.assert_not_called()
 
-    def test_seed_ci_autoremove_skips_remote_hits(self) -> None:
+    def test_seed_ci_ignores_unlisted_nested_plans(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            build_manifest = self._write_seed_manifest(Path(temp))
+            root = Path(temp)
+            build_manifest = self._write_seed_manifest(root)
+            data = yaml.safe_load(build_manifest.read_text(encoding="utf-8"))
+            data["cards"] = {}
+            data["builders"] = {}
+            build_manifest.write_text(
+                yaml.safe_dump(data, sort_keys=False),
+                encoding="utf-8",
+            )
 
             with (
-                patch("ludos.ci._ci_remote_image_exists", return_value=True),
-                patch("ludos.ci._local_image_exists"),
-                patch("ludos.ci._push_ci_image"),
-                patch("ludos.ci._remove_image") as remove,
-                patch("ludos.ci.log"),
+                patch("ludos.ci._ci_remote_image_exists") as remote,
+                patch("ludos.ci._local_image_exists") as local,
+                patch("ludos.ci._push_ci_image") as push,
             ):
-                seed_ci(build_manifest, autoremove=True)
+                seed_ci(build_manifest)
 
-            remove.assert_not_called()
+            remote.assert_not_called()
+            local.assert_not_called()
+            push.assert_not_called()
 
     def _write_seed_manifest(self, root: Path) -> Path:
         build_manifest = root / "build.yml"
+        metadata = {
+            "image": "anatase",
+            "distro": "f44",
+            "releasever": "44",
+            "arch": "x86_64",
+            "root_dir": str(root),
+            "orchestrator": "orchestrator:f44",
+            "output_image": "images:f44-anatase",
+            "package_dir": str(root / "packages"),
+            "repo_dir": str(root / "repos"),
+            "dnf_cache_dir": str(root / "dnf/cache"),
+            "dnf_persist_dir": str(root / "dnf/persist"),
+            "dnf_log_dir": str(root / "dnf/log"),
+            "podman": "podman",
+            "buildah": "buildah",
+            "orchestrator_dnf_base": ["podman", "run"],
+            "ci_registry": "ghcr.io/anatase-org",
+        }
         build_manifest.write_text(
             yaml.safe_dump(
                 {
                     "version": 1,
+                    "cards": {
+                        "f44-common": {
+                            "image": "cards:f44-common",
+                            "packages": ["bash-0:1-1.fc44.x86_64"],
+                            "metadata": metadata,
+                        }
+                    },
+                    "builders": {
+                        "f44-base": {
+                            "image": "builders:f44-base",
+                            "packages": ["rpm-build-0:1-1.fc44.x86_64"],
+                            "metadata": metadata,
+                        },
+                        "f44-flatpak-kate": {
+                            "image": "builders:f44-flatpak-kate",
+                            "packages": [
+                                "flatpak-rpm-macros-0:1-1.fc44.x86_64"
+                            ],
+                            "metadata": metadata,
+                        },
+                    },
                     "images": {
                         "f44-anatase": {
                             "path": "anatase.yml",
