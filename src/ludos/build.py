@@ -2756,6 +2756,7 @@ def _create_builder_image(
     package_dir: Path,
     rpm_files: tuple[str, ...],
     releasever: str,
+    quiet: bool = False,
 ) -> None:
     rpm_copy_lines = _copy_files_to_shell_dir_lines(
         (_cached_rpm_path(package_dir, rpm_file) for rpm_file in rpm_files),
@@ -2809,7 +2810,7 @@ def _create_builder_image(
         'rm -rf "$mount_path/var/cache/dnf" "$mount_path/var/cache/libdnf5"',
         'find "$mount_path/var/log" -maxdepth 1 -name "dnf*" -exec rm -rf {} + 2>/dev/null || true',
     ]
-    _create_scratch_image(buildah=buildah, image=image, body=body)
+    _create_scratch_image(buildah=buildah, image=image, body=body, quiet=quiet)
 
 
 def _create_repo_image(
@@ -3237,7 +3238,13 @@ def _shell_arg(value: str) -> str:
     return shlex.quote(value)
 
 
-def _create_scratch_image(*, buildah: str, image: str, body: list[str]) -> None:
+def _create_scratch_image(
+    *,
+    buildah: str,
+    image: str,
+    body: list[str],
+    quiet: bool = False,
+) -> None:
     buildah_command = shlex.quote(buildah)
     script = "\n".join(
         [
@@ -3266,6 +3273,7 @@ def _create_scratch_image(*, buildah: str, image: str, body: list[str]) -> None:
     returncode, _output = _run_streamed_command(
         [buildah, "unshare", "/bin/sh", "-s"],
         input_text=script + "\n",
+        quiet=quiet,
     )
     if returncode != 0:
         raise ConfigError(f"scratch image build failed with exit status {returncode}")
@@ -5594,6 +5602,7 @@ def _run_streamed_command(
     line_rewriter: Callable[[str], str] | None = None,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
+    quiet: bool = False,
 ) -> tuple[int, str]:
     process = subprocess.Popen(
         command,
@@ -5614,10 +5623,12 @@ def _run_streamed_command(
 
         assert process.stdout is not None
         for line in process.stdout:
-            output_lines.append(line)
+            if not quiet:
+                output_lines.append(line)
             if line_rewriter is not None:
                 line = line_rewriter(line)
-            stream(line)
+            if not quiet:
+                stream(line)
 
         return process.wait(), "".join(output_lines)
     finally:

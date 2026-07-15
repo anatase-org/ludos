@@ -12,7 +12,9 @@ from .build import build_manifest
 from .cleanup import cleanup_local_images
 from .ci import (
     DEFAULT_PREPARE_WORKERS,
+    DEFAULT_SEED_BUFFER_RATIO,
     DEFAULT_VERSION_LABEL,
+    SeedDiskSpaceError,
     init_ci,
     prepare_ci,
     seed_ci,
@@ -794,6 +796,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Remove each local seed image after it is uploaded.",
     )
+    seed_parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_PREPARE_WORKERS,
+        help=(
+            "Number of parallel image builders. Defaults to the smaller of 4 "
+            "and the available CPU count."
+        ),
+    )
+    seed_parser.add_argument(
+        "--buffer-ratio",
+        type=float,
+        default=DEFAULT_SEED_BUFFER_RATIO,
+        help=(
+            "Required free disk space as a multiple of missing RPM download "
+            "bytes. Defaults to 1.5."
+        ),
+    )
     seed_parser.set_defaults(func=ci_command)
 
     cleanup = subcommands.add_parser(
@@ -1169,6 +1189,8 @@ def ci_command(args: argparse.Namespace) -> int:
             args.build_manifest,
             cache_dir=args.cache_dir,
             autoremove=args.autoremove,
+            workers=args.workers,
+            buffer_ratio=args.buffer_ratio,
         )
         return 0
     raise ConfigError(f"unknown ci action: {args.ci_action}")
@@ -1191,6 +1213,9 @@ def main() -> int:
     except KeyboardInterrupt:
         error("User requested to exit...")
         return 130
+    except SeedDiskSpaceError as exc:
+        error(exc)
+        return 7
     except ConfigError as exc:
         error(exc)
         return 1

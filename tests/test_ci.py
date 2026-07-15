@@ -12,7 +12,7 @@ from unittest.mock import call, patch
 
 import yaml
 
-from ludos.__main__ import build_parser, ci_command
+from ludos.__main__ import build_parser, ci_command, main
 from ludos.build import (
     BuildImagePlan,
     OciImagePlan,
@@ -21,9 +21,15 @@ from ludos.build import (
 )
 from ludos.ci import (
     DEFAULT_PREPARE_WORKERS,
+    DEFAULT_SEED_BUFFER_RATIO,
+    SeedDiskSpaceError,
     _ci_remote_image_exists,
+    _create_seed_builder_image,
     _inspect_remote_labels,
     _manifest_tag,
+    _prepare_seed_rpms,
+    _read_seed_entries,
+    _seed_rpm_download_sizes,
     init_ci,
     prepare_ci,
     seed_ci,
@@ -116,10 +122,22 @@ class CiParserTests(unittest.TestCase):
     def test_parser_accepts_seed_ci_options(self) -> None:
         parser = build_parser()
 
-        args = parser.parse_args(["ci", "seed", "cache/ci/build.yml"])
+        args = parser.parse_args(
+            [
+                "ci",
+                "seed",
+                "cache/ci/build.yml",
+                "--workers",
+                "8",
+                "--buffer-ratio",
+                "2.5",
+            ]
+        )
 
         self.assertEqual(args.ci_action, "seed")
         self.assertEqual(args.build_manifest, Path("cache/ci/build.yml"))
+        self.assertEqual(args.workers, 8)
+        self.assertEqual(args.buffer_ratio, 2.5)
 
     def test_parser_defaults_seed_ci_build_manifest(self) -> None:
         parser = build_parser()
@@ -129,6 +147,8 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.ci_action, "seed")
         self.assertIsNone(args.build_manifest)
         self.assertIsNone(args.cache_dir)
+        self.assertEqual(args.workers, DEFAULT_PREPARE_WORKERS)
+        self.assertEqual(args.buffer_ratio, DEFAULT_SEED_BUFFER_RATIO)
 
     def test_parser_accepts_seed_ci_cache_dir(self) -> None:
         parser = build_parser()
@@ -236,6 +256,8 @@ class CiParserTests(unittest.TestCase):
             Path("cache/ci/build.yml"),
             cache_dir=None,
             autoremove=False,
+            workers=DEFAULT_PREPARE_WORKERS,
+            buffer_ratio=DEFAULT_SEED_BUFFER_RATIO,
         )
 
     def test_ci_command_calls_seed_ci_with_default_build_manifest(self) -> None:
@@ -245,7 +267,13 @@ class CiParserTests(unittest.TestCase):
             exit_code = ci_command(args)
 
         self.assertEqual(exit_code, 0)
-        seed.assert_called_once_with(None, cache_dir=None, autoremove=False)
+        seed.assert_called_once_with(
+            None,
+            cache_dir=None,
+            autoremove=False,
+            workers=DEFAULT_PREPARE_WORKERS,
+            buffer_ratio=DEFAULT_SEED_BUFFER_RATIO,
+        )
 
     def test_ci_command_calls_seed_ci_with_cache_dir_and_autoremove(self) -> None:
         args = build_parser().parse_args(
@@ -260,7 +288,25 @@ class CiParserTests(unittest.TestCase):
             None,
             cache_dir=Path("out-cache"),
             autoremove=True,
+            workers=DEFAULT_PREPARE_WORKERS,
+            buffer_ratio=DEFAULT_SEED_BUFFER_RATIO,
         )
+
+    def test_main_returns_7_for_seed_disk_space_error(self) -> None:
+        with (
+            patch("sys.argv", ["ludos", "ci", "seed"]),
+            patch("ludos.__main__._discover_project_config", return_value=None),
+            patch("ludos.__main__.configure_logging"),
+            patch(
+                "ludos.__main__.seed_ci",
+                side_effect=SeedDiskSpaceError("not enough space"),
+            ),
+            patch("ludos.__main__.error") as error,
+        ):
+            exit_code = main()
+
+        self.assertEqual(exit_code, 7)
+        error.assert_called_once()
 
 
 class CiEnvTests(unittest.TestCase):
@@ -1168,11 +1214,131 @@ class PrepareCiTests(unittest.TestCase):
 
 
 class SeedCiTests(unittest.TestCase):
+    def test_create_seed_builder_image_suppresses_builder_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            entries = _read_seed_entries(
+                self._write_seed_manifest(Path(temp))
+            )
+            manifest = entries[1][1]
+
+            with patch("ludos.ci._create_builder_image") as create:
+                _create_seed_builder_image(
+                    manifest,
+                    "builders:f44-base",
+                    ("rpm-build-1-1.fc44.x86_64.rpm",),
+                )
+
+            self.assertTrue(create.call_args.kwargs["quiet"])
+
+    def test_prepare_seed_rpms_downloads_only_uncached_rpms_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entries = _read_seed_entries(self._write_seed_manifest(root))
+            package_dir = root / "packages"
+            package_dir.mkdir()
+            (package_dir / "bash-1-1.fc44.x86_64.rpm").touch()
+            sizes = {
+                "rpm-build-1-1.fc44.x86_64.rpm": 1024,
+                "flatpak-rpm-macros-1-1.fc44.x86_64.rpm": 2048,
+            }
+
+            with (
+                patch("ludos.ci._seed_rpm_download_sizes", return_value=sizes) as query,
+                patch(
+                    "ludos.ci.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=10_000),
+                ) as disk_usage,
+                patch("ludos.ci._download_exact_packages") as download,
+            ):
+                rpm_files = _prepare_seed_rpms(entries, buffer_ratio=1.5)
+
+            query.assert_called_once_with(
+                ["podman", "run"],
+                (
+                    "rpm-build-0:1-1.fc44.x86_64",
+                    "flatpak-rpm-macros-0:1-1.fc44.x86_64",
+                ),
+            )
+            disk_usage.assert_called_once_with(package_dir.resolve())
+            download.assert_called_once_with(
+                ["podman", "run"],
+                (
+                    "rpm-build-0:1-1.fc44.x86_64",
+                    "flatpak-rpm-macros-0:1-1.fc44.x86_64",
+                ),
+                "/ludos/packages",
+            )
+            self.assertEqual(rpm_files, self._seed_rpm_files())
+
+    def test_prepare_seed_rpms_rejects_insufficient_disk_space(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entries = _read_seed_entries(self._write_seed_manifest(root))
+            sizes = {
+                "bash-1-1.fc44.x86_64.rpm": 100,
+                "rpm-build-1-1.fc44.x86_64.rpm": 100,
+                "flatpak-rpm-macros-1-1.fc44.x86_64.rpm": 100,
+            }
+
+            with (
+                patch("ludos.ci._seed_rpm_download_sizes", return_value=sizes),
+                patch(
+                    "ludos.ci.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=449),
+                ),
+                patch("ludos.ci._download_exact_packages") as download,
+            ):
+                with self.assertRaisesRegex(
+                    SeedDiskSpaceError,
+                    r"449.0 B available, 450.0 B required \(1.5x buffer\)",
+                ):
+                    _prepare_seed_rpms(entries, buffer_ratio=1.5)
+
+            download.assert_not_called()
+
+    def test_seed_rpm_download_sizes_uses_repoquery_downloadsize(self) -> None:
+        result = SimpleNamespace(
+            stdout=(
+                "Packages/b/bash-1-1.fc44.x86_64.rpm\t1234\n"
+                "Packages/r/rpm-build-1-1.fc44.x86_64.rpm\t5678\n"
+            )
+        )
+
+        with patch("ludos.ci.subprocess.run", return_value=result) as run:
+            sizes = _seed_rpm_download_sizes(
+                ["podman", "run"],
+                (
+                    "bash-0:1-1.fc44.x86_64",
+                    "rpm-build-0:1-1.fc44.x86_64",
+                ),
+            )
+
+        self.assertEqual(
+            sizes,
+            {
+                "bash-1-1.fc44.x86_64.rpm": 1234,
+                "rpm-build-1-1.fc44.x86_64.rpm": 5678,
+            },
+        )
+        command = run.call_args.args[0]
+        self.assertIn("repoquery", command)
+        self.assertIn("%{location}\t%{downloadsize}\n", command)
+
+    def test_seed_ci_rejects_invalid_workers_and_buffer_ratio(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "workers must be"):
+            seed_ci(Path("build.yml"), workers=0)
+        with self.assertRaisesRegex(ConfigError, "buffer ratio must be"):
+            seed_ci(Path("build.yml"), buffer_ratio=0)
+
     def test_seed_ci_uses_prefiltered_manifest_without_remote_checks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             build_manifest = self._write_seed_manifest(Path(temp))
 
             with (
+                patch(
+                    "ludos.ci._prepare_seed_rpms",
+                    return_value=self._seed_rpm_files(),
+                ),
                 patch("ludos.ci._ci_remote_image_exists", return_value=True) as remote,
                 patch("ludos.ci._local_image_exists", return_value=True),
                 patch("ludos.ci._push_ci_image") as push,
@@ -1183,7 +1349,7 @@ class SeedCiTests(unittest.TestCase):
                 seed_ci(build_manifest)
 
             remote.assert_not_called()
-            self.assertEqual(
+            self.assertCountEqual(
                 [call.args[1] for call in push.call_args_list],
                 [
                     "cards:f44-common",
@@ -1193,12 +1359,21 @@ class SeedCiTests(unittest.TestCase):
             )
             create_package.assert_not_called()
             create_builder.assert_not_called()
+            creating = [
+                call.args[0]
+                for call in log.call_args_list
+                if "Creating" in call.args[0]
+            ]
             self.assertEqual(
-                [call.args[0] for call in log.call_args_list if "Creating" in call.args[0]],
+                [line.split(" ", 1)[0] for line in creating],
+                ["(01/03)", "(02/03)", "(03/03)"],
+            )
+            self.assertCountEqual(
+                [line.split(" ", 1)[1] for line in creating],
                 [
-                    "(01/03) Creating cards:f44-common Image",
-                    "(02/03) Creating builders:f44-base Image",
-                    "(03/03) Creating builders:f44-flatpak-kate Image",
+                    "Creating cards:f44-common Image",
+                    "Creating builders:f44-base Image",
+                    "Creating builders:f44-flatpak-kate Image",
                 ],
             )
 
@@ -1207,6 +1382,10 @@ class SeedCiTests(unittest.TestCase):
             build_manifest = self._write_seed_manifest(Path(temp))
 
             with (
+                patch(
+                    "ludos.ci._prepare_seed_rpms",
+                    return_value=self._seed_rpm_files(),
+                ),
                 patch("ludos.ci._local_image_exists", return_value=False),
                 patch("ludos.ci._push_ci_image") as push,
                 patch("ludos.ci._create_seed_package_image") as create_package,
@@ -1218,23 +1397,23 @@ class SeedCiTests(unittest.TestCase):
             self.assertEqual(create_package.call_count, 1)
             self.assertEqual(
                 create_package.call_args.args[1:],
-                ("cards:f44-common", ("bash-0:1-1.fc44.x86_64",)),
+                ("cards:f44-common", ("bash-1-1.fc44.x86_64.rpm",)),
             )
             self.assertEqual(create_builder.call_count, 2)
-            self.assertEqual(
+            self.assertCountEqual(
                 [item.args[1:] for item in create_builder.call_args_list],
                 [
                     (
                         "builders:f44-base",
-                        ("rpm-build-0:1-1.fc44.x86_64",),
+                        ("rpm-build-1-1.fc44.x86_64.rpm",),
                     ),
                     (
                         "builders:f44-flatpak-kate",
-                        ("flatpak-rpm-macros-0:1-1.fc44.x86_64",),
+                        ("flatpak-rpm-macros-1-1.fc44.x86_64.rpm",),
                     ),
                 ],
             )
-            self.assertEqual(
+            self.assertCountEqual(
                 [call.args[1] for call in push.call_args_list],
                 [
                     "cards:f44-common",
@@ -1242,12 +1421,21 @@ class SeedCiTests(unittest.TestCase):
                     "builders:f44-flatpak-kate",
                 ],
             )
+            creating = [
+                call.args[0]
+                for call in log.call_args_list
+                if "Creating" in call.args[0]
+            ]
             self.assertEqual(
-                [call.args[0] for call in log.call_args_list if "Creating" in call.args[0]],
+                [line.split(" ", 1)[0] for line in creating],
+                ["(01/03)", "(02/03)", "(03/03)"],
+            )
+            self.assertCountEqual(
+                [line.split(" ", 1)[1] for line in creating],
                 [
-                    "(01/03) Creating cards:f44-common Image",
-                    "(02/03) Creating builders:f44-base Image",
-                    "(03/03) Creating builders:f44-flatpak-kate Image",
+                    "Creating cards:f44-common Image",
+                    "Creating builders:f44-base Image",
+                    "Creating builders:f44-flatpak-kate Image",
                 ],
             )
 
@@ -1256,6 +1444,10 @@ class SeedCiTests(unittest.TestCase):
             build_manifest = self._write_seed_manifest(Path(temp))
 
             with (
+                patch(
+                    "ludos.ci._prepare_seed_rpms",
+                    return_value=self._seed_rpm_files(),
+                ),
                 patch("ludos.ci._local_image_exists", return_value=True),
                 patch("ludos.ci._push_ci_image") as push,
                 patch("ludos.ci._remove_image") as remove,
@@ -1264,7 +1456,7 @@ class SeedCiTests(unittest.TestCase):
             ):
                 seed_ci(build_manifest, autoremove=True)
 
-            self.assertEqual(
+            self.assertCountEqual(
                 [call.args[1] for call in push.call_args_list],
                 [
                     "cards:f44-common",
@@ -1272,7 +1464,7 @@ class SeedCiTests(unittest.TestCase):
                     "builders:f44-flatpak-kate",
                 ],
             )
-            self.assertEqual(
+            self.assertCountEqual(
                 [call.args[1] for call in remove.call_args_list],
                 [
                     "cards:f44-common",
@@ -1296,6 +1488,7 @@ class SeedCiTests(unittest.TestCase):
             )
 
             with (
+                patch("ludos.ci._prepare_seed_rpms", return_value={}),
                 patch("ludos.ci._ci_remote_image_exists") as remote,
                 patch("ludos.ci._local_image_exists") as local,
                 patch("ludos.ci._push_ci_image") as push,
@@ -1305,6 +1498,16 @@ class SeedCiTests(unittest.TestCase):
             remote.assert_not_called()
             local.assert_not_called()
             push.assert_not_called()
+
+    @staticmethod
+    def _seed_rpm_files() -> dict[str, tuple[str, ...]]:
+        return {
+            "cards:f44-common": ("bash-1-1.fc44.x86_64.rpm",),
+            "builders:f44-base": ("rpm-build-1-1.fc44.x86_64.rpm",),
+            "builders:f44-flatpak-kate": (
+                "flatpak-rpm-macros-1-1.fc44.x86_64.rpm",
+            ),
+        }
 
     def _write_seed_manifest(self, root: Path) -> Path:
         build_manifest = root / "build.yml"
