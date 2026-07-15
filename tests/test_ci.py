@@ -18,6 +18,7 @@ from ludos.build import (
     OciImagePlan,
     PackageImagePlan,
     ResolvedBuildMetadata,
+    _metadata_with_final_image,
 )
 from ludos.ci import (
     DEFAULT_PREPARE_WORKERS,
@@ -27,9 +28,12 @@ from ludos.ci import (
     _create_seed_builder_image,
     _inspect_remote_labels,
     _manifest_tag,
+    _metadata_from_seed_entry,
     _prepare_seed_rpms,
     _read_seed_entries,
     _seed_rpm_download_sizes,
+    _upload_ci_output,
+    build_ci,
     init_ci,
     prepare_ci,
     seed_ci,
@@ -160,6 +164,27 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.ci_action, "seed")
         self.assertIsNone(args.build_manifest)
         self.assertEqual(args.cache_dir, Path("out-cache"))
+        self.assertTrue(args.autoremove)
+
+    def test_parser_accepts_composable_ci_build_selectors(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "build",
+                "first",
+                "0",
+                "--builds",
+                "--images",
+                "--flatpaks",
+                "--autoremove",
+            ]
+        )
+
+        self.assertEqual(args.ci_action, "build")
+        self.assertEqual(args.build_ids, ["first", "0"])
+        self.assertTrue(args.builds)
+        self.assertTrue(args.images)
+        self.assertTrue(args.flatpaks)
         self.assertTrue(args.autoremove)
 
     def test_prepare_ci_rejects_cache_and_cards_dir(self) -> None:
@@ -300,6 +325,23 @@ class CiParserTests(unittest.TestCase):
             autoremove=True,
             workers=DEFAULT_PREPARE_WORKERS,
             buffer_ratio=DEFAULT_PREPARE_WORKERS * DEFAULT_SEED_BUFFER_RATIO,
+        )
+
+    def test_ci_command_calls_build_ci(self) -> None:
+        args = build_parser().parse_args(
+            ["ci", "build", "first", "0", "--images", "--autoremove"]
+        )
+
+        with patch("ludos.__main__.build_ci") as build:
+            exit_code = ci_command(args)
+
+        self.assertEqual(exit_code, 0)
+        build.assert_called_once_with(
+            ("first", "0"),
+            builds=False,
+            images=True,
+            flatpaks=False,
+            autoremove=True,
         )
 
     def test_main_returns_7_for_seed_disk_space_error(self) -> None:
@@ -668,6 +710,8 @@ class PrepareCiTests(unittest.TestCase):
             cache = root / "cache"
             context = self._context(root)
             metadata = self._metadata(root, context)
+            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
+            image_id = ci_metadata.output_image.rsplit(":", 1)[-1]
             plan = self._flatpak_plan(root, cache)
 
             with (
@@ -720,7 +764,11 @@ class PrepareCiTests(unittest.TestCase):
             self.assertCountEqual(
                 remote_exists.call_args_list,
                 [
-                    call(metadata.podman, metadata.output_image, "ghcr.io/anatase-org"),
+                    call(
+                        ci_metadata.podman,
+                        ci_metadata.output_image,
+                        "ghcr.io/anatase-org",
+                    ),
                     call(context.podman, plan.output_image, "ghcr.io/anatase-org"),
                     call(metadata.podman, "cards:f44-common", "ghcr.io/anatase-org"),
                     call(metadata.podman, "builders:f44-base", "ghcr.io/anatase-org"),
@@ -761,7 +809,7 @@ class PrepareCiTests(unittest.TestCase):
             self.assertCountEqual(
                 decision_messages,
                 [
-                    "Creating images:f44-anatase Image",
+                    f"Creating {ci_metadata.output_image} Image",
                     "Creating flatpaks:f44-kate-output Image",
                     "Creating cards:f44-common Image",
                     "Creating builders:f44-base Image",
@@ -809,40 +857,40 @@ class PrepareCiTests(unittest.TestCase):
             )
             self.assertEqual(
                 data["builds"]["f44-base"]["metadata"]["output_image"],
-                "images:f44-anatase",
+                ci_metadata.output_image,
             )
-            self.assertEqual(data["images"]["f44-anatase"]["path"], str(manifest))
+            self.assertEqual(data["images"][image_id]["path"], str(manifest))
             self.assertEqual(
-                data["images"]["f44-anatase"]["build"]["package_images"][
+                data["images"][image_id]["build"]["package_images"][
                     "f44-common"
                 ]["block"],
                 "common",
             )
             self.assertEqual(
-                data["images"]["f44-anatase"]["build"]["build_images"][
+                data["images"][image_id]["build"]["build_images"][
                     "f44-base"
                 ]["block"],
                 "base",
             )
             self.assertEqual(
-                data["images"]["f44-anatase"]["build"]["oci_images"]["kernel-f44"][
+                data["images"][image_id]["build"]["oci_images"]["kernel-f44"][
                     "image"
                 ],
                 "kernel:f44@sha256:kernel111",
             )
             self.assertEqual(
-                data["images"]["f44-anatase"]["build"]["oci_images"]["kernel-f44"][
+                data["images"][image_id]["build"]["oci_images"]["kernel-f44"][
                     "tagged_image"
                 ],
                 "kernel:f44",
             )
             self.assertNotIn(
                 "requested_packages",
-                data["images"]["f44-anatase"]["build"],
+                data["images"][image_id]["build"],
             )
             self.assertNotIn(
                 "resolved_packages",
-                data["images"]["f44-anatase"]["build"],
+                data["images"][image_id]["build"],
             )
             self.assertEqual(
                 data["flatpaks"]["f44-kate-output"]["source"],
@@ -860,6 +908,26 @@ class PrepareCiTests(unittest.TestCase):
                 data["flatpaks"]["f44-kate-output"]["specs"][0]["spec"],
                 "kate.spec",
             )
+            self.assertEqual(
+                data["flatpaks"]["f44-kate-output"]["build"],
+                data["images"][image_id]["build"],
+            )
+            self.assertIsInstance(
+                data["flatpaks"]["f44-kate-output"]["flatpak_images"],
+                dict,
+            )
+            source = output.read_text(encoding="utf-8")
+            self.assertIn("&id", source)
+            self.assertIn("*id", source)
+            restored = _metadata_from_seed_entry(
+                output,
+                image_id,
+                data["images"][image_id],
+            )
+            self.assertEqual(restored.output_image, ci_metadata.output_image)
+            self.assertEqual(restored.package_images, ci_metadata.package_images)
+            self.assertEqual(restored.build_images, ci_metadata.build_images)
+            self.assertEqual(restored.oci_images, ci_metadata.oci_images)
 
     def test_prepare_ci_drops_already_built_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -894,7 +962,7 @@ class PrepareCiTests(unittest.TestCase):
             self.assertEqual(data["images"], {})
             self.assertEqual(data["flatpaks"], {})
 
-    def test_prepare_ci_lists_missing_dependencies_for_existing_outputs(self) -> None:
+    def test_prepare_ci_inlines_metadata_when_only_flatpak_remains(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             manifest = root / "anatase.yml"
@@ -905,7 +973,53 @@ class PrepareCiTests(unittest.TestCase):
             plan = self._flatpak_plan(root, cache)
 
             def remote_exists(_podman: str, image: str, _registry: str) -> bool:
-                return image in {metadata.output_image, plan.output_image}
+                return image != plan.output_image
+
+            with (
+                patch("ludos.ci.resolve_build_manifest_context", return_value=context),
+                patch(
+                    "ludos.ci.resolve_build_manifests_from_contexts",
+                    return_value=(metadata,),
+                ),
+                patch(
+                    "ludos.ci.plan_manifest_flatpaks_with_context",
+                    return_value=(plan,),
+                ),
+                patch(
+                    "ludos.ci._ci_remote_image_exists",
+                    side_effect=remote_exists,
+                ),
+                patch("ludos.ci._remove_tree"),
+                patch("ludos.ci.log"),
+            ):
+                output = prepare_ci((manifest,), cache_dir=cache)
+
+            source = output.read_text(encoding="utf-8")
+            data = yaml.safe_load(source)
+            self.assertEqual(data["cards"], {})
+            self.assertEqual(data["builders"], {})
+            self.assertEqual(data["builds"], {})
+            self.assertEqual(data["images"], {})
+            self.assertEqual(tuple(data["flatpaks"]), ("f44-kate-output",))
+            self.assertIsInstance(
+                data["flatpaks"]["f44-kate-output"]["build"],
+                dict,
+            )
+            self.assertNotIn("*id", source)
+
+    def test_prepare_ci_lists_missing_dependencies_for_existing_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+            context = self._context(root)
+            metadata = self._metadata(root, context)
+            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
+            plan = self._flatpak_plan(root, cache)
+
+            def remote_exists(_podman: str, image: str, _registry: str) -> bool:
+                return image in {ci_metadata.output_image, plan.output_image}
 
             with (
                 patch("ludos.ci.resolve_build_manifest_context", return_value=context),
@@ -959,7 +1073,7 @@ class PrepareCiTests(unittest.TestCase):
             )
             self.assertEqual(
                 data["builds"]["f44-base"]["metadata"]["output_image"],
-                metadata.output_image,
+                ci_metadata.output_image,
             )
 
     def test_prepare_ci_full_keeps_already_built_outputs(self) -> None:
@@ -970,6 +1084,7 @@ class PrepareCiTests(unittest.TestCase):
             cache = root / "cache"
             context = self._context(root)
             metadata = self._metadata(root, context)
+            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
             plan = self._flatpak_plan(root, cache)
 
             with (
@@ -989,7 +1104,10 @@ class PrepareCiTests(unittest.TestCase):
                 output = prepare_ci((manifest,), cache_dir=cache, full=True)
 
             data = yaml.safe_load(output.read_text(encoding="utf-8"))
-            self.assertIn("f44-anatase", data["images"])
+            self.assertIn(
+                ci_metadata.output_image.rsplit(":", 1)[-1],
+                data["images"],
+            )
             self.assertIn("f44-kate-output", data["flatpaks"])
             self.assertEqual(data["cards"], {})
             self.assertEqual(data["builders"], {})
@@ -1025,6 +1143,7 @@ class PrepareCiTests(unittest.TestCase):
                 self._metadata(root, context),
                 ci_registry="ghcr.io/anatase-org",
             )
+            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
             plan = self._flatpak_plan(root, cache)
 
             with (
@@ -1049,7 +1168,11 @@ class PrepareCiTests(unittest.TestCase):
         self.assertCountEqual(
             remote_exists.call_args_list,
             [
-                call(context.podman, metadata.output_image, "ghcr.io/anatase-org"),
+                call(
+                    context.podman,
+                    ci_metadata.output_image,
+                    "ghcr.io/anatase-org",
+                ),
                 call(context.podman, plan.output_image, "ghcr.io/anatase-org"),
                 call(context.podman, "cards:f44-common", "ghcr.io/anatase-org"),
                 call(context.podman, "builders:f44-base", "ghcr.io/anatase-org"),
@@ -1220,6 +1343,123 @@ class PrepareCiTests(unittest.TestCase):
             spec_source_revisions=tuple(),
             latest_image="images:anatase",
             ci_registry=getattr(context, "ci_registry", ""),
+        )
+
+
+class BuildCiTests(unittest.TestCase):
+    def test_build_ci_runs_composable_selection_in_dependency_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_manifest = Path(temp) / "build.yml"
+            build_manifest.write_text(
+                yaml.safe_dump(
+                    {
+                        "version": 1,
+                        "builds": {"a": {}, "b": {}},
+                        "images": {"image": {}},
+                        "flatpaks": {"flatpak": {}},
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            calls = []
+
+            def record(section: str):
+                def run(_manifest, build_id, _entry, **_kwargs):
+                    calls.append((section, build_id))
+
+                return run
+
+            with (
+                patch("ludos.ci._build_ci_package", side_effect=record("build")),
+                patch(
+                    "ludos.ci._build_ci_manifest_image",
+                    side_effect=record("image"),
+                ),
+                patch("ludos.ci._build_ci_flatpak", side_effect=record("flatpak")),
+            ):
+                build_ci(
+                    ("image", "a", "0", "a"),
+                    build_manifest=build_manifest,
+                    builds=True,
+                    flatpaks=True,
+                )
+
+        self.assertEqual(
+            calls,
+            [
+                ("build", "a"),
+                ("build", "b"),
+                ("image", "image"),
+                ("flatpak", "flatpak"),
+            ],
+        )
+
+    def test_build_ci_requires_a_selector(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "at least one CI build ID"):
+            build_ci(tuple())
+
+    def test_build_ci_rejects_unknown_and_ambiguous_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_manifest = Path(temp) / "build.yml"
+            build_manifest.write_text(
+                yaml.safe_dump(
+                    {
+                        "version": 1,
+                        "builds": {"duplicate": {}},
+                        "images": {"duplicate": {}},
+                        "flatpaks": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ConfigError, "unknown CI build ID"):
+                build_ci(("missing",), build_manifest=build_manifest)
+            with self.assertRaisesRegex(ConfigError, "ambiguous CI build ID"):
+                build_ci(("duplicate",), build_manifest=build_manifest)
+
+    def test_build_ci_zero_is_a_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_manifest = Path(temp) / "build.yml"
+            build_manifest.write_text(
+                yaml.safe_dump(
+                    {
+                        "version": 1,
+                        "builds": {},
+                        "images": {},
+                        "flatpaks": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch("ludos.ci._build_ci_package") as package,
+                patch("ludos.ci._build_ci_manifest_image") as image,
+                patch("ludos.ci._build_ci_flatpak") as flatpak,
+            ):
+                build_ci(("0",), build_manifest=build_manifest)
+
+        package.assert_not_called()
+        image.assert_not_called()
+        flatpak.assert_not_called()
+
+    def test_upload_ci_output_removes_aliases_only_after_upload(self) -> None:
+        with (
+            patch("ludos.ci._push_ci_image") as push,
+            patch("ludos.ci._remove_image") as remove,
+        ):
+            _upload_ci_output(
+                "podman",
+                "images:exact",
+                "registry.example",
+                autoremove=True,
+                aliases=("images:latest",),
+            )
+
+        push.assert_called_once_with("podman", "images:exact", "registry.example")
+        self.assertEqual(
+            remove.call_args_list,
+            [call("podman", "images:latest"), call("podman", "images:exact")],
         )
 
 

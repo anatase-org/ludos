@@ -15,6 +15,7 @@ from .ci import (
     DEFAULT_SEED_BUFFER_RATIO,
     DEFAULT_VERSION_LABEL,
     SeedDiskSpaceError,
+    build_ci,
     init_ci,
     prepare_ci,
     seed_ci,
@@ -815,6 +816,37 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     seed_parser.set_defaults(func=ci_command)
+    ci_build_parser = ci_subcommands.add_parser(
+        "build",
+        help="Build and upload outputs from prepared CI metadata.",
+    )
+    ci_build_parser.add_argument(
+        "build_ids",
+        nargs="*",
+        metavar="BUILD_ID",
+        help="Prepared builds, images, or flatpaks IDs. The ID 0 is a no-op.",
+    )
+    ci_build_parser.add_argument(
+        "--builds",
+        action="store_true",
+        help="Build every outstanding package build image.",
+    )
+    ci_build_parser.add_argument(
+        "--images",
+        action="store_true",
+        help="Build every outstanding final manifest image.",
+    )
+    ci_build_parser.add_argument(
+        "--flatpaks",
+        action="store_true",
+        help="Build every outstanding final flatpak image.",
+    )
+    ci_build_parser.add_argument(
+        "--autoremove",
+        action="store_true",
+        help="Remove each local output after it is uploaded.",
+    )
+    ci_build_parser.set_defaults(func=ci_command)
 
     cleanup = subcommands.add_parser(
         "cleanup",
@@ -1194,6 +1226,15 @@ def ci_command(args: argparse.Namespace) -> int:
             autoremove=args.autoremove,
             workers=args.workers,
             buffer_ratio=buffer_ratio,
+        )
+        return 0
+    if args.ci_action == "build":
+        build_ci(
+            tuple(args.build_ids),
+            builds=args.builds,
+            images=args.images,
+            flatpaks=args.flatpaks,
+            autoremove=args.autoremove,
         )
         return 0
     raise ConfigError(f"unknown ci action: {args.ci_action}")

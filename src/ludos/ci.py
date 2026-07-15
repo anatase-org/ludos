@@ -8,7 +8,7 @@ import os
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -17,16 +17,22 @@ import yaml
 
 from .build import (
     BuildImagePlan,
+    FileRef,
+    OciImagePlan,
     PackageImagePlan,
     ResolvedBuildMetadata,
     _create_builder_image,
     _create_package_image,
     _download_exact_packages,
+    _ensure_image,
     _image_tag,
+    _metadata_with_final_image,
     _remove_image,
     _remove_tree,
     _require_buildah,
     _rpm_filename_nevra,
+    build_build_images,
+    build_final_manifest_images,
     resolve_build_manifest_context,
     resolve_build_manifests_from_contexts,
 )
@@ -45,9 +51,16 @@ from .common import (
     _substitute_variables,
     resolve_manifest_context,
 )
-from .flatpaks import FlatpakBuildPlan, plan_manifest_flatpaks_with_context
+from .flatpaks import (
+    FlatpakBuildPlan,
+    FlatpakCard,
+    _ensure_flatpak_builders,
+    _ensure_flatpak_images,
+    _ensure_flatpak_rpm_builds,
+    plan_manifest_flatpaks_with_context,
+)
 from .logging import log
-from .model import ConfigError, Manifest
+from .model import ConfigError, FlatpakImagesConfig, Manifest, _spec_builds_tuple
 
 
 DEFAULT_CI_CACHE_DIR = Path("cache")
@@ -66,6 +79,18 @@ class _LiteralString(str):
 
 class _CiBuildManifestDumper(yaml.SafeDumper):
     pass
+
+
+@dataclass(frozen=True)
+class _PreparedFlatpakContext:
+    podman: str
+    buildah: str | None
+    orchestrator: str
+    ci_registry: str
+    arch: str
+    spec_source_cache_dir: Path
+    ccache_dir: Path | None
+    flatpak_images: FlatpakImagesConfig
 
 
 def _represent_literal_string(
@@ -119,10 +144,11 @@ def write_ci_env(
     return output
 
 
-def _manifest_tag(manifest_path: Path, version: str) -> str:
+def _manifest_tag(manifest_path: Path, version: str | None = None) -> str:
     manifest = Manifest.from_file(manifest_path)
     if not manifest.tag:
         raise ConfigError(f"{manifest_path}: missing 'tag'")
+    version = version or _default_cache_version()
 
     env = {key: str(value) for key, value in manifest.env.items()}
     env["version"] = version
@@ -190,6 +216,10 @@ def prepare_ci(
         tuple(manifest_contexts),
         cache_only=False,
         workers=workers,
+    )
+    metadata = tuple(
+        _metadata_with_final_image(item, mode="combined")
+        for item in metadata
     )
     flatpaks = tuple(
         _flatpak_entry(manifest_path, context, plan)
@@ -351,6 +381,360 @@ def seed_ci(
     if entries:
         with ThreadPoolExecutor(max_workers=min(workers, len(entries))) as executor:
             tuple(executor.map(seed, entries))
+
+
+def build_ci(
+    build_ids: tuple[str, ...],
+    *,
+    build_manifest: Path | None = None,
+    builds: bool = False,
+    images: bool = False,
+    flatpaks: bool = False,
+    autoremove: bool = False,
+) -> None:
+    if not build_ids and not (builds or images or flatpaks):
+        raise ConfigError("at least one CI build ID or section flag is required")
+    build_manifest = build_manifest or _default_ci_build_manifest(None)
+    data = _read_ci_build_data(build_manifest)
+    selected = _select_ci_builds(
+        build_manifest,
+        data,
+        build_ids,
+        builds=builds,
+        images=images,
+        flatpaks=flatpaks,
+    )
+    restored_contexts: set[tuple[str, str, tuple[str, ...]]] = set()
+    for section in ("builds", "images", "flatpaks"):
+        values = data[section]
+        for build_id in selected[section]:
+            entry = values[build_id]
+            if section == "builds":
+                _build_ci_package(
+                    build_manifest,
+                    build_id,
+                    entry,
+                    restored_contexts=restored_contexts,
+                    autoremove=autoremove,
+                )
+            elif section == "images":
+                _build_ci_manifest_image(
+                    build_manifest,
+                    build_id,
+                    entry,
+                    restored_contexts=restored_contexts,
+                    autoremove=autoremove,
+                )
+            else:
+                _build_ci_flatpak(
+                    build_manifest,
+                    build_id,
+                    entry,
+                    restored_contexts=restored_contexts,
+                    autoremove=autoremove,
+                )
+
+
+def _read_ci_build_data(build_manifest: Path) -> dict[str, Any]:
+    try:
+        data = yaml.safe_load(build_manifest.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ConfigError(f"CI build manifest not found: {build_manifest}") from exc
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise ConfigError(f"{build_manifest}: unsupported CI build manifest")
+    for section in ("builds", "images", "flatpaks"):
+        if not isinstance(data.get(section), dict):
+            raise ConfigError(f"{build_manifest}: '{section}' must be a mapping")
+    return data
+
+
+def _select_ci_builds(
+    build_manifest: Path,
+    data: dict[str, Any],
+    build_ids: tuple[str, ...],
+    *,
+    builds: bool,
+    images: bool,
+    flatpaks: bool,
+) -> dict[str, list[str]]:
+    sections = ("builds", "images", "flatpaks")
+    selected = {section: [] for section in sections}
+    selected_sets = {section: set() for section in sections}
+
+    def add(section: str, build_id: str) -> None:
+        if build_id not in selected_sets[section]:
+            selected_sets[section].add(build_id)
+            selected[section].append(build_id)
+
+    for build_id in build_ids:
+        if build_id == "0":
+            continue
+        matches = [section for section in sections if build_id in data[section]]
+        if not matches:
+            raise ConfigError(f"{build_manifest}: unknown CI build ID: {build_id}")
+        if len(matches) > 1:
+            raise ConfigError(
+                f"{build_manifest}: ambiguous CI build ID '{build_id}' appears in: "
+                + ", ".join(matches)
+            )
+        add(matches[0], build_id)
+
+    for section, include_all in (
+        ("builds", builds),
+        ("images", images),
+        ("flatpaks", flatpaks),
+    ):
+        if include_all:
+            for build_id in data[section]:
+                add(section, str(build_id))
+    return selected
+
+
+def _build_ci_package(
+    build_manifest: Path,
+    build_id: str,
+    entry: object,
+    *,
+    restored_contexts: set[tuple[str, str, tuple[str, ...]]],
+    autoremove: bool,
+) -> None:
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{build_manifest}: invalid builds entry '{build_id}'")
+    metadata = _metadata_from_mapping(
+        build_manifest,
+        build_id,
+        entry.get("metadata"),
+    )
+    _restore_ci_build_context(metadata, restored_contexts)
+    if isinstance(entry.get("flatpak"), dict):
+        context = _prepared_flatpak_context(metadata, entry["flatpak"])
+        plan = _prepared_flatpak_plan(
+            build_manifest,
+            build_id,
+            entry["flatpak"],
+            metadata,
+        )
+        _ensure_flatpak_builders(context, (plan,), cache_only=True)
+        _ensure_flatpak_rpm_builds(context, (plan,), cache_only=False)
+        image = plan.build_image
+    else:
+        image = str(entry.get("image", ""))
+        if not image:
+            raise ConfigError(f"{build_manifest}: invalid builds entry '{build_id}'")
+        build_build_images(
+            (metadata,),
+            targets=(image,),
+            cache_only=False,
+        )
+    _upload_ci_output(
+        metadata.podman,
+        image,
+        metadata.ci_registry,
+        autoremove=autoremove,
+    )
+
+
+def _build_ci_manifest_image(
+    build_manifest: Path,
+    build_id: str,
+    entry: object,
+    *,
+    restored_contexts: set[tuple[str, str, tuple[str, ...]]],
+    autoremove: bool,
+) -> None:
+    metadata = _metadata_from_seed_entry(build_manifest, build_id, entry)
+    _restore_ci_build_context(
+        metadata,
+        restored_contexts,
+        package_images=True,
+        oci_images=True,
+    )
+    build_outputs = build_build_images((metadata,), cache_only=True)
+    result = build_final_manifest_images(
+        (metadata,),
+        build_outputs=build_outputs,
+        mode="combined",
+        cache_only=False,
+    )[0]
+    if result.output_image != metadata.output_image:
+        raise ConfigError(
+            f"{build_manifest}: image '{build_id}' resolved to unexpected output "
+            f"{result.output_image}"
+        )
+    _upload_ci_output(
+        metadata.podman,
+        result.output_image,
+        metadata.ci_registry,
+        autoremove=autoremove,
+        aliases=(result.latest_image,),
+    )
+
+
+def _build_ci_flatpak(
+    build_manifest: Path,
+    build_id: str,
+    entry: object,
+    *,
+    restored_contexts: set[tuple[str, str, tuple[str, ...]]],
+    autoremove: bool,
+) -> None:
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{build_manifest}: invalid flatpaks entry '{build_id}'")
+    metadata = _metadata_from_mapping(
+        build_manifest,
+        build_id,
+        entry.get("build"),
+    )
+    _restore_ci_build_context(metadata, restored_contexts)
+    context = _prepared_flatpak_context(metadata, entry)
+    plan = _prepared_flatpak_plan(build_manifest, build_id, entry, metadata)
+    plan = _ensure_flatpak_rpm_builds(
+        context,
+        (plan,),
+        cache_only=True,
+    )[0]
+    result = _ensure_flatpak_images(
+        context,
+        (plan,),
+        cache_only=False,
+    )[0]
+    _upload_ci_output(
+        metadata.podman,
+        result.image,
+        metadata.ci_registry,
+        autoremove=autoremove,
+        aliases=(result.latest_image,),
+    )
+
+
+def _prepared_flatpak_context(
+    metadata: ResolvedBuildMetadata,
+    entry: dict[str, Any],
+) -> _PreparedFlatpakContext:
+    flatpak_images = entry.get("flatpak_images")
+    if not isinstance(flatpak_images, dict):
+        flatpak_images = {}
+    return _PreparedFlatpakContext(
+        podman=metadata.podman,
+        buildah=metadata.buildah,
+        orchestrator=metadata.orchestrator,
+        ci_registry=metadata.ci_registry,
+        arch=metadata.arch,
+        spec_source_cache_dir=Path(metadata.spec_source_cache_dir),
+        ccache_dir=(Path(metadata.ccache_dir) if metadata.ccache_dir else None),
+        flatpak_images=FlatpakImagesConfig(
+            uri=str(flatpak_images.get("uri", "")),
+            s3=str(flatpak_images.get("s3", "")),
+            overlay=str(flatpak_images.get("overlay", "")),
+        ),
+    )
+
+
+def _prepared_flatpak_plan(
+    build_manifest: Path,
+    build_id: str,
+    entry: dict[str, Any],
+    metadata: ResolvedBuildMetadata,
+) -> FlatpakBuildPlan:
+    images = entry.get("images")
+    paths = entry.get("paths")
+    specs = entry.get("specs")
+    if not isinstance(images, dict) or not isinstance(paths, dict) or not isinstance(specs, list):
+        raise ConfigError(f"{build_manifest}: invalid flatpak build entry '{build_id}'")
+    card_path = Path(str(entry.get("source", "")))
+    if not card_path.is_absolute():
+        card_path = Path(metadata.root_dir) / card_path
+    card = FlatpakCard.from_file(card_path)
+    return FlatpakBuildPlan(
+        card_path=card_path,
+        card=card,
+        flatpak_dir=Path(str(paths.get("flatpak_dir", card_path.parent))),
+        app_name=str(entry.get("app", "")),
+        block=str(entry.get("block", "")),
+        branch=str(entry.get("branch", "")),
+        flatpak_arch=str(entry.get("arch", "")),
+        app_ref=str(entry.get("ref", "")),
+        output_image=str(images.get("output", "")),
+        latest_image=str(images.get("latest", "")),
+        substitution_env=_string_mapping(entry.get("substitution_env")),
+        build_env=_string_mapping(entry.get("build_env")),
+        specs=_spec_builds_tuple({"specs": specs}, "specs", build_manifest),
+        prepare_script=str(entry.get("prepare_script", "")),
+        spec_revisions=_tuple_pairs(entry.get("spec_revisions")),
+        spec_build_dir=Path(str(paths.get("spec_build_dir", ""))),
+        artifact_cache_dir=Path(str(paths.get("artifact_cache_dir", ""))),
+        final_build_dir=Path(str(paths.get("final_build_dir", ""))),
+        rpmbuild_defines=tuple(
+            str(item) for item in entry.get("rpmbuild_defines", ())
+        ),
+        builder_packages=tuple(
+            str(item) for item in entry.get("builder_packages", ())
+        ),
+        builder_image=str(images.get("builder", "")),
+        build_image=str(images.get("build", "")),
+        metadata=str(entry.get("metadata", "")),
+    )
+
+
+def _string_mapping(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item) for key, item in value.items()}
+
+
+def _restore_ci_build_context(
+    metadata: ResolvedBuildMetadata,
+    restored_contexts: set[tuple[str, str, tuple[str, ...]]],
+    *,
+    package_images: bool = False,
+    oci_images: bool = False,
+) -> None:
+    key = (metadata.podman, metadata.root_dir, metadata.repo_images)
+    if key not in restored_contexts:
+        if not _ensure_image(
+            metadata.podman,
+            metadata.orchestrator,
+            metadata.ci_registry,
+        ):
+            raise ConfigError(f"CI orchestrator image is missing: {metadata.orchestrator}")
+        paths = {
+            "repos": Path(metadata.repo_dir),
+            "cache": Path(metadata.dnf_cache_dir),
+            "persist": Path(metadata.dnf_persist_dir),
+        }
+        for path in paths.values():
+            path.mkdir(parents=True, exist_ok=True)
+        Path(metadata.dnf_log_dir).mkdir(parents=True, exist_ok=True)
+        for repo_image in metadata.repo_images:
+            if not _ensure_image(metadata.podman, repo_image, metadata.ci_registry):
+                raise ConfigError(f"CI repository image is missing: {repo_image}")
+            _extract_image_paths(metadata.podman, repo_image, paths)
+        restored_contexts.add(key)
+
+    if package_images:
+        for plan in metadata.package_images:
+            if not _ensure_image(metadata.podman, plan.image, metadata.ci_registry):
+                raise ConfigError(f"CI card package image is missing: {plan.image}")
+    if oci_images:
+        for plan in metadata.oci_images:
+            subprocess.run([metadata.podman, "pull", plan.image], check=True)
+
+
+def _upload_ci_output(
+    podman: str,
+    image: str,
+    ci_registry: str,
+    *,
+    autoremove: bool,
+    aliases: tuple[str, ...] = tuple(),
+) -> None:
+    _push_ci_image(podman, image, ci_registry)
+    if not autoremove:
+        return
+    for alias in aliases:
+        if alias and alias != image:
+            _remove_image(podman, alias)
+    _remove_image(podman, image)
 
 
 def _prepare_seed_rpms(
@@ -641,8 +1025,16 @@ def _metadata_from_seed_entry(
 ) -> ResolvedBuildMetadata:
     if not isinstance(value, dict) or not isinstance(value.get("build"), dict):
         raise ConfigError(f"{build_manifest}: image '{key}' is missing build metadata")
-    build = value["build"]
-    assert isinstance(build, dict)
+    return _metadata_from_mapping(build_manifest, key, value["build"])
+
+
+def _metadata_from_mapping(
+    build_manifest: Path,
+    key: object,
+    build: object,
+) -> ResolvedBuildMetadata:
+    if not isinstance(build, dict):
+        raise ConfigError(f"{build_manifest}: image '{key}' is missing build metadata")
     return ResolvedBuildMetadata(
         image=str(build.get("image", "")),
         distro=str(build.get("distro", "")),
@@ -664,7 +1056,7 @@ def _metadata_from_seed_entry(
         package_ids=_tuple_triples(build.get("package_ids")),
         package_images=_package_image_plans(build.get("package_images")),
         build_images=_build_image_plans(build.get("build_images")),
-        oci_images=tuple(),
+        oci_images=_oci_image_plans(build.get("oci_images")),
         package_dir=str(build.get("package_dir", "")),
         repo_dir=str(build.get("repo_dir", "")),
         cache_dir=str(build.get("cache_dir", "")),
@@ -694,13 +1086,16 @@ def _metadata_from_seed_entry(
             str(item) for item in build.get("orchestrator_dnf_base", ())
         ),
         package_blocks=_tuple_string_blocks(build.get("package_blocks")),
-        card_file_sets=tuple(),
-        postprocess_blocks=tuple(),
-        card_envs=tuple(),
-        card_sources=tuple(),
-        card_prepare_scripts=tuple(),
-        card_builds=tuple(),
-        card_specs=tuple(),
+        card_file_sets=_card_file_sets(build.get("card_file_sets")),
+        postprocess_blocks=_tuple_pairs(build.get("postprocess_blocks")),
+        card_envs=_tuple_pair_blocks(build.get("card_envs")),
+        card_sources=_tuple_pairs(build.get("card_sources")),
+        card_prepare_scripts=_tuple_pairs(build.get("card_prepare_scripts")),
+        card_builds=_tuple_pairs(build.get("card_builds")),
+        card_specs=_card_specs(
+            build.get("card_specs"),
+            build_manifest,
+        ),
         spec_source_revisions=_tuple_triples(build.get("spec_source_revisions")),
         latest_image=str(build.get("latest_image", "")),
         ci_registry=str(build.get("ci_registry", "")),
@@ -731,6 +1126,67 @@ def _tuple_string_blocks(value: object) -> tuple[tuple[str, tuple[str, ...]], ..
         for item in value
         if _is_pair(item) and isinstance(item[1], list)
     )
+
+
+def _tuple_pair_blocks(
+    value: object,
+) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
+    if not isinstance(value, list):
+        return tuple()
+    return tuple(
+        (str(item[0]), _tuple_pairs(item[1]))
+        for item in value
+        if _is_pair(item)
+    )
+
+
+def _card_file_sets(
+    value: object,
+) -> tuple[tuple[str, str, tuple[FileRef, ...]], ...]:
+    if not isinstance(value, list):
+        return tuple()
+    result = []
+    for item in value:
+        if not isinstance(item, list) or len(item) != 3:
+            continue
+        refs = item[2]
+        if not isinstance(refs, list):
+            continue
+        result.append(
+            (
+                str(item[0]),
+                str(item[1]),
+                tuple(
+                    FileRef(
+                        original=str(ref.get("original", "")),
+                        source=str(ref.get("source", "")),
+                        target=str(ref.get("target", "")),
+                    )
+                    for ref in refs
+                    if isinstance(ref, dict)
+                ),
+            )
+        )
+    return tuple(result)
+
+
+def _card_specs(
+    value: object,
+    build_manifest: Path,
+) -> tuple[tuple[str, tuple[Any, ...]], ...]:
+    if not isinstance(value, list):
+        return tuple()
+    result = []
+    for item in value:
+        if not _is_pair(item) or not isinstance(item[1], list):
+            continue
+        result.append(
+            (
+                str(item[0]),
+                _spec_builds_tuple({"specs": item[1]}, "specs", build_manifest),
+            )
+        )
+    return tuple(result)
 
 
 def _is_pair(value: object) -> bool:
@@ -769,6 +1225,23 @@ def _build_image_plans(value: object) -> tuple[BuildImagePlan, ...]:
     )
 
 
+def _oci_image_plans(value: object) -> tuple[OciImagePlan, ...]:
+    if not isinstance(value, dict):
+        return tuple()
+    return tuple(
+        OciImagePlan(
+            block=str(item.get("block", "")),
+            name=str(item.get("name", "")),
+            image=str(item.get("tagged_image", item.get("image", ""))),
+            digest=str(item.get("digest", "")),
+            packages=tuple(str(package) for package in item.get("packages", ())),
+            declared_package_ids=_tuple_pairs(item.get("declared_package_ids")),
+        )
+        for item in value.values()
+        if isinstance(item, dict)
+    )
+
+
 def _write_ci_build_manifest(
     output: Path,
     *,
@@ -779,6 +1252,13 @@ def _write_ci_build_manifest(
     workers: int = DEFAULT_PREPARE_WORKERS,
 ) -> tuple[Path, Path]:
     log("Checking current registry for image existence")
+    metadata_by_manifest = {
+        str(manifest_path): _build_entry(manifest_metadata)
+        for (manifest_path, _context), manifest_metadata in zip(
+            manifest_contexts,
+            metadata,
+        )
+    }
     included_metadata = tuple(
         (manifest_path, manifest_metadata)
         for (manifest_path, _context), manifest_metadata in zip(
@@ -820,24 +1300,36 @@ def _write_ci_build_manifest(
             )
         ),
         flatpaks=flatpaks,
+        metadata_by_manifest=metadata_by_manifest,
         workers=workers,
     )
+    image_entries = {
+        _image_id(manifest_metadata.output_image): _image_entry(
+            manifest_path,
+            metadata_by_manifest[str(manifest_path)],
+        )
+        for manifest_path, manifest_metadata in included_metadata
+    }
+    flatpak_entries = {}
+    for entry in included_flatpaks:
+        manifest_path = str(entry["manifest"])
+        flatpak_entry = dict(entry)
+        flatpak_entry["build"] = metadata_by_manifest[manifest_path]
+        flatpak_entry["flatpak_images"] = _to_plain(
+            getattr(
+                contexts_by_manifest[manifest_path],
+                "flatpak_images",
+                FlatpakImagesConfig(),
+            )
+        )
+        flatpak_entries[_image_id(entry["images"]["output"])] = flatpak_entry
     payload = {
         "version": 1,
         "cards": cards,
         "builders": builders,
         "builds": builds,
-        "images": {
-            _image_id(manifest_metadata.output_image): _image_entry(
-                manifest_path,
-                manifest_metadata,
-            )
-            for manifest_path, manifest_metadata in included_metadata
-        },
-        "flatpaks": {
-            _image_id(entry["images"]["output"]): entry
-            for entry in included_flatpaks
-        },
+        "images": image_entries,
+        "flatpaks": flatpak_entries,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     body = yaml.dump(payload, Dumper=_CiBuildManifestDumper, sort_keys=False).encode(
@@ -859,6 +1351,7 @@ def _missing_ci_dependency_images(
     manifest_contexts: tuple[tuple[Path, ResolvedManifestContext], ...],
     metadata: tuple[tuple[Path, ResolvedBuildMetadata], ...],
     flatpaks: tuple[dict[str, Any], ...],
+    metadata_by_manifest: dict[str, dict[str, Any]],
     workers: int,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     candidates: dict[str, dict[str, tuple[str, str, dict[str, Any]]]] = {
@@ -866,8 +1359,6 @@ def _missing_ci_dependency_images(
         "builders": {},
         "builds": {},
     }
-    metadata_by_manifest: dict[str, dict[str, Any]] = {}
-
     def add(
         section: str,
         podman: str,
@@ -878,8 +1369,7 @@ def _missing_ci_dependency_images(
         candidates[section].setdefault(image, (podman, ci_registry, entry))
 
     for manifest_path, manifest in metadata:
-        manifest_metadata = _build_entry(manifest)
-        metadata_by_manifest[str(manifest_path)] = manifest_metadata
+        manifest_metadata = metadata_by_manifest[str(manifest_path)]
         for plan in manifest.package_images:
             if plan.packages:
                 card_entry = _to_plain(plan)
@@ -991,11 +1481,11 @@ def _size_kib(path: Path) -> int:
 
 def _image_entry(
     manifest_path: Path,
-    metadata: ResolvedBuildMetadata,
+    metadata: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "path": str(manifest_path),
-        "build": _build_entry(metadata),
+        "build": metadata,
     }
 
 
