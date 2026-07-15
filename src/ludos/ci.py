@@ -411,7 +411,6 @@ def build_ci(
                     build_manifest,
                     build_id,
                     entry,
-                    restored_contexts=restored_contexts,
                     autoremove=autoremove,
                 )
             elif section == "images":
@@ -492,7 +491,6 @@ def _build_ci_package(
     build_id: str,
     entry: object,
     *,
-    restored_contexts: set[tuple[str, str, tuple[str, ...]]],
     autoremove: bool,
 ) -> None:
     if not isinstance(entry, dict):
@@ -502,7 +500,6 @@ def _build_ci_package(
         build_id,
         entry.get("metadata"),
     )
-    _restore_ci_build_context(metadata, restored_contexts)
     if isinstance(entry.get("flatpak"), dict):
         context = _prepared_flatpak_context(metadata, entry["flatpak"])
         plan = _prepared_flatpak_plan(

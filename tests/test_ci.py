@@ -1474,7 +1474,7 @@ class BuildCiTests(unittest.TestCase):
         )
         with (
             patch("ludos.ci._metadata_from_mapping", return_value=metadata),
-            patch("ludos.ci._restore_ci_build_context"),
+            patch("ludos.ci._restore_ci_build_context") as restore_context,
             patch("ludos.ci._prepared_flatpak_context", return_value=context),
             patch("ludos.ci._prepared_flatpak_plan", return_value=plan),
             patch("ludos.ci._ensure_image", return_value=True) as ensure,
@@ -1485,10 +1485,10 @@ class BuildCiTests(unittest.TestCase):
                 Path("cache/ci/build.yml"),
                 "flatpak",
                 {"metadata": {}, "flatpak": {}},
-                restored_contexts=set(),
                 autoremove=False,
             )
 
+        restore_context.assert_not_called()
         ensure.assert_called_once_with(
             "podman",
             "builders:flatpak",
