@@ -537,6 +537,61 @@ class PrepareCiTests(unittest.TestCase):
             create_repo.assert_not_called()
             push.assert_not_called()
 
+    def test_init_ci_pulls_remote_orchestrator_for_missing_repo_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+
+            def resolve(_manifest: Path, **kwargs: object) -> SimpleNamespace:
+                image_exists = kwargs["image_exists"]
+                create_repo = kwargs["create_repo_image"]
+                self.assertTrue(
+                    image_exists("podman", "orchestrator:f44", "ghcr.io/test")
+                )
+                self.assertFalse(
+                    image_exists("podman", "repos:f44-fedora", "ghcr.io/test")
+                )
+                create_repo(
+                    podman="podman",
+                    buildah="buildah",
+                    orchestrator="orchestrator:f44",
+                    root_dir=root,
+                    image="repos:f44-fedora",
+                    repo_name="fedora.repo",
+                    repo_id="fedora",
+                    rendered_repo="[fedora]\n",
+                )
+                return SimpleNamespace(ci_registry="ghcr.io/test")
+
+            with (
+                patch("ludos.ci.resolve_manifest_context", side_effect=resolve),
+                patch(
+                    "ludos.ci._ci_remote_image_exists",
+                    side_effect=[True, False],
+                ),
+                patch("ludos.ci._local_image_exists", return_value=False),
+                patch("ludos.ci._ensure_context_image", return_value=True) as ensure,
+                patch("ludos.ci._create_orchestrator_image") as create_orchestrator,
+                patch("ludos.ci._create_repo_image") as create_repo,
+                patch("ludos.ci._push_ci_image") as push,
+            ):
+                init_ci((manifest,), cache_dir=cache, cache_version="20260629")
+
+            ensure.assert_called_once_with(
+                "podman",
+                "orchestrator:f44",
+                "ghcr.io/test",
+            )
+            create_orchestrator.assert_not_called()
+            create_repo.assert_called_once()
+            push.assert_called_once_with(
+                "podman",
+                "repos:f44-fedora",
+                "ghcr.io/test",
+            )
+
     def test_prepare_ci_writes_build_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

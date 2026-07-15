@@ -31,6 +31,7 @@ from .common import (
     _create_orchestrator_image,
     _create_repo_image,
     _default_cache_version,
+    _ensure_image as _ensure_context_image,
     _extract_image_paths,
     _image_exists as _local_image_exists,
     _remote_cache_image_exists,
@@ -244,6 +245,18 @@ def init_ci(
             )
 
     def create_repo_image(**kwargs: Any) -> None:
+        podman = str(kwargs["podman"])
+        orchestrator = str(kwargs["orchestrator"])
+        if (
+            remote_exists_by_image.get(orchestrator, False)
+            and not _local_image_exists(podman, orchestrator)
+            and not _ensure_context_image(
+                podman,
+                orchestrator,
+                current_ci_registry[0],
+            )
+        ):
+            raise ConfigError(f"failed to pull CI orchestrator image: {orchestrator}")
         _create_repo_image(**kwargs)
         if not remote_exists_by_image.get(str(kwargs["image"]), False):
             _push_ci_image(
