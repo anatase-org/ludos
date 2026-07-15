@@ -1118,15 +1118,20 @@ def _metadata_from_mapping(
     if not isinstance(build, dict):
         raise ConfigError(f"{build_manifest}: image '{key}' is missing build metadata")
     serialized_cache_dir = str(build.get("cache_dir", ""))
-    ccache_dir = None
+    runtime_ccache_dir = None
     if ccache:
-        if not serialized_cache_dir:
+        configured_ccache_dir = os.environ.get("CCACHE_DIR")
+        if not configured_ccache_dir and not serialized_cache_dir:
             raise ConfigError(
                 f"{build_manifest}: image '{key}' is missing its cache directory"
             )
-        ccache_path = Path(serialized_cache_dir).parent / "ccache"
+        ccache_path = (
+            Path(configured_ccache_dir).expanduser().resolve()
+            if configured_ccache_dir
+            else Path(serialized_cache_dir).parent / "ccache"
+        )
         ccache_path.mkdir(parents=True, exist_ok=True)
-        ccache_dir = str(ccache_path)
+        runtime_ccache_dir = str(ccache_path)
     return ResolvedBuildMetadata(
         image=str(build.get("image", "")),
         distro=str(build.get("distro", "")),
@@ -1156,7 +1161,7 @@ def _metadata_from_mapping(
         card_build_dir=str(build.get("card_build_dir", "")),
         spec_source_cache_dir=str(build.get("spec_source_cache_dir", "")),
         build_artifact_cache_dir=str(build.get("build_artifact_cache_dir", "")),
-        ccache_dir=ccache_dir,
+        ccache_dir=runtime_ccache_dir,
         dnf_workspace_dir=str(build.get("dnf_workspace_dir", "")),
         dnf_cache_dir=str(build.get("dnf_cache_dir", "")),
         dnf_persist_dir=str(build.get("dnf_persist_dir", "")),

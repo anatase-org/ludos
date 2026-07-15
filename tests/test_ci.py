@@ -934,17 +934,26 @@ class PrepareCiTests(unittest.TestCase):
             self.assertEqual(restored.output_image, ci_metadata.output_image)
             self.assertEqual(restored.package_images, ci_metadata.package_images)
             self.assertIsNone(restored.ccache_dir)
-            restored_with_ccache = _metadata_from_seed_entry(
-                output,
-                image_id,
-                data["images"][image_id],
-                ccache=True,
-            )
+            persistent_ccache = root / "persistent-ccache"
+            stale_entry = {
+                "build": dict(data["images"][image_id]["build"]),
+            }
+            stale_entry["build"]["ccache_dir"] = "/serialized/ccache"
+            with patch.dict(
+                "ludos.ci.os.environ",
+                {"CCACHE_DIR": str(persistent_ccache)},
+            ):
+                restored_with_ccache = _metadata_from_seed_entry(
+                    output,
+                    image_id,
+                    stale_entry,
+                    ccache=True,
+                )
             self.assertEqual(
                 restored_with_ccache.ccache_dir,
-                str(cache / "ccache"),
+                str(persistent_ccache),
             )
-            self.assertTrue((cache / "ccache").is_dir())
+            self.assertTrue(persistent_ccache.is_dir())
             self.assertEqual(restored.build_images, ci_metadata.build_images)
             self.assertEqual(restored.oci_images, ci_metadata.oci_images)
 
