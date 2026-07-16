@@ -131,12 +131,21 @@ def write_ci_env(
     manifest_path = manifest_path.expanduser().resolve()
     cache_version = _default_cache_version()
     tag = _manifest_tag(manifest_path, version=cache_version)
-    labels = _inspect_remote_labels(ref)
+    missing_remote = False
+    try:
+        labels = _inspect_remote_labels(ref)
+    except ConfigError:
+        if _remote_cache_image_exists(ref):
+            raise
+        labels = {}
+        missing_remote = True
     image_tag = labels.get(label)
-    if image_tag is None:
+    if image_tag is None and not missing_remote:
         raise ConfigError(f"OCI image has no '{label}' label: {ref}")
 
-    if image_tag == tag:
+    if missing_remote:
+        dist = ""
+    elif image_tag == tag:
         dist = ".1"
     elif image_tag.startswith(tag):
         suffix = image_tag[len(tag) :]

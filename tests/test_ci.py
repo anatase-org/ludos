@@ -661,6 +661,32 @@ class CiEnvTests(unittest.TestCase):
                 "version=20260713\ndist=\n",
             )
 
+    def test_missing_remote_image_starts_without_dist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            with (
+                patch("ludos.ci._manifest_tag", return_value="20260713"),
+                patch(
+                    "ludos.ci._default_cache_version", return_value="20260713"
+                ),
+                patch(
+                    "ludos.ci._inspect_remote_labels",
+                    side_effect=ConfigError("failed to inspect remote OCI image"),
+                ),
+                patch(
+                    "ludos.ci._remote_cache_image_exists",
+                    return_value=False,
+                ) as exists,
+            ):
+                write_ci_env(manifest, "i.anatase.org/anatase:rolling")
+
+            self.assertEqual(
+                (root / ".env").read_text(encoding="utf-8"),
+                "version=20260713\ndist=\n",
+            )
+            exists.assert_called_once_with("i.anatase.org/anatase:rolling")
+
     def test_rejects_missing_label(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             manifest = Path(temp) / "anatase.yml"
