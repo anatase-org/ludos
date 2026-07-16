@@ -229,6 +229,8 @@ class CiParserTests(unittest.TestCase):
                 "latest",
                 "--tag",
                 "stable",
+                "--previous-manifest",
+                "registry.example.test/anatase:stable",
                 "--prefix",
                 "rolling-",
             ]
@@ -240,6 +242,10 @@ class CiParserTests(unittest.TestCase):
         self.assertTrue(args.flatpaks)
         self.assertTrue(args.refresh)
         self.assertEqual(args.tags, ["candidate", "latest", "stable"])
+        self.assertEqual(
+            args.previous_manifest,
+            "registry.example.test/anatase:stable",
+        )
         self.assertEqual(args.prefix, "rolling-")
 
     def test_parser_accepts_ci_promote_options(self) -> None:
@@ -473,6 +479,8 @@ class CiParserTests(unittest.TestCase):
                 "0",
                 "--flatpaks",
                 "--refresh",
+                "--previous-manifest",
+                "registry.example.test/anatase:stable",
                 "--prefix",
                 "rolling-",
             ]
@@ -488,6 +496,7 @@ class CiParserTests(unittest.TestCase):
             flatpaks=True,
             refresh=True,
             tags=("candidate", "stable"),
+            previous_manifest="registry.example.test/anatase:stable",
             prefix="rolling-",
         )
 
@@ -2256,6 +2265,7 @@ class UploadCiTests(unittest.TestCase):
                     ("f44-anatase",),
                     build_manifest=build_manifest,
                     tags=("candidate", "latest"),
+                    previous_manifest="registry.example.test/anatase:stable",
                 )
 
         self.assertEqual(result, 0)
@@ -2268,6 +2278,10 @@ class UploadCiTests(unittest.TestCase):
         self.assertEqual(
             export.call_args.kwargs["cache_dir"],
             (root / "cache").resolve(),
+        )
+        self.assertEqual(
+            export.call_args.kwargs["previous_manifest"],
+            "registry.example.test/anatase:stable",
         )
         upload.assert_called_once_with(
             (root / "cache" / "oci" / "anatase-f44-x86_64").resolve(),

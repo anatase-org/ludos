@@ -910,6 +910,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Image tag to publish. May be specified more than once.",
     )
     ci_upload_parser.add_argument(
+        "--previous-manifest",
+        default=None,
+        metavar="URI",
+        help="Remote OCI image whose layer plan should seed rechunking.",
+    )
+    ci_upload_parser.add_argument(
         "--prefix",
         default="",
         help="Prefix for uploaded flatpak tags and the refreshed static index.",
@@ -1382,6 +1388,7 @@ def ci_command(args: argparse.Namespace) -> int:
             flatpaks=args.flatpaks,
             refresh=args.refresh,
             tags=tuple(args.tags),
+            previous_manifest=args.previous_manifest,
             prefix=args.prefix,
         )
     if args.ci_action == "remove":

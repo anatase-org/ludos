@@ -486,6 +486,7 @@ def upload_ci(
     flatpaks: bool = False,
     refresh: bool = False,
     tags: tuple[str, ...] = tuple(),
+    previous_manifest: str | None = None,
     prefix: str = "",
 ) -> int:
     if not upload_ids and not (images or flatpaks):
@@ -508,6 +509,7 @@ def upload_ci(
             data["images"][upload_id],
             cache_root=cache_root,
             tags=tags,
+            previous_manifest=previous_manifest,
         )
         if result != 0:
             return result
@@ -724,6 +726,7 @@ def _upload_ci_manifest_image(
     *,
     cache_root: Path,
     tags: tuple[str, ...],
+    previous_manifest: str | None,
 ) -> int:
     entry = _rebase_ci_entry(build_manifest, entry, metadata_key="build")
     metadata = _metadata_from_seed_entry(build_manifest, upload_id, entry)
@@ -739,6 +742,7 @@ def _upload_ci_manifest_image(
         (metadata,),
         (result,),
         cache_dir=cache_root,
+        previous_manifest=previous_manifest,
     )
     layout = cache_root / "oci" / _bootc_artifact_name(metadata.image, metadata.distro)
     if tags:
