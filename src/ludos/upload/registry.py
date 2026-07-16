@@ -220,6 +220,164 @@ def upload_oci(
     return 0
 
 
+def create_oci_index(
+    ref: str,
+    source_tags: tuple[str, ...],
+    target_tag: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
+    project_root: Path | None = None,
+    cosign_config: OciCosignConfig | None = None,
+) -> int:
+    repo_ref = _validate_ref(ref)
+    sources = _validate_tags(source_tags, command="registry oci index")
+    target = _validate_tags((target_tag,), command="registry oci index")[0]
+    if target in sources:
+        raise ConfigError("OCI index target tag must differ from every source tag")
+
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+    bucket = config.bucket
+    descriptors: list[dict[str, object]] = []
+    platforms: set[tuple[str, str, str]] = set()
+
+    # Resolve and validate every source before signing or changing the target tag.
+    for source in sources:
+        tag_key = _tag_key(repo_ref, source)
+        try:
+            manifest_bytes = _read_s3_object(s3, bucket, tag_key)
+        except ConfigError as exc:
+            raise ConfigError(
+                f"OCI source tag is missing: {repo_ref}:{source}"
+            ) from exc
+        manifest = _loads_json(manifest_bytes, f"OCI source manifest {tag_key}")
+        media_type = manifest.get("mediaType", DEFAULT_MANIFEST_MEDIA_TYPE)
+        if not isinstance(media_type, str) or not media_type:
+            raise ConfigError(
+                f"OCI source manifest {repo_ref}:{source} has invalid mediaType"
+            )
+        if media_type in (OCI_INDEX_MEDIA_TYPE, DOCKER_MANIFEST_LIST_MEDIA_TYPE):
+            raise ConfigError(
+                f"OCI source tag is already an image index: {repo_ref}:{source}"
+            )
+
+        digest = f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
+        digest_key = _manifest_key(repo_ref, digest)
+        digest_bytes = _read_s3_object(s3, bucket, digest_key)
+        if digest_bytes != manifest_bytes:
+            raise ConfigError(
+                f"OCI source tag and digest manifest differ: {repo_ref}:{source}"
+            )
+
+        config_descriptor = _descriptor(
+            manifest.get("config"),
+            default_media_type=DEFAULT_CONFIG_MEDIA_TYPE,
+            what=f"source manifest {repo_ref}:{source} config",
+        )
+        config_key = _blob_key(repo_ref, config_descriptor.digest)
+        config_bytes = _read_s3_object(s3, bucket, config_key)
+        if len(config_bytes) != config_descriptor.size:
+            raise ConfigError(
+                f"OCI config size mismatch for {repo_ref}:{source}: "
+                f"expected {config_descriptor.size}, got {len(config_bytes)}"
+            )
+        config_digest = f"sha256:{hashlib.sha256(config_bytes).hexdigest()}"
+        if config_digest != config_descriptor.digest:
+            raise ConfigError(f"OCI config digest mismatch for {repo_ref}:{source}")
+        image_config = _loads_json(config_bytes, f"OCI config {config_key}")
+        os_name = _required_json_string(
+            image_config,
+            "os",
+            f"OCI config {config_key}",
+        )
+        architecture = _required_json_string(
+            image_config, "architecture", f"OCI config {config_key}"
+        )
+        variant_value = image_config.get("variant", "")
+        if not isinstance(variant_value, str):
+            raise ConfigError(f"OCI config {config_key} has invalid variant")
+        platform_key = (os_name, architecture, variant_value)
+        if platform_key in platforms:
+            platform = f"{os_name}/{architecture}"
+            if variant_value:
+                platform = f"{platform}/{variant_value}"
+            raise ConfigError(f"duplicate OCI index platform: {platform}")
+        platforms.add(platform_key)
+
+        platform: dict[str, str] = {"architecture": architecture, "os": os_name}
+        if variant_value:
+            platform["variant"] = variant_value
+        descriptors.append(
+            {
+                "mediaType": media_type,
+                "digest": digest,
+                "size": len(manifest_bytes),
+                "platform": platform,
+            }
+        )
+
+    index_bytes = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": OCI_INDEX_MEDIA_TYPE,
+            "manifests": descriptors,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    index_digest = f"sha256:{hashlib.sha256(index_bytes).hexdigest()}"
+    cosign = _resolve_oci_cosign_config(project_root, cosign_config)
+    signing_config = None
+    artifacts = None
+    if _cosign_enabled(cosign):
+        signing_config, artifacts = sign_oci_manifest(
+            repo=repo_ref,
+            manifest_digest=index_digest,
+            manifest_media_type=OCI_INDEX_MEDIA_TYPE,
+            manifest_size=len(index_bytes),
+            cosign=cosign,
+            project_root=project_root,
+            environ=environ,
+        )
+
+    digest_key = _manifest_key(repo_ref, index_digest)
+    try:
+        s3.put_object(
+            Bucket=bucket,
+            Key=digest_key,
+            Body=index_bytes,
+            ContentType=OCI_INDEX_MEDIA_TYPE,
+            CacheControl=OCI_IMMUTABLE_CACHE_CONTROL,
+        )
+    except Exception as exc:
+        raise ConfigError(f"S3 upload failed for {digest_key}: {exc}") from exc
+
+    if artifacts is not None and signing_config is not None:
+        upload_cosign_artifacts(s3, bucket, repo_ref, index_digest, artifacts)
+        verify_cosign_signature(
+            image=image_digest_reference(cosign.registry, repo_ref, index_digest),
+            config=signing_config,
+        )
+
+    target_key = _tag_key(repo_ref, target)
+    try:
+        s3.put_object(
+            Bucket=bucket,
+            Key=target_key,
+            Body=index_bytes,
+            ContentType=OCI_INDEX_MEDIA_TYPE,
+            CacheControl=OCI_MUTABLE_CACHE_CONTROL,
+        )
+    except Exception as exc:
+        raise ConfigError(f"S3 upload failed for {target_key}: {exc}") from exc
+    _upload_tags_list(s3, bucket, repo_ref, _list_oci_tags(s3, bucket, repo_ref))
+    sources_text = ", ".join(source_tags)
+    log(f"Uploaded OCI index {repo_ref}:{target} from: {sources_text}")
+    return 0
+
+
 def promote_oci_tags(
     promotions: tuple[OciTagPromotion, ...],
     *,
@@ -1106,25 +1264,71 @@ def _referenced_oci_digests(
     ) as manifests:
         for key, _tag in manifests:
             data = _read_s3_object(client, bucket, key)
-            manifest_digests.add(f"sha256:{hashlib.sha256(data).hexdigest()}")
-            manifest = _loads_json(data, f"manifest object {key}")
-            config = _descriptor(
-                manifest.get("config"),
-                default_media_type=DEFAULT_CONFIG_MEDIA_TYPE,
-                what=f"manifest object {key} config",
+            digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+            _add_live_manifest_references(
+                client,
+                bucket,
+                ref,
+                data,
+                key,
+                digest,
+                manifest_digests,
+                blob_digests,
             )
-            blob_digests.add(config.digest)
-            layers = manifest.get("layers")
-            if not isinstance(layers, list):
-                raise ConfigError(f"manifest object {key} must contain a layers list")
-            for index, layer in enumerate(layers):
-                descriptor = _descriptor(
-                    layer,
-                    default_media_type=DEFAULT_LAYER_MEDIA_TYPE,
-                    what=f"manifest object {key} layer {index}",
+    return OciReferences(
+        manifest_digests=manifest_digests,
+        blob_digests=blob_digests,
+    )
+
+
+def _add_live_manifest_references(
+    client: Any,
+    bucket: str,
+    ref: str,
+    data: bytes,
+    key: str,
+    digest: str,
+    manifest_digests: set[str],
+    blob_digests: set[str],
+) -> None:
+    if digest in manifest_digests:
+        return
+    if f"sha256:{hashlib.sha256(data).hexdigest()}" != digest:
+        raise ConfigError(f"OCI manifest digest mismatch for {key}")
+    manifest_digests.add(digest)
+    manifest = _loads_json(data, f"manifest object {key}")
+    media_type = manifest.get("mediaType", DEFAULT_MANIFEST_MEDIA_TYPE)
+    if media_type in (OCI_INDEX_MEDIA_TYPE, DOCKER_MANIFEST_LIST_MEDIA_TYPE):
+        children = manifest.get("manifests")
+        if not isinstance(children, list):
+            raise ConfigError(f"OCI image index {key} must contain a manifests list")
+        for index, child in enumerate(children):
+            descriptor = _descriptor(
+                child,
+                default_media_type=DEFAULT_MANIFEST_MEDIA_TYPE,
+                what=f"OCI image index {key} manifest {index}",
+            )
+            child_key = _manifest_key(ref, descriptor.digest)
+            child_data = _read_s3_object(client, bucket, child_key)
+            if len(child_data) != descriptor.size:
+                raise ConfigError(
+                    f"OCI manifest size mismatch for {child_key}: "
+                    f"expected {descriptor.size}, got {len(child_data)}"
                 )
-                blob_digests.add(descriptor.digest)
-    return OciReferences(manifest_digests=manifest_digests, blob_digests=blob_digests)
+            _add_live_manifest_references(
+                client,
+                bucket,
+                ref,
+                child_data,
+                child_key,
+                descriptor.digest,
+                manifest_digests,
+                blob_digests,
+            )
+        return
+
+    references = OciReferences(manifest_digests, blob_digests)
+    _add_manifest_blob_references(manifest, references, key)
 
 
 def _read_s3_object(client: Any, bucket: str, key: str) -> bytes:

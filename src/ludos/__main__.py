@@ -40,6 +40,7 @@ from .upload.flatpaks import (
 )
 from .upload.gpg import sign_detached, sign_file
 from .upload.registry import (
+    create_oci_index,
     delete_oci_tags,
     list_oci_tags,
     prune_oci_tags,
@@ -471,6 +472,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Tag to publish. May be specified more than once.",
     )
     registry_oci_upload.set_defaults(func=registry_command)
+    registry_oci_index = registry_oci_subcommands.add_parser(
+        "index",
+        help="Create a multi-platform OCI image index from existing tags.",
+    )
+    registry_oci_index.add_argument(
+        "ref",
+        help="OCI repository path within the registry, without the registry host.",
+    )
+    registry_oci_index.add_argument(
+        "--tag",
+        required=True,
+        help="Target tag to publish for the image index.",
+    )
+    registry_oci_index.add_argument(
+        "--source-tag",
+        action="append",
+        required=True,
+        dest="source_tags",
+        help=(
+            "Existing platform-specific tag to include. "
+            "May be specified more than once."
+        ),
+    )
+    registry_oci_index.set_defaults(func=registry_command)
     registry_oci_list = registry_oci_subcommands.add_parser(
         "list",
         help="List OCI tags in S3.",
@@ -708,6 +733,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--label",
         default=DEFAULT_VERSION_LABEL,
         help=f"OCI version label to compare. Defaults to {DEFAULT_VERSION_LABEL}.",
+    )
+    env_parser.add_argument(
+        "--arch",
+        default=None,
+        help="OCI architecture to inspect. Defaults to the current architecture.",
     )
     env_parser.set_defaults(func=ci_command)
     init_parser = ci_subcommands.add_parser(
@@ -1277,6 +1307,13 @@ def registry_command(args: argparse.Namespace) -> int:
                 tuple(args.tags),
                 project_root=_project_root(args),
             )
+        if args.registry_oci_action == "index":
+            return create_oci_index(
+                args.ref,
+                tuple(args.source_tags),
+                args.tag,
+                project_root=_project_root(args),
+            )
         if args.registry_oci_action == "list":
             return list_oci_tags(args.ref)
         if args.registry_oci_action == "delete":
@@ -1336,7 +1373,7 @@ def bootc_command(args: argparse.Namespace) -> int:
 
 def ci_command(args: argparse.Namespace) -> int:
     if args.ci_action == "env":
-        write_ci_env(args.manifest, args.ref, label=args.label)
+        write_ci_env(args.manifest, args.ref, label=args.label, arch=args.arch)
         return 0
     if args.ci_action == "init":
         init_ci(

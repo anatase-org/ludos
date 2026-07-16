@@ -127,13 +127,14 @@ def write_ci_env(
     ref: str,
     *,
     label: str = DEFAULT_VERSION_LABEL,
+    arch: str | None = None,
 ) -> Path:
     manifest_path = manifest_path.expanduser().resolve()
     cache_version = _default_cache_version()
     tag = _manifest_tag(manifest_path, version=cache_version)
     missing_remote = False
     try:
-        labels = _inspect_remote_labels(ref)
+        labels = _inspect_remote_labels(ref, arch=arch)
     except ConfigError:
         if _remote_cache_image_exists(ref):
             raise
@@ -185,13 +186,17 @@ def _manifest_tag(manifest_path: Path, version: str | None = None) -> str:
     return _substitute_variables(manifest.tag, env)
 
 
-def _inspect_remote_labels(ref: str) -> dict[str, str]:
+def _inspect_remote_labels(ref: str, *, arch: str | None = None) -> dict[str, str]:
     skopeo = shutil.which("skopeo")
     if not skopeo:
         raise ConfigError("skopeo must be installed to inspect remote OCI images")
     transport_ref = ref if "://" in ref else f"docker://{ref}"
+    command = [skopeo, "inspect", "--no-tags"]
+    if arch:
+        command.extend(("--override-arch", arch))
+    command.append(transport_ref)
     result = subprocess.run(
-        [skopeo, "inspect", "--no-tags", transport_ref],
+        command,
         check=False,
         text=True,
         capture_output=True,

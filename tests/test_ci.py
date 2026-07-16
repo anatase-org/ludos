@@ -63,6 +63,7 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.manifest, Path("anatase.yml"))
         self.assertEqual(args.ref, "ghcr.io/test/anatase:latest")
         self.assertEqual(args.label, "org.opencontainers.image.version")
+        self.assertIsNone(args.arch)
 
     def test_parser_accepts_custom_env_label(self) -> None:
         args = build_parser().parse_args(
@@ -77,6 +78,20 @@ class CiParserTests(unittest.TestCase):
         )
 
         self.assertEqual(args.label, "com.example.version")
+
+    def test_parser_accepts_env_architecture(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "env",
+                "anatase.yml",
+                "i.anatase.org/anatase:rolling",
+                "--arch",
+                "amd64",
+            ]
+        )
+
+        self.assertEqual(args.arch, "amd64")
 
     def test_parser_accepts_init_ci_options(self) -> None:
         parser = build_parser()
@@ -355,6 +370,7 @@ class CiParserTests(unittest.TestCase):
             Path("anatase.yml"),
             "ghcr.io/test/anatase:latest",
             label="org.opencontainers.image.version",
+            arch=None,
         )
 
     def test_ci_command_calls_init_ci(self) -> None:
@@ -731,6 +747,62 @@ class CiEnvTests(unittest.TestCase):
             check=False,
             text=True,
             capture_output=True,
+        )
+
+    def test_inspects_remote_image_labels_for_selected_architecture(self) -> None:
+        result = SimpleNamespace(
+            returncode=0,
+            stdout='{"Labels":{"org.opencontainers.image.version":"20260713.2"}}',
+        )
+        with (
+            patch("ludos.ci.shutil.which", return_value="/usr/bin/skopeo"),
+            patch("ludos.ci.subprocess.run", return_value=result) as run,
+        ):
+            labels = _inspect_remote_labels(
+                "i.anatase.org/anatase:rolling",
+                arch="amd64",
+            )
+
+        self.assertEqual(
+            labels,
+            {"org.opencontainers.image.version": "20260713.2"},
+        )
+        run.assert_called_once_with(
+            [
+                "/usr/bin/skopeo",
+                "inspect",
+                "--no-tags",
+                "--override-arch",
+                "amd64",
+                "docker://i.anatase.org/anatase:rolling",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_write_ci_env_passes_selected_architecture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            manifest = Path(temp) / "anatase.yml"
+            with (
+                patch("ludos.ci._manifest_tag", return_value="20260713"),
+                patch("ludos.ci._default_cache_version", return_value="20260713"),
+                patch(
+                    "ludos.ci._inspect_remote_labels",
+                    return_value={
+                        "org.opencontainers.image.version": "20260713"
+                    },
+                ) as inspect,
+            ):
+                write_ci_env(
+                    manifest,
+                    "i.anatase.org/anatase:rolling",
+                    arch="amd64",
+                )
+
+        inspect.assert_called_once_with(
+            "i.anatase.org/anatase:rolling",
+            arch="amd64",
         )
 
 

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import call, patch
 
 from ludos.__main__ import build_parser
@@ -16,7 +17,9 @@ from ludos.upload.registry import (
     DEFAULT_MANIFEST_MEDIA_TYPE,
     OCI_IMMUTABLE_CACHE_CONTROL,
     OCI_MUTABLE_CACHE_CONTROL,
+    OCI_INDEX_MEDIA_TYPE,
     OciTagPromotion,
+    create_oci_index,
     delete_oci_tags,
     list_oci_tags,
     prune_oci_tags,
@@ -35,6 +38,259 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class UploadRegistryTests(unittest.TestCase):
+    def test_create_oci_index_publishes_platform_descriptors(self) -> None:
+        x86 = _platform_registry_objects("anatase", "x86_64", "amd64")
+        arm = _platform_registry_objects("anatase", "aarch64", "arm64")
+        client = FakeS3Client({**x86.objects, **arm.objects})
+
+        self.assertEqual(
+            create_oci_index(
+                "anatase",
+                ("x86_64", "aarch64"),
+                "rolling",
+                environ=ENV,
+                client=client,
+                cosign_config=OciCosignConfig(),
+            ),
+            0,
+        )
+
+        index_bytes = client.objects[
+            ("anatase-artifacts", "v2/anatase/manifests/rolling")
+        ]
+        index = json.loads(index_bytes)
+        self.assertEqual(index["schemaVersion"], 2)
+        self.assertEqual(index["mediaType"], OCI_INDEX_MEDIA_TYPE)
+        self.assertEqual(
+            index["manifests"],
+            [
+                {
+                    "digest": x86.manifest_digest,
+                    "mediaType": DEFAULT_MANIFEST_MEDIA_TYPE,
+                    "platform": {"architecture": "amd64", "os": "linux"},
+                    "size": len(x86.manifest_bytes),
+                },
+                {
+                    "digest": arm.manifest_digest,
+                    "mediaType": DEFAULT_MANIFEST_MEDIA_TYPE,
+                    "platform": {"architecture": "arm64", "os": "linux"},
+                    "size": len(arm.manifest_bytes),
+                },
+            ],
+        )
+        index_digest = f"sha256:{hashlib.sha256(index_bytes).hexdigest()}"
+        self.assertEqual(
+            client.objects[
+                ("anatase-artifacts", f"v2/anatase/manifests/{index_digest}")
+            ],
+            index_bytes,
+        )
+        self.assertEqual(
+            json.loads(client.objects[("anatase-artifacts", "v2/anatase/tags/list")]),
+            {"name": "anatase", "tags": ["aarch64", "rolling", "x86_64"]},
+        )
+
+    def test_create_oci_index_allows_one_platform(self) -> None:
+        x86 = _platform_registry_objects("anatase", "x86_64", "amd64")
+        client = FakeS3Client(x86.objects)
+
+        create_oci_index(
+            "anatase",
+            ("x86_64",),
+            "rolling",
+            environ=ENV,
+            client=client,
+            cosign_config=OciCosignConfig(),
+        )
+
+        index = json.loads(
+            client.objects[("anatase-artifacts", "v2/anatase/manifests/rolling")]
+        )
+        self.assertEqual(len(index["manifests"]), 1)
+
+    def test_create_oci_index_rejects_duplicate_platform_before_writing(self) -> None:
+        first = _platform_registry_objects("anatase", "first", "amd64")
+        second = _platform_registry_objects(
+            "anatase",
+            "second",
+            "amd64",
+            config_extra={"created": "later"},
+        )
+        old = b"old rolling manifest"
+        client = FakeS3Client(
+            {
+                **first.objects,
+                **second.objects,
+                ("anatase-artifacts", "v2/anatase/manifests/rolling"): old,
+            }
+        )
+
+        with self.assertRaisesRegex(ConfigError, "duplicate OCI index platform"):
+            create_oci_index(
+                "anatase",
+                ("first", "second"),
+                "rolling",
+                environ=ENV,
+                client=client,
+                cosign_config=OciCosignConfig(),
+            )
+
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "v2/anatase/manifests/rolling")],
+            old,
+        )
+        self.assertEqual(client.puts, [])
+
+    def test_create_oci_index_rejects_missing_source_before_writing(self) -> None:
+        old = b"old rolling manifest"
+        client = FakeS3Client(
+            {("anatase-artifacts", "v2/anatase/manifests/rolling"): old}
+        )
+
+        with self.assertRaisesRegex(ConfigError, "OCI source tag is missing"):
+            create_oci_index(
+                "anatase",
+                ("x86_64",),
+                "rolling",
+                environ=ENV,
+                client=client,
+                cosign_config=OciCosignConfig(),
+            )
+
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "v2/anatase/manifests/rolling")],
+            old,
+        )
+        self.assertEqual(client.puts, [])
+
+    def test_create_oci_index_signs_before_updating_target(self) -> None:
+        x86 = _platform_registry_objects("anatase", "x86_64", "amd64")
+        old = b"old rolling manifest"
+        client = FakeS3Client(
+            {
+                **x86.objects,
+                ("anatase-artifacts", "v2/anatase/manifests/rolling"): old,
+            }
+        )
+        cosign = _cosign_config()
+
+        with patch(
+            "ludos.upload.registry.sign_oci_manifest",
+            side_effect=ConfigError("signing failed"),
+        ) as sign:
+            with self.assertRaisesRegex(ConfigError, "signing failed"):
+                create_oci_index(
+                    "anatase",
+                    ("x86_64",),
+                    "rolling",
+                    environ=ENV,
+                    client=client,
+                    cosign_config=cosign,
+                )
+
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "v2/anatase/manifests/rolling")],
+            old,
+        )
+        self.assertEqual(client.puts, [])
+        sign.assert_called_once()
+
+    def test_create_oci_index_uploads_and_verifies_signature(self) -> None:
+        x86 = _platform_registry_objects("anatase", "x86_64", "amd64")
+        client = FakeS3Client(x86.objects)
+        signing_config = SimpleNamespace(registry="https://i.example.test")
+
+        def sign(**kwargs: object) -> tuple[object, object]:
+            return signing_config, build_cosign_artifacts(
+                payload=b"payload\n",
+                signature=b"signature",
+                certificate="leaf\n",
+                manifest_digest=str(kwargs["manifest_digest"]),
+                manifest_media_type=str(kwargs["manifest_media_type"]),
+                manifest_size=int(kwargs["manifest_size"]),
+            )
+
+        with (
+            patch("ludos.upload.registry.sign_oci_manifest", side_effect=sign),
+            patch("ludos.upload.registry.verify_cosign_signature") as verify,
+        ):
+            create_oci_index(
+                "anatase",
+                ("x86_64",),
+                "rolling",
+                environ=ENV,
+                client=client,
+                cosign_config=_cosign_config(),
+            )
+
+        index_bytes = client.objects[
+            ("anatase-artifacts", "v2/anatase/manifests/rolling")
+        ]
+        index_digest = f"sha256:{hashlib.sha256(index_bytes).hexdigest()}"
+        self.assertIn(
+            ("anatase-artifacts", f"v2/anatase/referrers/{index_digest}"),
+            client.objects,
+        )
+        verify.assert_called_once()
+
+    def test_create_oci_index_rejects_nested_index(self) -> None:
+        nested = json.dumps(
+            {
+                "schemaVersion": 2,
+                "mediaType": OCI_INDEX_MEDIA_TYPE,
+                "manifests": [],
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        client = FakeS3Client(
+            {("anatase-artifacts", "v2/anatase/manifests/x86_64"): nested}
+        )
+
+        with self.assertRaisesRegex(ConfigError, "already an image index"):
+            create_oci_index(
+                "anatase",
+                ("x86_64",),
+                "rolling",
+                environ=ENV,
+                client=client,
+                cosign_config=OciCosignConfig(),
+            )
+
+        self.assertEqual(client.puts, [])
+
+    def test_promote_oci_index_preserves_content_type(self) -> None:
+        index = json.dumps(
+            {
+                "schemaVersion": 2,
+                "mediaType": OCI_INDEX_MEDIA_TYPE,
+                "manifests": [],
+            }
+        ).encode("utf-8")
+
+        class IndexClient(FakeS3Client):
+            def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+                response: dict[str, object] = super().get_object(
+                    Bucket=Bucket,
+                    Key=Key,
+                )
+                response["ContentType"] = OCI_INDEX_MEDIA_TYPE
+                return response
+
+        client = IndexClient(
+            {("anatase-artifacts", "v2/anatase/manifests/rolling"): index}
+        )
+
+        promote_oci_tags(
+            (OciTagPromotion("anatase", "rolling", "stable"),),
+            environ=ENV,
+            client=client,
+        )
+
+        target = next(
+            put for put in client.puts if put["Key"] == "v2/anatase/manifests/stable"
+        )
+        self.assertEqual(target["ContentType"], OCI_INDEX_MEDIA_TYPE)
+
     def test_promote_oci_tags_preflights_mirrors_and_deduplicates(self) -> None:
         manifest = json.dumps({"schemaVersion": 2, "layers": []}).encode()
         client = FakeS3Client(
@@ -214,6 +470,28 @@ class UploadRegistryTests(unittest.TestCase):
                     ["registry", "oci", "delete", "images/anatase"]
                 )
 
+    def test_index_oci_parser(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "oci",
+                "index",
+                "anatase",
+                "--tag",
+                "rolling",
+                "--source-tag",
+                "x86_64",
+                "--source-tag",
+                "aarch64",
+            ]
+        )
+
+        self.assertEqual(args.registry_action, "oci")
+        self.assertEqual(args.registry_oci_action, "index")
+        self.assertEqual(args.ref, "anatase")
+        self.assertEqual(args.tag, "rolling")
+        self.assertEqual(args.source_tags, ["x86_64", "aarch64"])
+
     def test_prune_oci_parser(self) -> None:
         args = build_parser().parse_args(
             [
@@ -276,6 +554,30 @@ class UploadRegistryTests(unittest.TestCase):
             "images/anatase",
             ("latest", "f44"),
             dry_run=True,
+        )
+
+    def test_index_oci_command_dispatches(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "oci",
+                "index",
+                "anatase",
+                "--tag",
+                "rolling",
+                "--source-tag",
+                "x86_64",
+            ]
+        )
+
+        with patch("ludos.__main__.create_oci_index", return_value=0) as create:
+            self.assertEqual(args.func(args), 0)
+
+        create.assert_called_once_with(
+            "anatase",
+            ("x86_64",),
+            "rolling",
+            project_root=Path.cwd(),
         )
 
     def test_list_oci_command_dispatches(self) -> None:
@@ -1193,6 +1495,44 @@ class UploadRegistryTests(unittest.TestCase):
             ],
         )
 
+    def test_tree_shake_oci_follows_indexed_manifests(self) -> None:
+        x86 = _platform_registry_objects("images/anatase", "x86_64", "amd64")
+        client = FakeS3Client(x86.objects)
+        create_oci_index(
+            "images/anatase",
+            ("x86_64",),
+            "rolling",
+            environ=ENV,
+            client=client,
+            cosign_config=OciCosignConfig(),
+        )
+        client.objects[
+            (
+                "anatase-artifacts",
+                "v2/images/anatase/manifests/sha256:" + "9" * 64,
+            )
+        ] = _manifest_bytes("sha256:" + "8" * 64)
+
+        self.assertEqual(
+            tree_shake_oci("images/anatase", environ=ENV, client=client),
+            0,
+        )
+
+        self.assertIn(
+            (
+                "anatase-artifacts",
+                f"v2/images/anatase/manifests/{x86.manifest_digest}",
+            ),
+            client.objects,
+        )
+        self.assertNotIn(
+            (
+                "anatase-artifacts",
+                "v2/images/anatase/manifests/sha256:" + "9" * 64,
+            ),
+            client.objects,
+        )
+
     def test_tree_shake_oci_dry_run_does_not_delete(self) -> None:
         config_digest = "sha256:" + "1" * 64
         layer_digest = "sha256:" + "2" * 64
@@ -1547,6 +1887,18 @@ class TinyFlatpakRegistryObjects:
         self.manifest_digest = f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
 
 
+class TinyPlatformRegistryObjects:
+    def __init__(
+        self,
+        *,
+        objects: dict[tuple[str, str], bytes],
+        manifest_bytes: bytes,
+    ) -> None:
+        self.objects = objects
+        self.manifest_bytes = manifest_bytes
+        self.manifest_digest = f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
+
+
 def _manifest_bytes(config_digest: str, *layer_digests: str) -> bytes:
     return json.dumps(
         {
@@ -1568,6 +1920,56 @@ def _manifest_bytes(config_digest: str, *layer_digests: str) -> bytes:
         },
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _platform_registry_objects(
+    repo_ref: str,
+    tag: str,
+    architecture: str,
+    *,
+    variant: str = "",
+    config_extra: dict[str, object] | None = None,
+) -> TinyPlatformRegistryObjects:
+    config: dict[str, object] = {
+        "architecture": architecture,
+        "os": "linux",
+        "rootfs": {"type": "layers", "diff_ids": []},
+    }
+    if variant:
+        config["variant"] = variant
+    if config_extra:
+        config.update(config_extra)
+    config_bytes = json.dumps(config, separators=(",", ":")).encode("utf-8")
+    config_digest = f"sha256:{hashlib.sha256(config_bytes).hexdigest()}"
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": DEFAULT_MANIFEST_MEDIA_TYPE,
+        "config": {
+            "mediaType": DEFAULT_CONFIG_MEDIA_TYPE,
+            "digest": config_digest,
+            "size": len(config_bytes),
+        },
+        "layers": [],
+    }
+    manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+    manifest_digest = f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
+    return TinyPlatformRegistryObjects(
+        objects={
+            (
+                "anatase-artifacts",
+                f"v2/{repo_ref}/manifests/{tag}",
+            ): manifest_bytes,
+            (
+                "anatase-artifacts",
+                f"v2/{repo_ref}/manifests/{manifest_digest}",
+            ): manifest_bytes,
+            (
+                "anatase-artifacts",
+                f"v2/{repo_ref}/blobs/{config_digest}",
+            ): config_bytes,
+        },
+        manifest_bytes=manifest_bytes,
+    )
 
 
 def _flatpak_registry_objects(
