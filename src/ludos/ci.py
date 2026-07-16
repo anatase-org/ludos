@@ -1636,6 +1636,11 @@ def _metadata_from_mapping(
         spec_source_revisions=_tuple_triples(build.get("spec_source_revisions")),
         latest_image=str(build.get("latest_image", "")),
         ci_registry=str(build.get("ci_registry", "")),
+        cache_manifest_labels=(
+            _tuple_pairs(build.get("cache_manifest_labels"))
+            if build.get("cache_manifest_labels") is not None
+            else None
+        ),
     )
 
 
@@ -1815,6 +1820,7 @@ def _write_ci_build_manifest(
                 if registry
                 else ""
             ),
+            expected_labels=manifest_metadata.manifest_labels,
         )
     )
     contexts_by_manifest = {
@@ -2036,12 +2042,16 @@ def _ci_output_is_current(
     podman: str,
     ci_registry: str,
     published_ref: str,
+    expected_labels: tuple[tuple[str, str], ...] = tuple(),
 ) -> bool:
     if published_ref:
         exists = _remote_cache_image_exists(published_ref)
         if exists:
             labels = _inspect_remote_labels(published_ref)
-            exists = labels.get(LUDOS_TAG_LABEL) == _image_tag(image)
+            exists = (
+                labels.get(LUDOS_TAG_LABEL) == _image_tag(image)
+                and all(labels.get(key) == value for key, value in expected_labels)
+            )
         action = "Reusing" if exists else "Creating"
         log(f"{action} {image} Image")
         return exists

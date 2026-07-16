@@ -25,6 +25,7 @@ from .model import (
     ConfigError,
     FlatpakGpgConfig,
     FlatpakImagesConfig,
+    Manifest,
     ManifestValidation,
     OciCosignConfig,
     Project,
@@ -62,6 +63,7 @@ class ResolvedManifestContext:
     orchestrator: str
     output_image: str
     manifest_env: dict[str, str]
+    cache_manifest_env: dict[str, str]
     cache_version: str
     cache_dir: Path
     distro_cache_dir: Path
@@ -125,35 +127,33 @@ def resolve_manifest_context(
     root_dir = manifest_path.resolve().parent
     project_config = _project_upload_config(root_dir)
     image = _cache_name(manifest_path.resolve().stem, "image")
-    manifest_env = {key: str(value) for key, value in validation.manifest.env.items()}
+    manifest_defaults = {
+        key: str(value) for key, value in validation.manifest.env.items()
+    }
     local_values = _load_dotenv(root_dir / ".env")
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
     local_prefix = _local_prefix(local_prefix)
-    manifest_env.update(local_values)
     if cache_version is None:
         cache_version = _default_cache_version()
     else:
         cache_version = _cache_name(cache_version, "version")
-    manifest_env["version"] = cache_version
-    releasever = _cache_name(
-        _substitute_variables(validation.manifest.releasever, manifest_env),
-        "releasever",
+    manifest_env = _resolve_manifest_environment(
+        validation.manifest,
+        manifest_defaults,
+        local_values,
+        cache_version,
     )
-    manifest_env["releasever"] = releasever
-    arch = _cache_name(
-        _substitute_variables(str(manifest_env.get("arch", "")), manifest_env),
-        "arch",
+    cache_local_values = dict(local_values)
+    cache_local_values["dist"] = ""
+    cache_manifest_env = _resolve_manifest_environment(
+        validation.manifest,
+        manifest_defaults,
+        cache_local_values,
+        cache_version,
     )
-    manifest_env["arch"] = arch
-    manifest_env = {
-        key: _substitute_variables(value, manifest_env)
-        for key, value in manifest_env.items()
-    }
-    distro = _cache_name(
-        _substitute_variables(validation.manifest.distro, manifest_env),
-        "distro",
-    )
-    manifest_env["distro"] = distro
+    releasever = manifest_env["releasever"]
+    arch = manifest_env["arch"]
+    distro = manifest_env["distro"]
     orchestrator_source = _substitute_variables(
         validation.manifest.orchestrator, manifest_env
     )
@@ -310,6 +310,7 @@ def resolve_manifest_context(
         orchestrator=orchestrator,
         output_image=output_image,
         manifest_env=manifest_env,
+        cache_manifest_env=cache_manifest_env,
         cache_version=cache_version,
         cache_dir=cache_dir,
         distro_cache_dir=distro_cache_dir,
@@ -334,6 +335,36 @@ def resolve_manifest_context(
         flatpak_gpg=project_config.flatpak_gpg,
         oci_cosign=project_config.oci_cosign,
     )
+
+
+def _resolve_manifest_environment(
+    manifest: Manifest,
+    defaults: dict[str, str],
+    local_values: dict[str, str],
+    cache_version: str,
+) -> dict[str, str]:
+    env = dict(defaults)
+    env.update(local_values)
+    env["version"] = cache_version
+    releasever = _cache_name(
+        _substitute_variables(manifest.releasever, env),
+        "releasever",
+    )
+    env["releasever"] = releasever
+    arch = _cache_name(
+        _substitute_variables(str(env.get("arch", "")), env),
+        "arch",
+    )
+    env["arch"] = arch
+    env = {
+        key: _substitute_variables(value, env)
+        for key, value in env.items()
+    }
+    env["distro"] = _cache_name(
+        _substitute_variables(manifest.distro, env),
+        "distro",
+    )
+    return env
 
 
 def _project_upload_config(root_dir: Path) -> Project:

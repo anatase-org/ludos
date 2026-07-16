@@ -158,6 +158,7 @@ class ResolvedBuildMetadata:
     spec_source_revisions: tuple[tuple[str, str, str], ...]
     latest_image: str = ""
     ci_registry: str = ""
+    cache_manifest_labels: tuple[tuple[str, str], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -1062,6 +1063,11 @@ def _resolve_manifest_metadata(
         (key, _substitute_variables(value, manifest_env))
         for key, value in validation.manifest.labels.items()
     )
+    cache_manifest_env = getattr(context, "cache_manifest_env", manifest_env)
+    cache_manifest_labels = tuple(
+        (key, _substitute_variables(value, cache_manifest_env))
+        for key, value in validation.manifest.labels.items()
+    )
 
     metadata = ResolvedBuildMetadata(
         image=image,
@@ -1074,6 +1080,7 @@ def _resolve_manifest_metadata(
         output_image=_local_image(local_prefix, "images", f"{distro}-{image}"),
         latest_image=_local_image(local_prefix, "images", image),
         manifest_labels=manifest_labels,
+        cache_manifest_labels=cache_manifest_labels,
         manifest_env=tuple(sorted(manifest_env.items())),
         requested_packages=requested_packages,
         resolved_packages=resolved_packages,
@@ -2463,6 +2470,11 @@ def _metadata_with_final_image(
 
 
 def _final_manifest_hash(metadata: ResolvedBuildMetadata, *, mode: str) -> str:
+    manifest_labels = (
+        metadata.cache_manifest_labels
+        if metadata.cache_manifest_labels is not None
+        else metadata.manifest_labels
+    )
     payload = {
         "mode": mode,
         "image": metadata.image,
@@ -2471,7 +2483,7 @@ def _final_manifest_hash(metadata: ResolvedBuildMetadata, *, mode: str) -> str:
         "arch": metadata.arch,
         "local_prefix": metadata.local_prefix,
         "orchestrator": metadata.orchestrator,
-        "manifest_labels": metadata.manifest_labels,
+        "manifest_labels": manifest_labels,
         "generated_labels": (LUDOS_TAG_LABEL,),
         "common_packages": metadata.common_packages,
         "bootstrap_packages": metadata.bootstrap_packages,

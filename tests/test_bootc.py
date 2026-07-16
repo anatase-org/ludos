@@ -285,7 +285,7 @@ class BootcCommandTests(unittest.TestCase):
                         {
                             "Labels": {
                                 "org.opencontainers.image.title": "Anatase",
-                                "org.opencontainers.image.version": "44.20260622",
+                                "org.opencontainers.image.version": "old-version",
                                 "org.anatase.ludos.tag": "f44-x86_64-anatase-deadbeef",
                             }
                         },

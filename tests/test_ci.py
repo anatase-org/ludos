@@ -1593,6 +1593,61 @@ class PrepareCiTests(unittest.TestCase):
             expected_refs,
         )
 
+    def test_prepare_ci_reexports_matching_hash_for_changed_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+            context = self._context(root)
+            metadata = replace(
+                self._metadata(root, context),
+                manifest_labels=(
+                    ("org.opencontainers.image.version", "20260713.13"),
+                ),
+                cache_manifest_labels=(
+                    ("org.opencontainers.image.version", "20260713"),
+                ),
+            )
+            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
+
+            with (
+                patch("ludos.ci.resolve_build_manifest_context", return_value=context),
+                patch(
+                    "ludos.ci.resolve_build_manifests_from_contexts",
+                    return_value=(metadata,),
+                ),
+                patch(
+                    "ludos.ci.plan_manifest_flatpaks_with_context",
+                    return_value=tuple(),
+                ),
+                patch("ludos.ci._remote_cache_image_exists", return_value=True),
+                patch(
+                    "ludos.ci._inspect_remote_labels",
+                    return_value={
+                        "org.anatase.ludos.tag": ci_metadata.output_image.rsplit(
+                            ":", 1
+                        )[-1],
+                        "org.opencontainers.image.version": "20260713.12",
+                    },
+                ),
+                patch("ludos.ci._ci_remote_image_exists", return_value=True),
+                patch("ludos.ci._remove_tree"),
+                patch("ludos.ci.log"),
+            ):
+                output = prepare_ci(
+                    (manifest,),
+                    cache_dir=cache,
+                    tag="rolling",
+                    registry="i.anatase.org/",
+                )
+            data = yaml.safe_load(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            tuple(data["images"]),
+            (ci_metadata.output_image.rsplit(":", 1)[-1],),
+        )
+
     def test_prepare_ci_keeps_existing_output_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

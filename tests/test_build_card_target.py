@@ -21,6 +21,7 @@ from ludos.build import (
     _build_final_manifest_image,
     _inspect_oci_image,
     _render_final_containerfile,
+    _final_manifest_hash,
     _resolve_manifest_metadata,
     _resolve_cache_key,
 )
@@ -184,7 +185,8 @@ class TargetCardBuildTests(unittest.TestCase):
                 "version: 1\n",
                 "version: 1\n"
                 "env:\n"
-                "  tag: $releasever.$version\n"
+                "  dist: ''\n"
+                "  tag: $releasever.$version$dist\n"
                 "labels:\n"
                 "  org.opencontainers.image.version: $tag\n"
                 "  org.opencontainers.image.title: Anatase\n",
@@ -192,6 +194,7 @@ class TargetCardBuildTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        (self.root / ".env").write_text("dist=.9\n", encoding="utf-8")
 
         def resolve_packages(
             _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
@@ -224,12 +227,34 @@ class TargetCardBuildTests(unittest.TestCase):
             )
 
         self.assertIn(
-            ("org.opencontainers.image.version", "44.20260622"),
+            ("org.opencontainers.image.version", "44.20260622.9"),
             metadata.manifest_labels,
+        )
+        self.assertEqual(dict(metadata.manifest_env)["dist"], ".9")
+        self.assertIn(
+            ("org.opencontainers.image.version", "44.20260622"),
+            metadata.cache_manifest_labels,
         )
         self.assertIn(
             ("org.opencontainers.image.title", "Anatase"),
             metadata.manifest_labels,
+        )
+
+    def test_final_manifest_hash_uses_dist_neutral_labels(self) -> None:
+        cache_labels = (("org.opencontainers.image.version", "20260713"),)
+        first = replace(
+            self._metadata(),
+            manifest_labels=(("org.opencontainers.image.version", "20260713.12"),),
+            cache_manifest_labels=cache_labels,
+        )
+        second = replace(
+            first,
+            manifest_labels=(("org.opencontainers.image.version", "20260713.13"),),
+        )
+
+        self.assertEqual(
+            _final_manifest_hash(first, mode="combined"),
+            _final_manifest_hash(second, mode="combined"),
         )
 
     def test_spec_hash_is_not_part_of_builder_image_hash(self) -> None:

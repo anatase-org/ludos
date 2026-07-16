@@ -150,7 +150,8 @@ def _export_bootc_images(
 
     for manifest, result in zip(metadata, results, strict=True):
         image = result.output_image
-        image_labels = _image_labels(_image_inspect(result.podman, image))
+        image_labels = dict(_image_labels(_image_inspect(result.podman, image)))
+        image_labels.update(manifest.manifest_labels)
         safe_name = _bootc_artifact_name(manifest.image, manifest.distro)
         work_dir = work_root / safe_name
         git_dir = Path(manifest.root_dir)
@@ -177,7 +178,7 @@ def _export_bootc_images(
             contentmeta_fn=str(contentmeta),
             chunks_fn=str(chunks_path),
             result_fn=str(result_fn),
-            labels=_manifest_labels(image_labels),
+            labels=_manifest_labels(tuple(sorted(image_labels.items()))),
             revision=revision,
             git_dir=str(git_dir),
             ostree_image=image,
