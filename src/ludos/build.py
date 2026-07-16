@@ -1728,6 +1728,7 @@ LUDOS_BOOTSTRAP
     all_oci_package_ids = set().union(
         *oci_package_ids_by_block.values()
     ) if oci_package_ids_by_block else set()
+    all_replacement_package_ids = all_built_package_ids | all_oci_package_ids
     install_steps = []
     postprocess_steps = []
 
@@ -1738,9 +1739,7 @@ LUDOS_BOOTSTRAP
                 package
                 for package in metadata.common_packages
                 if _resolved_package_id(package_id_by_nevra, package)
-                not in all_built_package_ids
-                and _resolved_package_id(package_id_by_nevra, package)
-                not in all_oci_package_ids
+                not in all_replacement_package_ids
             ),
         )
         mounts = [
@@ -1774,7 +1773,13 @@ LUDOS_BOOTSTRAP
                     for rpm_file in oci_rpm_files_by_index.get(oci_index, tuple())
                 )
                 cache_images.append(f"{oci_plan.image}@{oci_plan.digest}")
-            card_block_packages = card_packages.get(card_name, tuple())
+            card_block_packages = tuple(
+                package
+                for package in card_packages.get(card_name, tuple())
+                if not all_replacement_package_ids
+                or _resolved_package_id(package_id_by_nevra, package)
+                not in all_replacement_package_ids
+            )
             if card_block_packages and card_name in package_stage_names:
                 mounts.append(
                     (

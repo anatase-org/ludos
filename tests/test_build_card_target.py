@@ -931,6 +931,60 @@ class TargetCardBuildTests(unittest.TestCase):
         self.assertIn("from=oci_base_scx_kernel_0,source=/files,target=/ludos/oci-files/0,ro", containerfile)
         self.assertIn("# build-image: sha256:kernel111", containerfile)
 
+    def test_combined_containerfile_omits_card_rpm_replaced_by_later_build(self) -> None:
+        metadata = replace(
+            self._metadata(),
+            card_order=("de-kde", "gaming-gamemode"),
+            card_packages=(
+                ("de-kde", ("xwayland-0:1-1.fc44.x86_64",)),
+                ("gaming-gamemode", tuple()),
+            ),
+            package_ids=(
+                ("xwayland-0:1-1.fc44.x86_64", "xwayland", "x86_64"),
+            ),
+            build_images=(
+                BuildImagePlan(
+                    block="gaming-gamemode",
+                    image="localhost/builds:f44-x86_64-gaming-gamemode",
+                    builder_image="localhost/builders:f44-x86_64-builder",
+                    builder_packages=tuple(),
+                    declared_package_ids=(("xwayland", "x86_64"),),
+                ),
+            ),
+        )
+        package_blocks = (
+            ("common", tuple()),
+            ("de-kde", ("xwayland-0:1-1.fc44.x86_64",)),
+            ("gaming-gamemode", tuple()),
+        )
+
+        containerfile = _render_final_containerfile(
+            metadata,
+            mode="combined",
+            package_blocks=package_blocks,
+            package_images_by_block={
+                "common": "localhost/cards:f44-x86_64-common-11111111",
+                "de-kde": "localhost/cards:f44-x86_64-de-kde-22222222",
+            },
+            build_images_by_block={
+                "gaming-gamemode": "localhost/builds:f44-x86_64-gaming-gamemode",
+            },
+            build_rpm_files_by_block={
+                "gaming-gamemode": ("xwayland-1-1.x86_64.rpm",),
+            },
+            card_file_cards=set(),
+            build_file_blocks=set(),
+        )
+
+        self.assertNotIn(
+            "/rpms/de_kde/xwayland-0:1-1.fc44.x86_64.rpm",
+            containerfile,
+        )
+        self.assertIn(
+            "/rpms/gaming_gamemode-build/xwayland-1-1.x86_64.rpm",
+            containerfile,
+        )
+
     def test_postprocess_heredoc_defines_requested_card_env(self) -> None:
         metadata = replace(
             self._metadata(),
