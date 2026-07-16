@@ -57,6 +57,22 @@ class UploadFlatpaksTests(unittest.TestCase):
             ],
         )
 
+    def test_plan_flatpak_promotions_overrides_host_architecture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+
+            plans = plan_flatpak_promotions(
+                manifest,
+                prefix="rolling-",
+                arch="aarch64",
+            )
+
+        self.assertEqual(
+            [(plan.ref, plan.source_tag, plan.target_tag) for plan in plans],
+            [("flatpaks/kate", "rolling-f44-aarch64", "f44-aarch64")],
+        )
+
     def test_finish_flatpak_promotions_signs_target_before_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

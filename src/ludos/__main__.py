@@ -1004,6 +1004,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refresh destination flatpak indexes after promotion.",
     )
     ci_promote_parser.add_argument(
+        "--arch",
+        action="append",
+        default=[],
+        dest="arches",
+        metavar="ARCH",
+        help=(
+            "Architecture whose flatpak distro tags should be promoted. "
+            "May be specified more than once. Defaults to the host architecture."
+        ),
+    )
+    ci_promote_parser.add_argument(
         "--prefix",
         required=True,
         help="Source prefix for flatpak distro tags.",
@@ -1445,6 +1456,7 @@ def ci_command(args: argparse.Namespace) -> int:
             prefix=args.prefix,
             from_tag=args.from_tag,
             to_tag=args.to_tag,
+            arches=tuple(args.arches),
             images=args.images,
             flatpaks=args.flatpaks,
             refresh=args.refresh,

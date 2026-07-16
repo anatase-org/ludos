@@ -273,6 +273,10 @@ class CiParserTests(unittest.TestCase):
                 "--images",
                 "--flatpaks",
                 "--refresh",
+                "--arch",
+                "x86_64",
+                "--arch",
+                "aarch64",
                 "--prefix",
                 "rolling-",
                 "--from",
@@ -287,6 +291,7 @@ class CiParserTests(unittest.TestCase):
         self.assertTrue(args.images)
         self.assertTrue(args.flatpaks)
         self.assertTrue(args.refresh)
+        self.assertEqual(args.arches, ["x86_64", "aarch64"])
         self.assertEqual(args.prefix, "rolling-")
         self.assertEqual(args.from_tag, "rolling")
         self.assertEqual(args.to_tag, "stable")
@@ -523,6 +528,10 @@ class CiParserTests(unittest.TestCase):
                 "promote",
                 "anatase.yml",
                 "--refresh",
+                "--arch",
+                "x86_64",
+                "--arch",
+                "aarch64",
                 "--prefix",
                 "rolling-",
                 "--from",
@@ -541,6 +550,7 @@ class CiParserTests(unittest.TestCase):
             prefix="rolling-",
             from_tag="rolling",
             to_tag="stable",
+            arches=("x86_64", "aarch64"),
             images=False,
             flatpaks=False,
             refresh=True,
@@ -2261,7 +2271,11 @@ class PromoteCiTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 0)
-        flatpak_plans.assert_called_once_with(manifest, prefix="rolling-")
+        flatpak_plans.assert_called_once_with(
+            manifest,
+            prefix="rolling-",
+            arch=None,
+        )
         promote.assert_called_once_with(
             (
                 OciTagPromotion("anatase", "rolling", "stable"),
@@ -2273,6 +2287,59 @@ class PromoteCiTests(unittest.TestCase):
             )
         )
         finish.assert_called_once_with((plan,), promoted, refresh=True)
+
+    def test_promote_ci_plans_flatpaks_for_each_requested_arch(self) -> None:
+        manifest = Path("anatase.yml").resolve()
+        x86 = SimpleNamespace(
+            ref="flatpaks/kate",
+            source_tag="rolling-f44-x86_64",
+            target_tag="f44-x86_64",
+        )
+        arm = SimpleNamespace(
+            ref="flatpaks/kate",
+            source_tag="rolling-f44-aarch64",
+            target_tag="f44-aarch64",
+        )
+
+        def plans(_manifest: Path, *, prefix: str, arch: str) -> tuple[object, ...]:
+            self.assertEqual(prefix, "rolling-")
+            return (x86,) if arch == "x86_64" else (arm,)
+
+        promoted = (
+            PromotedOciTag(x86.ref, x86.source_tag, x86.target_tag, "sha256:x86"),
+            PromotedOciTag(arm.ref, arm.source_tag, arm.target_tag, "sha256:arm"),
+        )
+        with (
+            patch("ludos.ci.Manifest.from_file"),
+            patch("ludos.ci.plan_flatpak_promotions", side_effect=plans) as plan,
+            patch("ludos.ci.promote_oci_tags", return_value=promoted) as promote,
+            patch("ludos.ci.finish_flatpak_promotions", return_value=0) as finish,
+        ):
+            result = promote_ci(
+                (Path("anatase.yml"),),
+                prefix="rolling-",
+                from_tag="rolling",
+                to_tag="stable",
+                arches=("x86_64", "aarch64"),
+                flatpaks=True,
+                refresh=True,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            plan.call_args_list,
+            [
+                call(manifest, prefix="rolling-", arch="x86_64"),
+                call(manifest, prefix="rolling-", arch="aarch64"),
+            ],
+        )
+        promote.assert_called_once_with(
+            (
+                OciTagPromotion(x86.ref, x86.source_tag, x86.target_tag),
+                OciTagPromotion(arm.ref, arm.source_tag, arm.target_tag),
+            )
+        )
+        finish.assert_called_once_with((x86, arm), promoted, refresh=True)
 
     def test_promote_ci_images_only_does_not_plan_flatpaks(self) -> None:
         with (

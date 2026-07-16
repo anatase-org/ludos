@@ -287,6 +287,7 @@ def plan_flatpak_promotions(
     manifest: Path,
     *,
     prefix: str,
+    arch: str | None = None,
 ) -> tuple[FlatpakPromotionPlan, ...]:
     if not prefix.strip():
         raise ConfigError("CI flatpak promotion requires a non-empty --prefix")
@@ -294,6 +295,7 @@ def plan_flatpak_promotions(
         manifest,
         cache_dir=None,
         require_podman=False,
+        arch=arch,
     )
     source_tag = f"{prefix}{context.distro}"
     plans = []
@@ -414,6 +416,7 @@ def _resolve_flatpak_upload_context(
     cache_dir: Path | None,
     require_podman: bool = True,
     require_flatpaks: bool = True,
+    arch: str | None = None,
 ) -> FlatpakUploadContext:
     manifest_path = manifest.expanduser().resolve()
     log(f"Validating manifest: {manifest}")
@@ -438,17 +441,19 @@ def _resolve_flatpak_upload_context(
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
     local_prefix = _local_prefix(local_prefix)
     manifest_env.update(local_values)
+    if arch is not None:
+        manifest_env["arch"] = _cache_name(arch, "arch")
     manifest_env["version"] = _default_cache_version()
     releasever = _cache_name(
         _substitute_variables(validation.manifest.releasever, manifest_env),
         "releasever",
     )
     manifest_env["releasever"] = releasever
-    arch = _cache_name(
+    resolved_arch = _cache_name(
         _substitute_variables(str(manifest_env.get("arch", "")), manifest_env),
         "arch",
     )
-    manifest_env["arch"] = arch
+    manifest_env["arch"] = resolved_arch
     manifest_env = {
         key: _substitute_variables(value, manifest_env)
         for key, value in manifest_env.items()
@@ -470,7 +475,7 @@ def _resolve_flatpak_upload_context(
         validation=validation,
         root_dir=root_dir,
         distro=distro,
-        arch=arch,
+        arch=resolved_arch,
         local_prefix=local_prefix,
         cache_dir=resolved_cache_dir,
         podman=podman,

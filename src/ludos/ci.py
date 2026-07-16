@@ -623,6 +623,7 @@ def promote_ci(
     prefix: str,
     from_tag: str,
     to_tag: str,
+    arches: tuple[str, ...] = tuple(),
     images: bool = False,
     flatpaks: bool = False,
     refresh: bool = False,
@@ -647,10 +648,16 @@ def promote_ci(
 
     flatpak_plans = tuple()
     if flatpaks:
+        promotion_arches: tuple[str | None, ...] = arches or (None,)
         flatpak_plans = tuple(
             plan
             for manifest_path in manifests
-            for plan in plan_flatpak_promotions(manifest_path, prefix=prefix)
+            for arch in promotion_arches
+            for plan in plan_flatpak_promotions(
+                manifest_path,
+                prefix=prefix,
+                arch=arch,
+            )
         )
         flatpak_plans = tuple(
             {
