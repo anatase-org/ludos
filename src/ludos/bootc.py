@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
+from typing import Any
 
 from . import build as build_module
 from .build import (
@@ -109,6 +110,34 @@ def bootc_create(
     finally:
         _cleanup_dnf_workspaces(metadata)
 
+    return _export_bootc_images(
+        manifests,
+        metadata,
+        results,
+        chunks=chunks_path,
+        previous_manifest=previous_manifest,
+        cache_dir=cache_root,
+        writers=writers,
+    )
+
+
+def _export_bootc_images(
+    manifests: tuple[Path, ...],
+    metadata: tuple[Any, ...],
+    results: tuple[Any, ...],
+    *,
+    chunks: Path | None = None,
+    previous_manifest: str | None = None,
+    cache_dir: Path | None = None,
+    writers: int = DEFAULT_OCI_WRITERS,
+) -> int:
+    if len(manifests) != len(metadata) or len(metadata) != len(results):
+        raise ConfigError("bootc export inputs must have matching lengths")
+    if writers < 1:
+        raise ConfigError("writers must be at least 1")
+
+    cache_root = _resolve_cache_root(manifests, cache_dir)
+    chunks_path = _resolve_chunks_path(manifests, chunks)
     ostree_dir = cache_root / "ostree"
     oci_dir = cache_root / "oci"
     work_root = cache_root / "rechunk"
@@ -119,7 +148,7 @@ def bootc_create(
         previous_manifest_path = work_root / "previous-manifest.json"
         _fetch_previous_manifest(previous_manifest, previous_manifest_path)
 
-    for manifest, result in zip(metadata, results):
+    for manifest, result in zip(metadata, results, strict=True):
         image = result.output_image
         safe_name = _bootc_artifact_name(manifest.image, manifest.distro)
         work_dir = work_root / safe_name

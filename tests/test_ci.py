@@ -40,6 +40,7 @@ from ludos.ci import (
     init_ci,
     prepare_ci,
     seed_ci,
+    upload_ci,
     write_ci_env,
 )
 from ludos.model import ConfigError, SpecBuild
@@ -185,6 +186,32 @@ class CiParserTests(unittest.TestCase):
         self.assertTrue(args.images)
         self.assertTrue(args.flatpaks)
         self.assertTrue(args.autoremove)
+
+    def test_parser_accepts_composable_ci_upload_selectors(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "upload",
+                "image-id",
+                "flatpak-id",
+                "--images",
+                "--flatpaks",
+                "--refresh",
+                "--tag",
+                "candidate",
+                "--tag",
+                "latest",
+                "--tag",
+                "stable",
+            ]
+        )
+
+        self.assertEqual(args.ci_action, "upload")
+        self.assertEqual(args.upload_ids, ["image-id", "flatpak-id"])
+        self.assertTrue(args.images)
+        self.assertTrue(args.flatpaks)
+        self.assertTrue(args.refresh)
+        self.assertEqual(args.tags, ["candidate", "latest", "stable"])
 
     def test_prepare_ci_rejects_unsupported_options(self) -> None:
         parser = build_parser()
@@ -346,6 +373,34 @@ class CiParserTests(unittest.TestCase):
             flatpaks=False,
             autoremove=True,
             ccache=True,
+        )
+
+    def test_ci_command_calls_upload_ci(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "upload",
+                "--tag",
+                "candidate",
+                "--tag",
+                "stable",
+                "image",
+                "0",
+                "--flatpaks",
+                "--refresh",
+            ]
+        )
+
+        with patch("ludos.__main__.upload_ci", return_value=0) as upload:
+            exit_code = ci_command(args)
+
+        self.assertEqual(exit_code, 0)
+        upload.assert_called_once_with(
+            ("image", "0"),
+            images=False,
+            flatpaks=True,
+            refresh=True,
+            tags=("candidate", "stable"),
         )
 
     def test_main_returns_7_for_seed_disk_space_error(self) -> None:
@@ -1637,6 +1692,150 @@ class BuildCiTests(unittest.TestCase):
             "registry.example",
             autoremove=False,
         )
+
+
+class UploadCiTests(unittest.TestCase):
+    def test_upload_ci_exports_local_image_with_explicit_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = self._write_manifest(root)
+            build_manifest = self._write_build_manifest(root, manifest)
+
+            with (
+                patch("ludos.ci.Path.cwd", return_value=root.resolve()),
+                patch("ludos.ci._ensure_image", return_value=True) as ensure,
+                patch("ludos.ci._export_bootc_images") as export,
+                patch("ludos.ci.upload_oci", return_value=0) as upload,
+            ):
+                result = upload_ci(
+                    ("f44-anatase",),
+                    build_manifest=build_manifest,
+                    tags=("candidate", "latest"),
+                )
+
+        self.assertEqual(result, 0)
+        ensure.assert_called_once_with(
+            "podman",
+            "images:f44-anatase-output",
+            "ghcr.io/example",
+        )
+        self.assertEqual(export.call_args.args[0], (manifest.resolve(),))
+        self.assertEqual(
+            export.call_args.kwargs["cache_dir"],
+            (root / "cache").resolve(),
+        )
+        upload.assert_called_once_with(
+            (root / "cache" / "oci" / "anatase-f44-x86_64").resolve(),
+            "anatase",
+            ("candidate", "latest"),
+            project_root=root.resolve(),
+        )
+
+    def test_upload_ci_uses_prepared_flatpak_image_and_refreshes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = self._write_manifest(root)
+            build_manifest = self._write_build_manifest(root, manifest)
+
+            with (
+                patch("ludos.ci.Path.cwd", return_value=root.resolve()),
+                patch("ludos.ci._ensure_image", return_value=True) as ensure,
+                patch("ludos.ci.upload_flatpaks", return_value=0) as upload,
+                patch("ludos.ci.update_flatpak_index", return_value=0) as refresh,
+            ):
+                result = upload_ci(
+                    ("f44-kate",),
+                    build_manifest=build_manifest,
+                    refresh=True,
+                )
+
+        self.assertEqual(result, 0)
+        ensure.assert_called_once_with(
+            "podman",
+            "flatpaks:f44-kate-output",
+            "ghcr.io/example",
+        )
+        upload.assert_called_once_with(
+            manifest.resolve(),
+            (Path("flatpaks/kate"),),
+            build=False,
+            cache_dir=(root / "cache").resolve(),
+            cache_only=True,
+            image_overrides={
+                "flatpaks/kate": "flatpaks:f44-kate-output",
+            },
+        )
+        refresh.assert_called_once_with(manifest.resolve())
+
+    def test_upload_ci_requires_an_output_selector(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "at least one CI upload ID"):
+            upload_ci(tuple())
+
+    def _write_manifest(self, root: Path) -> Path:
+        manifest = root / "anatase.yml"
+        manifest.write_text(
+            "\n".join(
+                [
+                    "version: 1",
+                    "env:",
+                    "  arch: x86_64",
+                    "  tag: ''",
+                    "releasever: '44'",
+                    "distro: f44-x86_64",
+                    "tag: $tag",
+                    "orchestrator: example/orchestrator:44",
+                    "bootstrap: cards/bootstrap.yml",
+                    "repos: []",
+                    "cards:",
+                    "  - cards/base.yml",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return manifest
+
+    def _write_build_manifest(self, root: Path, manifest: Path) -> Path:
+        metadata = {
+            "image": "anatase",
+            "distro": "f44-x86_64",
+            "root_dir": str(root),
+            "output_image": "images:f44-anatase-output",
+            "latest_image": "images:anatase",
+            "manifest_env": [["arch", "x86_64"], ["tag", "20260716"]],
+            "manifest_labels": [
+                ["org.opencontainers.image.version", "20260716"]
+            ],
+            "podman": "podman",
+            "cache_version": "20260713",
+            "ci_registry": "ghcr.io/example",
+        }
+        build_manifest = root / "cache" / "ci" / "build.yml"
+        build_manifest.parent.mkdir(parents=True)
+        build_manifest.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "builds": {},
+                    "images": {
+                        "f44-anatase": {
+                            "path": str(manifest),
+                            "build": metadata,
+                        }
+                    },
+                    "flatpaks": {
+                        "f44-kate": {
+                            "manifest": str(manifest),
+                            "source": "flatpaks/kate",
+                            "images": {"output": "flatpaks:f44-kate-output"},
+                            "build": metadata,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return build_manifest
 
 
 class SeedCiTests(unittest.TestCase):

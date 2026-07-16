@@ -127,6 +127,7 @@ def upload_flatpaks(
     cache_dir: Path | None = None,
     *,
     cache_only: bool = False,
+    image_overrides: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
     client: Any | None = None,
 ) -> int:
@@ -147,8 +148,9 @@ def upload_flatpaks(
         targets = _upload_targets(
             context,
             flatpaks,
-            resolve_images=resolve_images,
+            resolve_images=resolve_images and image_overrides is None,
             cache_only=cache_only,
+            image_overrides=image_overrides,
         )
         results = {}
         if build:
@@ -425,6 +427,7 @@ def _upload_targets(
     *,
     resolve_images: bool = True,
     cache_only: bool = False,
+    image_overrides: Mapping[str, str] | None = None,
 ) -> tuple[FlatpakUploadTarget, ...]:
     selected = (
         flatpaks
@@ -442,6 +445,8 @@ def _upload_targets(
     for flatpak in selected:
         path = _flatpak_card_path(_manifest_flatpak_path(flatpak, context.root_dir))
         source_ref = _manifest_flatpak_ref(flatpak, context.root_dir)
+        if image_overrides is not None and source_ref not in image_overrides:
+            raise ConfigError(f"missing flatpak image override: {source_ref}")
         name = path.parent.resolve().name
         export_dir = flatpak_oci_layout_path(context.cache_dir, name, context.distro)
         targets.append(
@@ -451,10 +456,14 @@ def _upload_targets(
                 name=name,
                 image=resolved_images.get(
                     name,
-                    _local_image(
-                        context.local_prefix,
-                        "flatpaks",
-                        f"{context.distro}-{name}",
+                    (
+                        image_overrides[source_ref]
+                        if image_overrides is not None
+                        else _local_image(
+                            context.local_prefix,
+                            "flatpaks",
+                            f"{context.distro}-{name}",
+                        )
                     ),
                 ),
                 export_dir=export_dir,

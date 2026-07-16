@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from .bootc import _bootc_artifact_name, _export_bootc_images
 from .build import (
     BuildImagePlan,
     FileRef,
@@ -26,6 +27,7 @@ from .build import (
     _download_exact_packages,
     _ensure_image,
     _image_tag,
+    _metadata_build_result,
     _metadata_with_final_image,
     _remove_image,
     _remove_tree,
@@ -60,6 +62,8 @@ from .flatpaks import (
 )
 from .logging import log
 from .model import ConfigError, FlatpakImagesConfig, Manifest, _spec_builds_tuple
+from .upload.flatpaks import update_flatpak_index, upload_flatpaks
+from .upload.registry import upload_oci
 
 
 DEFAULT_CI_CACHE_DIR = Path("cache")
@@ -432,6 +436,203 @@ def build_ci(
                     autoremove=autoremove,
                     ccache=ccache,
                 )
+
+
+def upload_ci(
+    upload_ids: tuple[str, ...],
+    *,
+    build_manifest: Path | None = None,
+    images: bool = False,
+    flatpaks: bool = False,
+    refresh: bool = False,
+    tags: tuple[str, ...] = tuple(),
+) -> int:
+    if not upload_ids and not (images or flatpaks):
+        raise ConfigError("at least one CI upload ID or section flag is required")
+    build_manifest = build_manifest or _default_ci_build_manifest(None)
+    data = _read_ci_build_data(build_manifest)
+    selected = _select_ci_uploads(
+        build_manifest,
+        data,
+        upload_ids,
+        images=images,
+        flatpaks=flatpaks,
+    )
+    cache_root = build_manifest.expanduser().resolve().parent.parent
+
+    for upload_id in selected["images"]:
+        result = _upload_ci_manifest_image(
+            build_manifest,
+            upload_id,
+            data["images"][upload_id],
+            cache_root=cache_root,
+            tags=tags,
+        )
+        if result != 0:
+            return result
+
+    flatpaks_by_manifest: dict[Path, dict[str, str]] = {}
+    for upload_id in selected["flatpaks"]:
+        manifest_path, source_ref, image = _prepare_ci_flatpak_upload(
+            build_manifest,
+            upload_id,
+            data["flatpaks"][upload_id],
+        )
+        flatpaks_by_manifest.setdefault(manifest_path, {})[source_ref] = image
+
+    for manifest_path, image_overrides in flatpaks_by_manifest.items():
+        result = upload_flatpaks(
+            manifest_path,
+            tuple(Path(source) for source in image_overrides),
+            build=False,
+            cache_dir=cache_root,
+            cache_only=True,
+            image_overrides=image_overrides,
+        )
+        if result != 0:
+            return result
+    if refresh:
+        for manifest_path in flatpaks_by_manifest:
+            result = update_flatpak_index(manifest_path)
+            if result != 0:
+                return result
+    return 0
+
+
+def _select_ci_uploads(
+    build_manifest: Path,
+    data: dict[str, Any],
+    upload_ids: tuple[str, ...],
+    *,
+    images: bool,
+    flatpaks: bool,
+) -> dict[str, list[str]]:
+    sections = ("images", "flatpaks")
+    selected = {section: [] for section in sections}
+    selected_sets = {section: set() for section in sections}
+
+    def add(section: str, upload_id: str) -> None:
+        if upload_id not in selected_sets[section]:
+            selected_sets[section].add(upload_id)
+            selected[section].append(upload_id)
+
+    for upload_id in upload_ids:
+        if upload_id == "0":
+            continue
+        matches = [section for section in sections if upload_id in data[section]]
+        if not matches:
+            if upload_id in data["builds"]:
+                raise ConfigError(
+                    f"{build_manifest}: CI build ID is not uploadable: {upload_id}"
+                )
+            raise ConfigError(f"{build_manifest}: unknown CI upload ID: {upload_id}")
+        if len(matches) > 1:
+            raise ConfigError(
+                f"{build_manifest}: ambiguous CI upload ID '{upload_id}' appears in: "
+                + ", ".join(matches)
+            )
+        add(matches[0], upload_id)
+
+    for section, include_all in (("images", images), ("flatpaks", flatpaks)):
+        if include_all:
+            for upload_id in data[section]:
+                add(section, str(upload_id))
+    return selected
+
+
+def _upload_ci_manifest_image(
+    build_manifest: Path,
+    upload_id: str,
+    entry: object,
+    *,
+    cache_root: Path,
+    tags: tuple[str, ...],
+) -> int:
+    entry = _rebase_ci_entry(build_manifest, entry, metadata_key="build")
+    metadata = _metadata_from_seed_entry(build_manifest, upload_id, entry)
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{build_manifest}: invalid images entry '{upload_id}'")
+    manifest_path = _ci_manifest_path(entry.get("path"), metadata.root_dir)
+    if not _ensure_image(metadata.podman, metadata.output_image, metadata.ci_registry):
+        raise ConfigError(f"CI image output is missing: {metadata.output_image}")
+
+    result = _metadata_build_result(metadata)
+    _export_bootc_images(
+        (manifest_path,),
+        (metadata,),
+        (result,),
+        cache_dir=cache_root,
+    )
+    layout = cache_root / "oci" / _bootc_artifact_name(metadata.image, metadata.distro)
+    if tags:
+        image_tags = tags
+    else:
+        tag = _ci_manifest_upload_tag(manifest_path, metadata)
+        image_tags = tuple(dict.fromkeys((tag, "stable")))
+    return upload_oci(
+        layout,
+        metadata.image,
+        image_tags,
+        project_root=manifest_path.parent,
+    )
+
+
+def _prepare_ci_flatpak_upload(
+    build_manifest: Path,
+    upload_id: str,
+    entry: object,
+) -> tuple[Path, str, str]:
+    entry = _rebase_ci_entry(build_manifest, entry, metadata_key="build")
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{build_manifest}: invalid flatpaks entry '{upload_id}'")
+    metadata = _metadata_from_mapping(
+        build_manifest,
+        upload_id,
+        entry.get("build"),
+    )
+    manifest_path = _ci_manifest_path(entry.get("manifest"), metadata.root_dir)
+    source = entry.get("source")
+    images = entry.get("images")
+    if not isinstance(source, str) or not source or not isinstance(images, dict):
+        raise ConfigError(f"{build_manifest}: invalid flatpaks entry '{upload_id}'")
+    image = str(images.get("output", ""))
+    if not image:
+        raise ConfigError(f"{build_manifest}: invalid flatpaks entry '{upload_id}'")
+    if not _ensure_image(metadata.podman, image, metadata.ci_registry):
+        raise ConfigError(f"CI flatpak output is missing: {image}")
+    source_ref = _ci_source_ref(Path(source), Path(metadata.root_dir))
+    return manifest_path, source_ref, image
+
+
+def _ci_manifest_path(value: object, root_dir: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ConfigError("CI output entry is missing its source manifest")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path(root_dir) / path
+    return path.resolve()
+
+
+def _ci_source_ref(path: Path, root_dir: Path) -> str:
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.resolve().relative_to(root_dir.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _ci_manifest_upload_tag(
+    manifest_path: Path,
+    metadata: ResolvedBuildMetadata,
+) -> str:
+    manifest = Manifest.from_file(manifest_path)
+    if not manifest.tag:
+        raise ConfigError(f"{manifest_path}: missing 'tag'")
+    tag = _substitute_variables(manifest.tag, dict(metadata.manifest_env)).strip()
+    if not tag:
+        raise ConfigError(f"{manifest_path}: resolved 'tag' must not be empty")
+    return tag
 
 
 def _read_ci_build_data(build_manifest: Path) -> dict[str, Any]:

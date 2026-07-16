@@ -19,6 +19,7 @@ from .ci import (
     init_ci,
     prepare_ci,
     seed_ci,
+    upload_ci,
     write_ci_env,
 )
 from .flatpaks import build_flatpak, build_flatpaks
@@ -842,6 +843,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Mount and enable shared ccache/sccache directories for builder runs.",
     )
     ci_build_parser.set_defaults(func=ci_command)
+    ci_upload_parser = ci_subcommands.add_parser(
+        "upload",
+        help="Upload built final images and flatpaks to the S3 registry.",
+    )
+    ci_upload_parser.add_argument(
+        "upload_ids",
+        nargs="*",
+        metavar="OUTPUT_ID",
+        help="Prepared image or flatpak IDs. The ID 0 is a no-op.",
+    )
+    ci_upload_parser.add_argument(
+        "--images",
+        action="store_true",
+        help="Upload every prepared final manifest image.",
+    )
+    ci_upload_parser.add_argument(
+        "--flatpaks",
+        action="store_true",
+        help="Upload every prepared final flatpak image.",
+    )
+    ci_upload_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Refresh the static flatpak index after successful uploads.",
+    )
+    ci_upload_parser.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        dest="tags",
+        metavar="TAG",
+        help="Image tag to publish. May be specified more than once.",
+    )
+    ci_upload_parser.set_defaults(func=ci_command)
 
     cleanup = subcommands.add_parser(
         "cleanup",
@@ -1231,6 +1266,14 @@ def ci_command(args: argparse.Namespace) -> int:
             ccache=args.ccache,
         )
         return 0
+    if args.ci_action == "upload":
+        return upload_ci(
+            tuple(args.upload_ids),
+            images=args.images,
+            flatpaks=args.flatpaks,
+            refresh=args.refresh,
+            tags=tuple(args.tags),
+        )
     raise ConfigError(f"unknown ci action: {args.ci_action}")
 
 

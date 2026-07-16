@@ -418,6 +418,30 @@ class UploadFlatpaksTests(unittest.TestCase):
                 cosign_config=OciCosignConfig(),
             )
 
+    def test_upload_flatpaks_uses_prepared_image_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, ("flatpaks/kate",))
+
+            with _mock_upload_deps() as deps:
+                self.assertEqual(
+                    upload_flatpaks(
+                        manifest,
+                        (Path("flatpaks/kate"),),
+                        False,
+                        image_overrides={
+                            "flatpaks/kate": "flatpaks:f44-kate-prepared"
+                        },
+                    ),
+                    0,
+                )
+
+            deps.resolve_flatpaks.assert_not_called()
+            self.assertEqual(
+                deps.run_streamed.call_args.args[0][-2],
+                "flatpaks:f44-kate-prepared",
+            )
+
     def test_upload_flatpaks_rejects_missing_local_image_without_build(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
