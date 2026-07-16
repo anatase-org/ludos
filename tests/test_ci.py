@@ -33,6 +33,7 @@ from ludos.ci import (
     _prepare_seed_rpms,
     _read_seed_entries,
     _rebase_ci_entry,
+    _restore_ci_build_context,
     _seed_rpm_download_sizes,
     _upload_ci_output,
     build_ci,
@@ -1375,6 +1376,34 @@ class PrepareCiTests(unittest.TestCase):
 
 
 class BuildCiTests(unittest.TestCase):
+    def test_restore_ci_oci_image_uses_ci_registry(self) -> None:
+        metadata = SimpleNamespace(
+            podman="podman",
+            root_dir="/workspace",
+            repo_images=tuple(),
+            orchestrator="orchestrator:f44",
+            ci_registry="ghcr.io/anatase-org",
+            oci_images=(
+                SimpleNamespace(image="kernel:f44-x86_64"),
+            ),
+        )
+        restored_contexts = {
+            (metadata.podman, metadata.root_dir, metadata.repo_images),
+        }
+
+        with patch("ludos.ci._ensure_image", return_value=True) as ensure:
+            _restore_ci_build_context(
+                metadata,
+                restored_contexts,
+                oci_images=True,
+            )
+
+        ensure.assert_called_once_with(
+            "podman",
+            "kernel:f44-x86_64",
+            "ghcr.io/anatase-org",
+        )
+
     def test_rebase_ci_entry_uses_current_checkout_and_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)

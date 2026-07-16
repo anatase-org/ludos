@@ -790,7 +790,8 @@ def _restore_ci_build_context(
                 raise ConfigError(f"CI card package image is missing: {plan.image}")
     if oci_images:
         for plan in metadata.oci_images:
-            subprocess.run([metadata.podman, "pull", plan.image], check=True)
+            if not _ensure_image(metadata.podman, plan.image, metadata.ci_registry):
+                raise ConfigError(f"CI OCI image is missing: {plan.image}")
 
 
 def _upload_ci_output(
