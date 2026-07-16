@@ -518,6 +518,11 @@ class TargetCardBuildTests(unittest.TestCase):
             )
 
         container_build.assert_called_once()
+        containerfile = Path(metadata.build_dir) / "Containerfile"
+        self.assertIn(
+            f'LABEL "org.anatase.ludos.tag"="{result.output_image.rsplit(":", 1)[-1]}"',
+            containerfile.read_text(encoding="utf-8"),
+        )
         run.assert_called_once_with(
             [
                 "podman",

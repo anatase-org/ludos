@@ -49,6 +49,7 @@ RPM_ARCH_SUFFIXES = frozenset(
     )
 )
 ENV_ALWAYS_AVAILABLE = ("arch", "releasever")
+LUDOS_TAG_LABEL = "org.anatase.ludos.tag"
 
 
 @dataclass(frozen=True)
@@ -1675,6 +1676,10 @@ def _render_final_containerfile(
         f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
         for key, value in metadata.manifest_labels
     )
+    label_lines += (
+        f"LABEL {json.dumps(LUDOS_TAG_LABEL)}="
+        f"{json.dumps(_image_tag(metadata.output_image))}\n"
+    )
     common_stage = package_stage_names["common"]
     bootstrap_paths = _rpm_paths_for_packages(
         "/rpms/common",
@@ -2467,6 +2472,7 @@ def _final_manifest_hash(metadata: ResolvedBuildMetadata, *, mode: str) -> str:
         "local_prefix": metadata.local_prefix,
         "orchestrator": metadata.orchestrator,
         "manifest_labels": metadata.manifest_labels,
+        "generated_labels": (LUDOS_TAG_LABEL,),
         "common_packages": metadata.common_packages,
         "bootstrap_packages": metadata.bootstrap_packages,
         "card_order": metadata.card_order,

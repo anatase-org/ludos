@@ -1702,6 +1702,24 @@ specs:
                     "buildah",
                     "config",
                     "--label",
+                    "org.anatase.ludos.tag=f44-x86_64-kate",
+                    "flatpak-label-container",
+                ],
+                {
+                    "check": False,
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.PIPE,
+                    "text": True,
+                },
+            ),
+            runs,
+        )
+        self.assertIn(
+            (
+                [
+                    "buildah",
+                    "config",
+                    "--label",
                     "org.flatpak.metadata=metadata-body\n",
                     "flatpak-label-container",
                 ],

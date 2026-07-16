@@ -17,6 +17,7 @@ from typing import Any
 
 from .build import (
     HASH_LENGTH,
+    LUDOS_TAG_LABEL,
     _card_specs_hash,
     _build_specs_output_image,
     _create_builder_image,
@@ -1603,6 +1604,7 @@ def _run_flatpak_image_build(
         )
         labels = (
             *base_labels,
+            (LUDOS_TAG_LABEL, _image_tag(image)),
             *commit_metadata_labels.items(),
             *tuple(sorted(appstream_labels.items())),
         )
@@ -1950,6 +1952,7 @@ def _flatpak_final_hash(
         "substitution_env": tuple(sorted(substitution_env.items())),
         "build_image": _image_tag(build_image),
         "metadata": metadata,
+        "generated_labels": (LUDOS_TAG_LABEL,),
         "files": _flatpak_file_hash_inputs(card, flatpak_dir),
         "postprocess": card.postprocess,
         "flatpak_images": {
