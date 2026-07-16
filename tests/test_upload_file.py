@@ -8,9 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ludos.__main__ import build_parser
+from ludos.model import ConfigError
 from ludos.upload.common import (
     REGISTRY_SHORT_CACHE_CONTROL,
     S3Config,
+    _create_s3_client,
     _s3_config_from_env,
 )
 from ludos.upload.file import (
@@ -148,6 +150,15 @@ class FakeS3Client:
 
 
 class UploadFileTests(unittest.TestCase):
+    def test_s3_client_requires_upload_extra(self) -> None:
+        config = S3Config("https://s3.example.com", "bucket")
+        with patch.dict("sys.modules", {"boto3": None}):
+            with self.assertRaisesRegex(
+                ConfigError,
+                r"install ludos\[images\] or ludos\[flatpaks\]",
+            ):
+                _create_s3_client(config, {})
+
     def test_upload_file_parser(self) -> None:
         args = build_parser().parse_args(
             [

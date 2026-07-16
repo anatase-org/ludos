@@ -3,12 +3,22 @@ from __future__ import annotations
 import datetime as _datetime
 import io
 import logging
+import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from rich.console import Console
-
-from ludos.logging import LudosHandler, confirm, piter, pstream
+from ludos.logging import (
+    LudosHandler,
+    _NullProgress,
+    _PlainConsole,
+    configure_tracebacks,
+    confirm,
+    piter,
+    pstream,
+)
 
 
 class LudosLoggingTests(unittest.TestCase):
@@ -21,7 +31,7 @@ class LudosLoggingTests(unittest.TestCase):
             patch("ludos.logging.AGENT", False),
             patch(
                 "ludos.logging.console",
-                Console(file=output, force_terminal=False, color_system=None),
+                _PlainConsole(file=output, force_terminal=False),
             ),
         ):
             handler._emit_lines(logging.INFO, "INFO", created, ["first"])
@@ -41,7 +51,7 @@ class LudosLoggingTests(unittest.TestCase):
             patch("ludos.logging.AGENT", False),
             patch(
                 "ludos.logging.console",
-                Console(file=output, force_terminal=False, color_system=None),
+                _PlainConsole(file=output, force_terminal=False),
             ),
         ):
             handler._emit_lines(
@@ -69,7 +79,7 @@ class LudosLoggingTests(unittest.TestCase):
             patch("ludos.logging.AGENT", False),
             patch(
                 "ludos.logging.console",
-                Console(file=output, force_terminal=True, color_system=None),
+                _PlainConsole(file=output, force_terminal=True),
             ),
             patch("ludos.logging.tqdm.write") as write,
         ):
@@ -80,7 +90,7 @@ class LudosLoggingTests(unittest.TestCase):
 
     def test_piter_is_hidden_when_not_terminal(self) -> None:
         output = io.StringIO()
-        console = Console(file=output, force_terminal=False, color_system=None)
+        console = _PlainConsole(file=output, force_terminal=False)
 
         with (
             patch("ludos.logging.AGENT", False),
@@ -95,7 +105,7 @@ class LudosLoggingTests(unittest.TestCase):
 
     def test_piter_is_visible_on_terminal_outside_agent(self) -> None:
         output = io.StringIO()
-        console = Console(file=output, force_terminal=True, color_system=None)
+        console = _PlainConsole(file=output, force_terminal=True)
 
         with (
             patch("ludos.logging.AGENT", False),
@@ -110,7 +120,7 @@ class LudosLoggingTests(unittest.TestCase):
 
     def test_pstream_uses_tqdm_write_on_terminal(self) -> None:
         output = io.StringIO()
-        console = Console(file=output, force_terminal=True, color_system=None)
+        console = _PlainConsole(file=output, force_terminal=True)
 
         with (
             patch("ludos.logging.AGENT", False),
@@ -123,7 +133,7 @@ class LudosLoggingTests(unittest.TestCase):
 
     def test_pstream_falls_back_to_stream_when_hidden(self) -> None:
         output = io.StringIO()
-        console = Console(file=output, force_terminal=False, color_system=None)
+        console = _PlainConsole(file=output, force_terminal=False)
 
         with (
             patch("ludos.logging.AGENT", False),
@@ -133,6 +143,83 @@ class LudosLoggingTests(unittest.TestCase):
             pstream("OT: ingesting file")
 
         stream.assert_called_once_with("OT: ingesting file")
+
+    def test_terminal_log_lines_write_directly_without_tqdm(self) -> None:
+        output = io.StringIO()
+        handler = LudosHandler()
+        created = _datetime.datetime(2026, 6, 16, 12, 34).timestamp()
+
+        with (
+            patch("ludos.logging.AGENT", False),
+            patch(
+                "ludos.logging.console",
+                _PlainConsole(file=output, force_terminal=True),
+            ),
+            patch("ludos.logging.tqdm", None),
+        ):
+            handler._emit_lines(logging.INFO, "INFO", created, ["plain"])
+
+        self.assertEqual(output.getvalue(), "[12:34] plain\n")
+
+    def test_pstream_uses_stream_without_tqdm(self) -> None:
+        with (
+            patch("ludos.logging.AGENT", False),
+            patch(
+                "ludos.logging.console",
+                _PlainConsole(file=io.StringIO(), force_terminal=True),
+            ),
+            patch("ludos.logging.tqdm", None),
+            patch("ludos.logging.stream") as stream,
+        ):
+            pstream("OT: ingesting file")
+
+        stream.assert_called_once_with("OT: ingesting file")
+
+    def test_piter_without_tqdm_preserves_progress_protocol(self) -> None:
+        with patch("ludos.logging.tqdm", None):
+            progress = piter(["a", "b"], desc="Silent")
+
+        self.assertIsInstance(progress, _NullProgress)
+        self.assertEqual(progress.total, 2)
+        self.assertEqual(list(progress), ["a", "b"])
+        self.assertEqual(progress.n, 2)
+        progress.total = 5
+        progress.refresh()
+        progress.update(2)
+        progress.close()
+        self.assertEqual(progress.n, 4)
+
+        with progress as entered:
+            self.assertIs(entered, progress)
+
+    def test_configure_tracebacks_without_rich_is_noop(self) -> None:
+        with patch("ludos.logging.install_rich_traceback", None):
+            configure_tracebacks()
+
+    def test_logging_imports_without_site_packages(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "src"
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(source)
+        script = "\n".join(
+            (
+                "import ludos.logging as logging",
+                "assert logging.RichConsole is None",
+                "assert logging.tqdm is None",
+                "logging.configure_tracebacks()",
+                "progress = logging.piter([1, 2])",
+                "assert list(progress) == [1, 2]",
+                "assert progress.n == 2",
+            )
+        )
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_confirm_pads_prompt_outside_agent(self) -> None:
         with (

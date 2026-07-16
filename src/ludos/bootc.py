@@ -25,7 +25,6 @@ from .build import (
 from .common import _default_cache_version
 from .logging import log, piter, pstream, warning
 from .model import ConfigError, Manifest
-from .rechunk.alg import main as rechunk_main
 
 
 DEFAULT_CACHE_DIR = Path("cache")
@@ -39,6 +38,19 @@ PROGRESS_TOTAL_PREFIX = "__LUDOS_OSTREE_APPROX_TOTAL__ "
 COMMIT_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_OCI_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 OCI_EXPORT_PROGRESS_RE = re.compile(r"^Exported OCI layer \d+/(?P<total>\d+): .+$")
+
+
+def rechunk_main(**kwargs: Any) -> None:
+    try:
+        from .rechunk.alg import main
+    except ImportError as exc:
+        if exc.name != "numpy":
+            raise
+        raise ConfigError(
+            "NumPy must be installed to create bootc images; "
+            "install ludos[images]"
+        ) from exc
+    main(**kwargs)
 
 
 def bootc_create(

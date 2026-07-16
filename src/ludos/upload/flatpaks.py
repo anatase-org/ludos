@@ -1094,7 +1094,8 @@ def _overlay_icon(icon: bytes, overlay: Path) -> bytes:
         from PIL import Image
     except ImportError as exc:
         raise ConfigError(
-            "Pillow must be installed to use flatpaks.images.overlay"
+            "Pillow must be installed to use flatpaks.images.overlay; "
+            "install ludos[flatpaks]"
         ) from exc
 
     with Image.open(io.BytesIO(icon)).convert("RGBA") as base:

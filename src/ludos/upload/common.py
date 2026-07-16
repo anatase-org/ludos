@@ -48,7 +48,10 @@ def _create_s3_client(
     try:
         import boto3
     except ImportError as exc:
-        raise ConfigError("boto3 must be installed to upload files to S3") from exc
+        raise ConfigError(
+            "boto3 must be installed to access S3; "
+            "install ludos[images] or ludos[flatpaks]"
+        ) from exc
     return boto3.client(
         "s3",
         endpoint_url=config.endpoint_url,

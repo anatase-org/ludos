@@ -30,6 +30,7 @@ from ludos.upload.flatpaks import (
     upload_dummy_runtime,
     upload_flatpaks,
     _flatpak_signature_payload,
+    _overlay_icon,
 )
 from ludos.upload.registry import PromotedOciTag
 from .test_upload_file import ENV, FakeS3Client
@@ -39,6 +40,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class UploadFlatpaksTests(unittest.TestCase):
+    def test_icon_overlay_requires_flatpaks_extra(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            overlay = Path(temp) / "overlay.png"
+            overlay.touch()
+            with patch.dict("sys.modules", {"PIL": None}):
+                with self.assertRaisesRegex(
+                    ConfigError,
+                    r"install ludos\[flatpaks\]",
+                ):
+                    _overlay_icon(b"", overlay)
+
     def test_plan_flatpak_promotions_uses_only_manifest_flatpaks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

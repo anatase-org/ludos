@@ -1,21 +1,128 @@
 from __future__ import annotations
 
 import datetime as _datetime
+import io
 import logging
 import os
 import shutil
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-
-from rich.console import Console
-from rich.errors import MarkupError
-from rich.text import Text
-from rich.traceback import install as install_rich_traceback
-from tqdm.auto import tqdm
+from typing import Any, Iterator, TextIO
 
 
-console = Console()
-error_console = Console(stderr=True)
+class _PlainMarkupError(Exception):
+    pass
+
+try:
+    from rich.console import Console as RichConsole
+    from rich.errors import MarkupError as RichMarkupError
+    from rich.text import Text as RichText
+    from rich.traceback import install as install_rich_traceback
+except ImportError:
+    RichConsole = None  # type: ignore[assignment,misc]
+    RichMarkupError = _PlainMarkupError  # type: ignore[assignment,misc]
+    RichText = None  # type: ignore[assignment,misc]
+    install_rich_traceback = None
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None  # type: ignore[assignment,misc]
+
+
+class _PlainCapture:
+    def __init__(self, console: "_PlainConsole") -> None:
+        self.console = console
+        self.output = io.StringIO()
+        self.previous_file: TextIO | None = None
+
+    def __enter__(self) -> "_PlainCapture":
+        self.previous_file = self.console.file
+        self.console.file = self.output
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        assert self.previous_file is not None
+        self.console.file = self.previous_file
+
+    def get(self) -> str:
+        return self.output.getvalue()
+
+
+class _PlainConsole:
+    def __init__(
+        self,
+        *,
+        file: TextIO | None = None,
+        stderr: bool = False,
+        force_terminal: bool | None = None,
+        **_: object,
+    ) -> None:
+        self.file = file if file is not None else (sys.stderr if stderr else sys.stdout)
+        self.force_terminal = force_terminal
+
+    @property
+    def is_terminal(self) -> bool:
+        if self.force_terminal is not None:
+            return self.force_terminal
+        isatty = getattr(self.file, "isatty", None)
+        return bool(isatty and isatty())
+
+    def print(
+        self,
+        *objects: object,
+        sep: str = " ",
+        end: str = "\n",
+        **_: object,
+    ) -> None:
+        self.file.write(sep.join(str(item) for item in objects) + end)
+
+    def capture(self) -> _PlainCapture:
+        return _PlainCapture(self)
+
+
+class _NullProgress:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.iterable = args[0] if args else None
+        total = kwargs.get("total")
+        if total is None and self.iterable is not None:
+            try:
+                total = len(self.iterable)  # type: ignore[arg-type]
+            except TypeError:
+                pass
+        self.total = total
+        self.n: int | float = 0
+
+    def __enter__(self) -> "_NullProgress":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def __iter__(self) -> Iterator[Any]:
+        if self.iterable is None:
+            return
+        for item in self.iterable:  # type: ignore[union-attr]
+            yield item
+            self.update()
+
+    def update(self, amount: int | float = 1) -> None:
+        self.n += amount
+
+    def refresh(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+console = RichConsole() if RichConsole is not None else _PlainConsole()
+error_console = (
+    RichConsole(stderr=True)
+    if RichConsole is not None
+    else _PlainConsole(stderr=True)
+)
 
 AGENT = os.environ.get("CODEX_CI") == "1" or os.environ.get("AGENT") == "1" or os.environ.get("GITHUB_ACTIONS") 
 STREAM_HISTORY_LIMIT = 15
@@ -73,50 +180,64 @@ class LudosHandler(logging.Handler):
         target = error_console if levelno >= logging.WARNING else console
         for index, line in enumerate(lines):
             if index == 0:
-                line_prefix = Text(time_prefix, no_wrap=True)
+                line_prefix = time_prefix
                 prefix_has_text = bool(time_prefix)
                 if levelno >= logging.ERROR:
                     if prefix_has_text:
-                        line_prefix.append(" ")
-                    line_prefix.append(f"{levelname}:", style="red")
+                        line_prefix += " "
+                    line_prefix += f"{levelname}:"
                     prefix_has_text = True
                 elif levelno >= logging.WARNING:
                     if prefix_has_text:
-                        line_prefix.append(" ")
-                    line_prefix.append(f"{levelname}:", style="yellow")
+                        line_prefix += " "
+                    line_prefix += f"{levelname}:"
                     prefix_has_text = True
                 if prefix_has_text:
-                    line_prefix.append(" ")
+                    line_prefix += " "
             else:
                 width = (
                     (len(time_prefix) + 1 if time_prefix else 0)
                     + (len(levelname) + 2 if levelno >= logging.WARNING else 0)
                 )
-                line_prefix = Text(" " * width, no_wrap=True)
-            self._emit_rendered_line(target, line_prefix, line)
+                line_prefix = " " * width
+            rendered_prefix: object = line_prefix
+            if RichText is not None:
+                rendered_prefix = RichText(line_prefix, no_wrap=True)
+                if index == 0 and levelno >= logging.WARNING:
+                    label = f"{levelname}:"
+                    start = line_prefix.index(label)
+                    style = "red" if levelno >= logging.ERROR else "yellow"
+                    rendered_prefix.stylize(style, start, start + len(label))
+            self._emit_rendered_line(target, rendered_prefix, line)
         target.file.flush()
 
     def _emit_rendered_line(
         self,
-        target: Console,
-        line_prefix: Text,
+        target: Any,
+        line_prefix: object,
         line: str,
     ) -> None:
         if self._should_use_tqdm_write(target):
             with target.capture() as capture:
                 self._print_line(target, line_prefix, line)
+            assert tqdm is not None
             tqdm.write(capture.get().rstrip("\n"), file=target.file)
             return
         self._print_line(target, line_prefix, line)
 
-    def _print_line(self, target: Console, line_prefix: Text, line: str) -> None:
+    def _print_line(self, target: Any, line_prefix: object, line: str) -> None:
+        prefix = (
+            RichText(line_prefix, no_wrap=True)
+            if RichText is not None and not isinstance(line_prefix, RichText)
+            else line_prefix
+        )
         try:
-            target.print(line_prefix, line, sep="")
-        except MarkupError:
-            target.print(line_prefix, line, sep="", markup=False)
+            target.print(prefix, line, sep="")
+        except RichMarkupError:
+            target.print(prefix, line, sep="", markup=False)
 
-    def _should_use_tqdm_write(self, target: Console) -> bool:
-        return target.is_terminal and not AGENT
+    def _should_use_tqdm_write(self, target: Any) -> bool:
+        return tqdm is not None and target.is_terminal and not AGENT
 
     def _emit_stream(self, record: logging.LogRecord) -> None:
         lines = self._stream_record_lines(record.getMessage())
@@ -275,7 +396,8 @@ def configure_logging() -> None:
 
 
 def configure_tracebacks() -> None:
-    install_rich_traceback(show_locals=False, suppress=[])
+    if install_rich_traceback is not None:
+        install_rich_traceback(show_locals=False, suppress=[])
 
 
 def log(message: object = "") -> None:
@@ -303,7 +425,9 @@ def stream(message: str) -> None:
     logger.info("%s", message, extra={"ludos_stream": True})
 
 
-def piter(*args: object, **kwargs: object) -> tqdm:
+def piter(*args: object, **kwargs: object) -> Any:
+    if tqdm is None:
+        return _NullProgress(*args, **kwargs)
     kwargs.setdefault("disable", not (console.is_terminal and not AGENT))
     kwargs.setdefault("file", console.file)
     if "desc" in kwargs:
@@ -312,7 +436,7 @@ def piter(*args: object, **kwargs: object) -> tqdm:
 
 
 def pstream(message: str) -> None:
-    if not (console.is_terminal and not AGENT):
+    if tqdm is None or not (console.is_terminal and not AGENT):
         stream(message)
         return
     tqdm.write(f"{' ' * INFO_MESSAGE_INDENT}| {message}")

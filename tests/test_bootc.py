@@ -27,6 +27,7 @@ from ludos.bootc import (
     _read_oci_export_stderr,
     _read_oci_export_stdout,
     _read_ostree_stderr,
+    rechunk_main,
     _update_object_progress,
     _short_digest,
     bootc_create,
@@ -36,6 +37,12 @@ from ludos.model import ConfigError
 
 
 class BootcCommandTests(unittest.TestCase):
+    def test_rechunk_requires_images_extra(self) -> None:
+        missing_numpy = ModuleNotFoundError(name="numpy")
+        with patch("builtins.__import__", side_effect=missing_numpy):
+            with self.assertRaisesRegex(ConfigError, r"install ludos\[images\]"):
+                rechunk_main()
+
     def test_parser_accepts_bootc_create(self) -> None:
         args = build_parser().parse_args(
             [

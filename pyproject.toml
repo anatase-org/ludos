@@ -6,21 +6,37 @@ authors = [
 ]
 description = "Ludos. An end-to-end tool for building OS images from source."
 readme = "readme.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 classifiers = [
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: POSIX :: Linux",
 ]
 
 dependencies = [
-  "boto3>=1.35.0",
-  "Pillow>=10.0.0",
-  "PyYAML>=6.0.1",
-  "rich>=13.5.2",
-  "numpy>=2.0.0",
-  "tqdm>=4.66.4",
+  "PyYAML>=6.0.3",
+]
+
+[project.optional-dependencies]
+pretty = [
+  "rich>=15.0.0",
+  "tqdm>=4.68.4",
+]
+images = [
+  "boto3>=1.43.49",
+  "numpy>=2.5.1",
+]
+flatpaks = [
+  "boto3>=1.43.49",
+  "Pillow>=12.3.0",
+]
+all = [
+  "boto3>=1.43.49",
+  "numpy>=2.5.1",
+  "Pillow>=12.3.0",
+  "rich>=15.0.0",
+  "tqdm>=4.68.4",
 ]
 
 [project.urls]
