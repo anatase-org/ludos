@@ -47,7 +47,7 @@ class UploadRegistryTests(unittest.TestCase):
             create_oci_index(
                 "anatase",
                 ("x86_64", "aarch64"),
-                "rolling",
+                ("rolling", "latest"),
                 environ=ENV,
                 client=client,
                 cosign_config=OciCosignConfig(),
@@ -58,6 +58,10 @@ class UploadRegistryTests(unittest.TestCase):
         index_bytes = client.objects[
             ("anatase-artifacts", "v2/anatase/manifests/rolling")
         ]
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "v2/anatase/manifests/latest")],
+            index_bytes,
+        )
         index = json.loads(index_bytes)
         self.assertEqual(index["schemaVersion"], 2)
         self.assertEqual(index["mediaType"], OCI_INDEX_MEDIA_TYPE)
@@ -87,7 +91,10 @@ class UploadRegistryTests(unittest.TestCase):
         )
         self.assertEqual(
             json.loads(client.objects[("anatase-artifacts", "v2/anatase/tags/list")]),
-            {"name": "anatase", "tags": ["aarch64", "rolling", "x86_64"]},
+            {
+                "name": "anatase",
+                "tags": ["aarch64", "latest", "rolling", "x86_64"],
+            },
         )
 
     def test_create_oci_index_allows_one_platform(self) -> None:
@@ -97,7 +104,7 @@ class UploadRegistryTests(unittest.TestCase):
         create_oci_index(
             "anatase",
             ("x86_64",),
-            "rolling",
+            ("rolling",),
             environ=ENV,
             client=client,
             cosign_config=OciCosignConfig(),
@@ -129,7 +136,7 @@ class UploadRegistryTests(unittest.TestCase):
             create_oci_index(
                 "anatase",
                 ("first", "second"),
-                "rolling",
+                ("rolling",),
                 environ=ENV,
                 client=client,
                 cosign_config=OciCosignConfig(),
@@ -151,7 +158,7 @@ class UploadRegistryTests(unittest.TestCase):
             create_oci_index(
                 "anatase",
                 ("x86_64",),
-                "rolling",
+                ("rolling",),
                 environ=ENV,
                 client=client,
                 cosign_config=OciCosignConfig(),
@@ -182,7 +189,7 @@ class UploadRegistryTests(unittest.TestCase):
                 create_oci_index(
                     "anatase",
                     ("x86_64",),
-                    "rolling",
+                    ("rolling",),
                     environ=ENV,
                     client=client,
                     cosign_config=cosign,
@@ -217,7 +224,7 @@ class UploadRegistryTests(unittest.TestCase):
             create_oci_index(
                 "anatase",
                 ("x86_64",),
-                "rolling",
+                ("rolling",),
                 environ=ENV,
                 client=client,
                 cosign_config=_cosign_config(),
@@ -250,7 +257,7 @@ class UploadRegistryTests(unittest.TestCase):
             create_oci_index(
                 "anatase",
                 ("x86_64",),
-                "rolling",
+                ("rolling",),
                 environ=ENV,
                 client=client,
                 cosign_config=OciCosignConfig(),
@@ -479,6 +486,8 @@ class UploadRegistryTests(unittest.TestCase):
                 "anatase",
                 "--tag",
                 "rolling",
+                "--tag",
+                "latest",
                 "--source-tag",
                 "x86_64",
                 "--source-tag",
@@ -489,7 +498,7 @@ class UploadRegistryTests(unittest.TestCase):
         self.assertEqual(args.registry_action, "oci")
         self.assertEqual(args.registry_oci_action, "index")
         self.assertEqual(args.ref, "anatase")
-        self.assertEqual(args.tag, "rolling")
+        self.assertEqual(args.tags, ["rolling", "latest"])
         self.assertEqual(args.source_tags, ["x86_64", "aarch64"])
 
     def test_prune_oci_parser(self) -> None:
@@ -565,6 +574,8 @@ class UploadRegistryTests(unittest.TestCase):
                 "anatase",
                 "--tag",
                 "rolling",
+                "--tag",
+                "latest",
                 "--source-tag",
                 "x86_64",
             ]
@@ -576,7 +587,7 @@ class UploadRegistryTests(unittest.TestCase):
         create.assert_called_once_with(
             "anatase",
             ("x86_64",),
-            "rolling",
+            ("rolling", "latest"),
             project_root=Path.cwd(),
         )
 
@@ -1501,7 +1512,7 @@ class UploadRegistryTests(unittest.TestCase):
         create_oci_index(
             "images/anatase",
             ("x86_64",),
-            "rolling",
+            ("rolling",),
             environ=ENV,
             client=client,
             cosign_config=OciCosignConfig(),

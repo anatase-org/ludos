@@ -482,8 +482,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     registry_oci_index.add_argument(
         "--tag",
+        action="append",
         required=True,
-        help="Target tag to publish for the image index.",
+        dest="tags",
+        help=(
+            "Target tag to publish for the image index. "
+            "May be specified more than once."
+        ),
     )
     registry_oci_index.add_argument(
         "--source-tag",
@@ -1311,7 +1316,7 @@ def registry_command(args: argparse.Namespace) -> int:
             return create_oci_index(
                 args.ref,
                 tuple(args.source_tags),
-                args.tag,
+                tuple(args.tags),
                 project_root=_project_root(args),
             )
         if args.registry_oci_action == "list":

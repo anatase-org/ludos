@@ -223,7 +223,7 @@ def upload_oci(
 def create_oci_index(
     ref: str,
     source_tags: tuple[str, ...],
-    target_tag: str,
+    target_tags: tuple[str, ...],
     *,
     environ: Mapping[str, str] | None = None,
     client: Any | None = None,
@@ -232,8 +232,8 @@ def create_oci_index(
 ) -> int:
     repo_ref = _validate_ref(ref)
     sources = _validate_tags(source_tags, command="registry oci index")
-    target = _validate_tags((target_tag,), command="registry oci index")[0]
-    if target in sources:
+    targets = _validate_tags(target_tags, command="registry oci index")
+    if any(target in sources for target in targets):
         raise ConfigError("OCI index target tag must differ from every source tag")
 
     config = _s3_config_from_env(environ)
@@ -361,20 +361,22 @@ def create_oci_index(
             config=signing_config,
         )
 
-    target_key = _tag_key(repo_ref, target)
-    try:
-        s3.put_object(
-            Bucket=bucket,
-            Key=target_key,
-            Body=index_bytes,
-            ContentType=OCI_INDEX_MEDIA_TYPE,
-            CacheControl=OCI_MUTABLE_CACHE_CONTROL,
-        )
-    except Exception as exc:
-        raise ConfigError(f"S3 upload failed for {target_key}: {exc}") from exc
+    for target in targets:
+        target_key = _tag_key(repo_ref, target)
+        try:
+            s3.put_object(
+                Bucket=bucket,
+                Key=target_key,
+                Body=index_bytes,
+                ContentType=OCI_INDEX_MEDIA_TYPE,
+                CacheControl=OCI_MUTABLE_CACHE_CONTROL,
+            )
+        except Exception as exc:
+            raise ConfigError(f"S3 upload failed for {target_key}: {exc}") from exc
     _upload_tags_list(s3, bucket, repo_ref, _list_oci_tags(s3, bucket, repo_ref))
     sources_text = ", ".join(source_tags)
-    log(f"Uploaded OCI index {repo_ref}:{target} from: {sources_text}")
+    targets_text = ", ".join(targets)
+    log(f"Uploaded OCI index {repo_ref} with tags {targets_text} from: {sources_text}")
     return 0
 
 
