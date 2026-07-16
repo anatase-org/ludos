@@ -257,6 +257,74 @@ class TargetCardBuildTests(unittest.TestCase):
             _final_manifest_hash(second, mode="combined"),
         )
 
+    def test_final_manifest_hash_canonicalizes_package_order(self) -> None:
+        first = replace(
+            self._metadata(),
+            common_packages=("zlib-1", "bash-1"),
+            bootstrap_packages=("systemd-1", "filesystem-1"),
+            card_packages=(("base-scx", ("jq-1", "curl-1")),),
+            card_resolutions=(("base-scx", ("zlib-1", "jq-1", "curl-1")),),
+            package_ids=(
+                ("zlib-1", "zlib", "x86_64"),
+                ("jq-1", "jq", "x86_64"),
+            ),
+            build_images=(
+                BuildImagePlan(
+                    block="base-scx",
+                    image="localhost/builds:f44-x86_64-base-scx",
+                    builder_image="localhost/builders:f44-x86_64-builder",
+                    builder_packages=("rpm-build-1",),
+                    declared_package_ids=(("zlib", "x86_64"), ("jq", "x86_64")),
+                ),
+            ),
+            oci_images=(
+                OciImagePlan(
+                    block="base-scx",
+                    name="example",
+                    image="localhost/oci:example",
+                    digest="sha256:example",
+                    packages=("zlib-1", "jq-1"),
+                    declared_package_ids=(("zlib", "x86_64"), ("jq", "x86_64")),
+                ),
+            ),
+        )
+        second = replace(
+            first,
+            common_packages=tuple(reversed(first.common_packages)),
+            bootstrap_packages=tuple(reversed(first.bootstrap_packages)),
+            card_packages=tuple(
+                (block, tuple(reversed(packages)))
+                for block, packages in first.card_packages
+            ),
+            card_resolutions=tuple(
+                (block, tuple(reversed(packages)))
+                for block, packages in first.card_resolutions
+            ),
+            package_ids=tuple(reversed(first.package_ids)),
+            build_images=(
+                replace(
+                    first.build_images[0],
+                    declared_package_ids=tuple(
+                        reversed(first.build_images[0].declared_package_ids)
+                    ),
+                ),
+            ),
+            oci_images=(
+                replace(
+                    first.oci_images[0],
+                    packages=tuple(reversed(first.oci_images[0].packages)),
+                    declared_package_ids=tuple(
+                        reversed(first.oci_images[0].declared_package_ids)
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            _final_manifest_hash(first, mode="combined"),
+            _final_manifest_hash(second, mode="combined"),
+        )
+
     def test_spec_hash_is_not_part_of_builder_image_hash(self) -> None:
         self._write_build_manifest()
 

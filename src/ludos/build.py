@@ -2485,18 +2485,22 @@ def _final_manifest_hash(metadata: ResolvedBuildMetadata, *, mode: str) -> str:
         "orchestrator": metadata.orchestrator,
         "manifest_labels": manifest_labels,
         "generated_labels": (LUDOS_TAG_LABEL,),
-        "common_packages": metadata.common_packages,
-        "bootstrap_packages": metadata.bootstrap_packages,
+        "common_packages": tuple(sorted(metadata.common_packages)),
+        "bootstrap_packages": tuple(sorted(metadata.bootstrap_packages)),
         "card_order": metadata.card_order,
-        "card_packages": metadata.card_packages,
-        "card_resolutions": metadata.card_resolutions,
-        "package_ids": metadata.package_ids,
+        "card_packages": _canonical_package_blocks(metadata.card_packages),
+        "card_resolutions": _canonical_package_blocks(metadata.card_resolutions),
+        "package_ids": tuple(sorted(metadata.package_ids)),
         "package_images": tuple(
             (plan.block, _image_tag(plan.image))
             for plan in metadata.package_images
         ),
         "build_images": tuple(
-            (plan.block, _image_tag(plan.image), plan.declared_package_ids)
+            (
+                plan.block,
+                _image_tag(plan.image),
+                tuple(sorted(plan.declared_package_ids)),
+            )
             for plan in metadata.build_images
         ),
         "oci_images": tuple(
@@ -2504,8 +2508,8 @@ def _final_manifest_hash(metadata: ResolvedBuildMetadata, *, mode: str) -> str:
                 plan.block,
                 plan.name,
                 plan.digest,
-                plan.packages,
-                plan.declared_package_ids,
+                tuple(sorted(plan.packages)),
+                tuple(sorted(plan.declared_package_ids)),
             )
             for plan in metadata.oci_images
         ),
@@ -2515,6 +2519,12 @@ def _final_manifest_hash(metadata: ResolvedBuildMetadata, *, mode: str) -> str:
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:HASH_LENGTH]
+
+
+def _canonical_package_blocks(
+    blocks: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    return tuple((block, tuple(sorted(packages))) for block, packages in blocks)
 
 
 def _card_file_set_hash_inputs(
