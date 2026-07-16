@@ -860,7 +860,10 @@ def build_parser() -> argparse.ArgumentParser:
     ci_build_parser.add_argument(
         "--autoremove",
         action="store_true",
-        help="Remove each local output after it is uploaded.",
+        help=(
+            "Remove restored cards: and builds: dependencies after successful "
+            "builds and, with --upload, remove uploaded outputs."
+        ),
     )
     ci_build_parser.add_argument(
         "--ccache",

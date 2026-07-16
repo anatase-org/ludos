@@ -26,12 +26,15 @@ from ludos.ci import (
     SeedDiskSpaceError,
     _ci_remote_image_exists,
     _build_ci_package,
+    _build_ci_manifest_image,
+    _build_ci_flatpak,
     _create_seed_builder_image,
     _inspect_remote_labels,
     _manifest_tag,
     _metadata_from_seed_entry,
     _prepare_seed_rpms,
     _read_seed_entries,
+    _remove_ci_dependency_images,
     _remove_ci_remote_image,
     _rebase_ci_entry,
     _restore_ci_build_context,
@@ -1839,6 +1842,168 @@ class BuildCiTests(unittest.TestCase):
         image.assert_not_called()
         flatpak.assert_not_called()
 
+    def test_build_ci_autoremoves_dependencies_after_building_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_manifest = Path(temp) / "build.yml"
+            build_manifest.write_text(
+                yaml.safe_dump(
+                    {
+                        "version": 1,
+                        "builds": {},
+                        "images": {"image": {}},
+                        "flatpaks": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            events = []
+
+            def build(_manifest, _build_id, _entry, **kwargs):
+                events.append("build")
+                kwargs["cleanup_images"].add(
+                    ("podman", "builds:f44-base", "registry.example")
+                )
+
+            def remove(images):
+                events.append(("remove", images.copy()))
+
+            with (
+                patch("ludos.ci._build_ci_manifest_image", side_effect=build),
+                patch(
+                    "ludos.ci._remove_ci_dependency_images",
+                    side_effect=remove,
+                ),
+            ):
+                build_ci(
+                    ("image",),
+                    build_manifest=build_manifest,
+                    autoremove=True,
+                )
+
+        self.assertEqual(
+            events,
+            [
+                "build",
+                (
+                    "remove",
+                    {("podman", "builds:f44-base", "registry.example")},
+                ),
+            ],
+        )
+
+    def test_build_ci_does_not_autoremove_dependencies_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build_manifest = Path(temp) / "build.yml"
+            build_manifest.write_text(
+                yaml.safe_dump(
+                    {
+                        "version": 1,
+                        "builds": {},
+                        "images": {"image": {}},
+                        "flatpaks": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch(
+                    "ludos.ci._build_ci_manifest_image",
+                    side_effect=ConfigError("build failed"),
+                ),
+                patch("ludos.ci._remove_ci_dependency_images") as remove,
+            ):
+                with self.assertRaisesRegex(ConfigError, "build failed"):
+                    build_ci(
+                        ("image",),
+                        build_manifest=build_manifest,
+                        autoremove=True,
+                    )
+
+        remove.assert_not_called()
+
+    def test_manifest_build_marks_card_and_build_images_for_cleanup(self) -> None:
+        metadata = SimpleNamespace(
+            podman="podman",
+            ci_registry="registry.example",
+            output_image="images:f44-anatase-output",
+            package_images=(SimpleNamespace(image="cards:f44-base"),),
+            build_images=(SimpleNamespace(image="builds:f44-base"),),
+        )
+        result = SimpleNamespace(
+            output_image=metadata.output_image,
+            latest_image="images:anatase",
+        )
+        cleanup_images = set()
+        with (
+            patch("ludos.ci._metadata_from_seed_entry", return_value=metadata),
+            patch("ludos.ci._restore_ci_build_context"),
+            patch("ludos.ci.build_build_images", return_value=object()),
+            patch(
+                "ludos.ci.build_final_manifest_images",
+                return_value=(result,),
+            ),
+            patch("ludos.ci._upload_ci_output") as upload,
+        ):
+            _build_ci_manifest_image(
+                Path("cache/ci/build.yml"),
+                "anatase",
+                {"build": {}},
+                restored_contexts=set(),
+                cleanup_images=cleanup_images,
+                autoremove=False,
+            )
+
+        self.assertEqual(
+            cleanup_images,
+            {
+                ("podman", "cards:f44-base", "registry.example"),
+                ("podman", "builds:f44-base", "registry.example"),
+            },
+        )
+        upload.assert_not_called()
+
+    def test_flatpak_build_marks_build_image_for_cleanup(self) -> None:
+        metadata = SimpleNamespace(
+            podman="podman",
+            ci_registry="registry.example",
+        )
+        context = SimpleNamespace()
+        plan = SimpleNamespace(build_image="builds:f44-flatpak-kate")
+        result = SimpleNamespace(
+            image="flatpaks:f44-kate-output",
+            latest_image="flatpaks:kate",
+        )
+        cleanup_images = set()
+        with (
+            patch("ludos.ci._metadata_from_mapping", return_value=metadata),
+            patch("ludos.ci._restore_ci_build_context"),
+            patch("ludos.ci._prepared_flatpak_context", return_value=context),
+            patch("ludos.ci._prepared_flatpak_plan", return_value=plan),
+            patch(
+                "ludos.ci._ensure_flatpak_rpm_builds",
+                return_value=(plan,),
+            ),
+            patch(
+                "ludos.ci._ensure_flatpak_images",
+                return_value=(result,),
+            ),
+            patch("ludos.ci._upload_ci_output") as upload,
+        ):
+            _build_ci_flatpak(
+                Path("cache/ci/build.yml"),
+                "kate",
+                {"build": {}},
+                restored_contexts=set(),
+                cleanup_images=cleanup_images,
+                autoremove=False,
+            )
+
+        self.assertEqual(
+            cleanup_images,
+            {("podman", "builds:f44-flatpak-kate", "registry.example")},
+        )
+        upload.assert_not_called()
+
     def test_upload_ci_output_removes_aliases_only_after_upload(self) -> None:
         with (
             patch("ludos.ci._push_ci_image") as push,
@@ -1856,6 +2021,25 @@ class BuildCiTests(unittest.TestCase):
         self.assertEqual(
             remove.call_args_list,
             [call("podman", "images:latest"), call("podman", "images:exact")],
+        )
+
+    def test_remove_ci_dependency_images_removes_local_and_pulled_tags(self) -> None:
+        with patch("ludos.ci._remove_image") as remove:
+            _remove_ci_dependency_images(
+                {
+                    ("podman", "cards:f44-base", "ghcr.io/anatase-org"),
+                    ("podman", "builds:f44-base", "ghcr.io/anatase-org"),
+                }
+            )
+
+        self.assertEqual(
+            remove.call_args_list,
+            [
+                call("podman", "builds:f44-base"),
+                call("podman", "ghcr.io/anatase-org/builds:f44-base"),
+                call("podman", "cards:f44-base"),
+                call("podman", "ghcr.io/anatase-org/cards:f44-base"),
+            ],
         )
 
     def test_flatpak_package_build_pulls_prepared_builder_directly(self) -> None:

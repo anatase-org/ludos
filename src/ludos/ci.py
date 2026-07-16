@@ -49,6 +49,7 @@ from .common import (
     _ensure_image as _ensure_context_image,
     _extract_image_paths,
     _image_exists as _local_image_exists,
+    _remote_cache_image,
     _remote_cache_image_exists,
     _require_buildah as _require_context_buildah,
     _run_streamed_command,
@@ -428,6 +429,7 @@ def build_ci(
         flatpaks=flatpaks,
     )
     restored_contexts: set[tuple[str, str, tuple[str, ...]]] = set()
+    cleanup_images: set[tuple[str, str, str]] = set()
     for section in ("builds", "images", "flatpaks"):
         values = data[section]
         for build_id in selected[section]:
@@ -447,6 +449,7 @@ def build_ci(
                     build_id,
                     entry,
                     restored_contexts=restored_contexts,
+                    cleanup_images=cleanup_images,
                     upload=upload,
                     autoremove=autoremove,
                     ccache=ccache,
@@ -457,10 +460,13 @@ def build_ci(
                     build_id,
                     entry,
                     restored_contexts=restored_contexts,
+                    cleanup_images=cleanup_images,
                     upload=upload,
                     autoremove=autoremove,
                     ccache=ccache,
                 )
+    if autoremove:
+        _remove_ci_dependency_images(cleanup_images)
 
 
 def upload_ci(
@@ -912,6 +918,7 @@ def _build_ci_manifest_image(
     entry: object,
     *,
     restored_contexts: set[tuple[str, str, tuple[str, ...]]],
+    cleanup_images: set[tuple[str, str, str]],
     upload: bool = False,
     autoremove: bool,
     ccache: bool = False,
@@ -928,6 +935,10 @@ def _build_ci_manifest_image(
         restored_contexts,
         package_images=True,
         oci_images=True,
+    )
+    cleanup_images.update(
+        (metadata.podman, plan.image, metadata.ci_registry)
+        for plan in (*metadata.package_images, *metadata.build_images)
     )
     build_outputs = build_build_images((metadata,), cache_only=True)
     result = build_final_manifest_images(
@@ -957,6 +968,7 @@ def _build_ci_flatpak(
     entry: object,
     *,
     restored_contexts: set[tuple[str, str, tuple[str, ...]]],
+    cleanup_images: set[tuple[str, str, str]],
     upload: bool = False,
     autoremove: bool,
     ccache: bool = False,
@@ -973,6 +985,7 @@ def _build_ci_flatpak(
     _restore_ci_build_context(metadata, restored_contexts)
     context = _prepared_flatpak_context(metadata, entry)
     plan = _prepared_flatpak_plan(build_manifest, build_id, entry, metadata)
+    cleanup_images.add((metadata.podman, plan.build_image, metadata.ci_registry))
     plan = _ensure_flatpak_rpm_builds(
         context,
         (plan,),
@@ -1178,6 +1191,16 @@ def _upload_ci_output(
         if alias and alias != image:
             _remove_image(podman, alias)
     _remove_image(podman, image)
+
+
+def _remove_ci_dependency_images(
+    images: set[tuple[str, str, str]],
+) -> None:
+    for podman, image, ci_registry in sorted(images):
+        _remove_image(podman, image)
+        remote = _remote_cache_image(ci_registry, image)
+        if remote and remote != image:
+            _remove_image(podman, remote)
 
 
 def _prepare_seed_rpms(
