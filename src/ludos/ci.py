@@ -40,6 +40,7 @@ from .build import (
 )
 from .common import (
     ResolvedManifestContext,
+    _cache_name,
     _apply_repo_priority as _apply_repo_priority_from_context,
     _create_orchestrator_image,
     _create_repo_image,
@@ -62,8 +63,18 @@ from .flatpaks import (
 )
 from .logging import log
 from .model import ConfigError, FlatpakImagesConfig, Manifest, _spec_builds_tuple
-from .upload.flatpaks import update_flatpak_index, upload_flatpaks
-from .upload.registry import upload_oci
+from .upload.flatpaks import (
+    finish_flatpak_promotions,
+    plan_flatpak_promotions,
+    update_flatpak_index,
+    upload_flatpaks,
+)
+from .upload.registry import (
+    OciTagPromotion,
+    _validate_tags,
+    promote_oci_tags,
+    upload_oci,
+)
 
 
 DEFAULT_CI_CACHE_DIR = Path("cache")
@@ -498,6 +509,72 @@ def upload_ci(
             result = update_flatpak_index(manifest_path, prefix=prefix)
             if result != 0:
                 return result
+    return 0
+
+
+def promote_ci(
+    manifest_paths: tuple[Path, ...],
+    *,
+    prefix: str,
+    from_tag: str,
+    to_tag: str,
+    images: bool = False,
+    flatpaks: bool = False,
+    refresh: bool = False,
+) -> int:
+    if not manifest_paths:
+        raise ConfigError("at least one manifest is required")
+    if not prefix.strip():
+        raise ConfigError("CI promotion requires a non-empty --prefix")
+    if not from_tag or not to_tag:
+        raise ConfigError("CI promotion requires non-empty --from and --to tags")
+    from_tag = _validate_tags((from_tag,), command="ci promote")[0]
+    to_tag = _validate_tags((to_tag,), command="ci promote")[0]
+    if from_tag == to_tag:
+        raise ConfigError("CI promotion --from and --to tags must differ")
+    if not images and not flatpaks:
+        images = True
+        flatpaks = True
+
+    manifests = tuple(path.expanduser().resolve() for path in manifest_paths)
+    for manifest_path in manifests:
+        Manifest.from_file(manifest_path)
+
+    flatpak_plans = tuple()
+    if flatpaks:
+        flatpak_plans = tuple(
+            plan
+            for manifest_path in manifests
+            for plan in plan_flatpak_promotions(manifest_path, prefix=prefix)
+        )
+        flatpak_plans = tuple(
+            {
+                (plan.ref, plan.source_tag, plan.target_tag): plan
+                for plan in flatpak_plans
+            }.values()
+        )
+
+    promotions = []
+    if images:
+        for manifest_path in manifests:
+            promotions.append(
+                OciTagPromotion(
+                    _cache_name(manifest_path.stem, "image"),
+                    from_tag,
+                    to_tag,
+                )
+            )
+    promotions.extend(
+        OciTagPromotion(plan.ref, plan.source_tag, plan.target_tag)
+        for plan in flatpak_plans
+    )
+    promoted = promote_oci_tags(tuple(promotions))
+    if flatpak_plans:
+        return finish_flatpak_promotions(
+            flatpak_plans,
+            promoted,
+            refresh=refresh,
+        )
     return 0
 
 

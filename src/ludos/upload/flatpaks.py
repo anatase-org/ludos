@@ -63,6 +63,7 @@ from .gpg import (
     verify_attached_data,
 )
 from .registry import (
+    PromotedOciTag,
     _list_object_keys,
     referenced_oci_manifest_digests,
     tree_shake_oci,
@@ -114,6 +115,14 @@ class ExportedFlatpakImage:
     export_dir: Path
     flatpak_ref: str
     tag: str
+
+
+@dataclass(frozen=True)
+class FlatpakPromotionPlan:
+    context: FlatpakUploadContext
+    ref: str
+    source_tag: str
+    target_tag: str
 
 
 def flatpak_oci_layout_path(cache_dir: Path, name: str, tag: str) -> Path:
@@ -272,6 +281,92 @@ def update_flatpak_index(manifest: Path, *, prefix: str = "") -> int:
         require_podman=False,
     )
     return update_flatpak_static_index(f"{prefix}{context.distro}")
+
+
+def plan_flatpak_promotions(
+    manifest: Path,
+    *,
+    prefix: str,
+) -> tuple[FlatpakPromotionPlan, ...]:
+    if not prefix.strip():
+        raise ConfigError("CI flatpak promotion requires a non-empty --prefix")
+    context = _resolve_flatpak_upload_context(
+        manifest,
+        cache_dir=None,
+        require_podman=False,
+    )
+    source_tag = f"{prefix}{context.distro}"
+    plans = []
+    seen_refs = set()
+    for flatpak in context.validation.manifest.flatpaks:
+        path = _flatpak_card_path(
+            _manifest_flatpak_path(Path(flatpak), context.root_dir)
+        )
+        ref = f"flatpaks/{path.parent.resolve().name}"
+        if ref in seen_refs:
+            continue
+        seen_refs.add(ref)
+        plans.append(
+            FlatpakPromotionPlan(
+                context=context,
+                ref=ref,
+                source_tag=source_tag,
+                target_tag=context.distro,
+            )
+        )
+    return tuple(plans)
+
+
+def finish_flatpak_promotions(
+    plans: tuple[FlatpakPromotionPlan, ...],
+    promoted: tuple[PromotedOciTag, ...],
+    *,
+    refresh: bool,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
+) -> int:
+    promoted_by_target = {
+        (item.ref, item.source_tag, item.target_tag): item
+        for item in promoted
+    }
+    signing_configs: dict[Path, GpgSigningConfig] = {}
+    for plan in plans:
+        result = promoted_by_target.get(
+            (plan.ref, plan.source_tag, plan.target_tag)
+        )
+        if result is None:
+            raise ConfigError(
+                f"flatpak promotion result is missing: {plan.ref}:{plan.target_tag}"
+            )
+        if not _flatpak_gpg_enabled(plan.context.flatpak_gpg):
+            continue
+        root_dir = plan.context.root_dir.resolve()
+        signing_config = signing_configs.get(root_dir)
+        if signing_config is None:
+            signing_config = _flatpak_gpg_signing_config(plan.context, environ)
+            signing_configs[root_dir] = signing_config
+        _sign_and_upload_flatpak_signature(
+            plan.context,
+            repo=plan.ref,
+            tag=plan.target_tag,
+            manifest_digest=result.manifest_digest,
+            signing_config=signing_config,
+            environ=environ,
+            client=client,
+        )
+
+    if refresh:
+        refreshed = set()
+        for plan in plans:
+            if plan.target_tag in refreshed:
+                continue
+            refreshed.add(plan.target_tag)
+            update_flatpak_static_index(
+                plan.target_tag,
+                environ=environ,
+                client=client,
+            )
+    return 0
 
 
 def upload_dummy_runtime(
@@ -767,13 +862,37 @@ def _sign_and_upload_flatpak_oci_signature(
     if not _flatpak_gpg_enabled(context.flatpak_gpg):
         return
     manifest_digest = _exported_flatpak_manifest_digest(target.export_dir)
-    payload = _flatpak_signature_payload(
-        context.flatpak_gpg,
+    _sign_and_upload_flatpak_signature(
+        context,
         repo=target.ref,
         tag=target.tag,
         manifest_digest=manifest_digest,
+        signing_config=None,
+        environ=environ,
+        client=client,
     )
-    signing_config = _flatpak_gpg_signing_config(context, environ)
+
+
+def _sign_and_upload_flatpak_signature(
+    context: FlatpakUploadContext,
+    *,
+    repo: str,
+    tag: str,
+    manifest_digest: str,
+    signing_config: GpgSigningConfig | None,
+    environ: Mapping[str, str] | None,
+    client: Any | None,
+) -> None:
+    payload = _flatpak_signature_payload(
+        context.flatpak_gpg,
+        repo=repo,
+        tag=tag,
+        manifest_digest=manifest_digest,
+    )
+    signing_config = signing_config or _flatpak_gpg_signing_config(
+        context,
+        environ,
+    )
     signature = sign_attached_data(payload, signing_config)
     if context.flatpak_gpg.verify:
         verify_attached_data(
@@ -786,7 +905,7 @@ def _sign_and_upload_flatpak_oci_signature(
         )
     _upload_flatpak_signature(
         context,
-        target,
+        repo,
         manifest_digest,
         signature,
         environ=environ,
@@ -852,7 +971,7 @@ def _flatpak_signature_docker_reference(identity: str, repo: str, tag: str) -> s
 
 def _upload_flatpak_signature(
     context: FlatpakUploadContext,
-    target: FlatpakUploadTarget,
+    ref: str,
     manifest_digest: str,
     signature: bytes,
     *,
@@ -866,7 +985,7 @@ def _upload_flatpak_signature(
     s3 = client if client is not None else _create_s3_client(config, environ)
     prefix = _join_s3_key(
         context.flatpak_gpg.lookaside,
-        f"{target.ref}@sha256={digest}",
+        f"{ref}@sha256={digest}",
     )
     slot = _next_flatpak_signature_slot(s3, config.bucket, prefix)
     key = f"{prefix}/signature-{slot}"

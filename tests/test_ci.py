@@ -39,11 +39,13 @@ from ludos.ci import (
     build_ci,
     init_ci,
     prepare_ci,
+    promote_ci,
     seed_ci,
     upload_ci,
     write_ci_env,
 )
 from ludos.model import ConfigError, SpecBuild
+from ludos.upload.registry import OciTagPromotion, PromotedOciTag
 
 
 class CiParserTests(unittest.TestCase):
@@ -215,6 +217,34 @@ class CiParserTests(unittest.TestCase):
         self.assertTrue(args.refresh)
         self.assertEqual(args.tags, ["candidate", "latest", "stable"])
         self.assertEqual(args.prefix, "rolling-")
+
+    def test_parser_accepts_ci_promote_options(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "promote",
+                "anatase.yml",
+                "other.yml",
+                "--images",
+                "--flatpaks",
+                "--refresh",
+                "--prefix",
+                "rolling-",
+                "--from",
+                "rolling",
+                "--to",
+                "stable",
+            ]
+        )
+
+        self.assertEqual(args.ci_action, "promote")
+        self.assertEqual(args.manifests, [Path("anatase.yml"), Path("other.yml")])
+        self.assertTrue(args.images)
+        self.assertTrue(args.flatpaks)
+        self.assertTrue(args.refresh)
+        self.assertEqual(args.prefix, "rolling-")
+        self.assertEqual(args.from_tag, "rolling")
+        self.assertEqual(args.to_tag, "stable")
 
     def test_prepare_ci_rejects_unsupported_options(self) -> None:
         parser = build_parser()
@@ -407,6 +437,36 @@ class CiParserTests(unittest.TestCase):
             refresh=True,
             tags=("candidate", "stable"),
             prefix="rolling-",
+        )
+
+    def test_ci_command_calls_promote_ci(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "promote",
+                "anatase.yml",
+                "--refresh",
+                "--prefix",
+                "rolling-",
+                "--from",
+                "rolling",
+                "--to",
+                "stable",
+            ]
+        )
+
+        with patch("ludos.__main__.promote_ci", return_value=0) as promote:
+            exit_code = ci_command(args)
+
+        self.assertEqual(exit_code, 0)
+        promote.assert_called_once_with(
+            (Path("anatase.yml"),),
+            prefix="rolling-",
+            from_tag="rolling",
+            to_tag="stable",
+            images=False,
+            flatpaks=False,
+            refresh=True,
         )
 
     def test_main_returns_7_for_seed_disk_space_error(self) -> None:
@@ -1698,6 +1758,108 @@ class BuildCiTests(unittest.TestCase):
             "registry.example",
             autoremove=False,
         )
+
+
+class PromoteCiTests(unittest.TestCase):
+    def test_promote_ci_defaults_to_images_and_flatpaks(self) -> None:
+        manifest = Path("anatase.yml").resolve()
+        plan = SimpleNamespace(
+            ref="flatpaks/kate",
+            source_tag="rolling-f44-x86_64",
+            target_tag="f44-x86_64",
+        )
+        promoted = (
+            PromotedOciTag(
+                "anatase",
+                "rolling",
+                "stable",
+                "sha256:" + "a" * 64,
+            ),
+            PromotedOciTag(
+                plan.ref,
+                plan.source_tag,
+                plan.target_tag,
+                "sha256:" + "b" * 64,
+            ),
+        )
+        with (
+            patch("ludos.ci.Manifest.from_file"),
+            patch(
+                "ludos.ci.plan_flatpak_promotions",
+                return_value=(plan,),
+            ) as flatpak_plans,
+            patch("ludos.ci.promote_oci_tags", return_value=promoted) as promote,
+            patch(
+                "ludos.ci.finish_flatpak_promotions",
+                return_value=0,
+            ) as finish,
+        ):
+            result = promote_ci(
+                (Path("anatase.yml"),),
+                prefix="rolling-",
+                from_tag="rolling",
+                to_tag="stable",
+                refresh=True,
+            )
+
+        self.assertEqual(result, 0)
+        flatpak_plans.assert_called_once_with(manifest, prefix="rolling-")
+        promote.assert_called_once_with(
+            (
+                OciTagPromotion("anatase", "rolling", "stable"),
+                OciTagPromotion(
+                    "flatpaks/kate",
+                    "rolling-f44-x86_64",
+                    "f44-x86_64",
+                ),
+            )
+        )
+        finish.assert_called_once_with((plan,), promoted, refresh=True)
+
+    def test_promote_ci_images_only_does_not_plan_flatpaks(self) -> None:
+        with (
+            patch("ludos.ci.Manifest.from_file"),
+            patch("ludos.ci.plan_flatpak_promotions") as flatpak_plans,
+            patch("ludos.ci.promote_oci_tags", return_value=tuple()) as promote,
+        ):
+            self.assertEqual(
+                promote_ci(
+                    (Path("anatase.yml"),),
+                    prefix="rolling-",
+                    from_tag="rolling",
+                    to_tag="stable",
+                    images=True,
+                ),
+                0,
+            )
+
+        flatpak_plans.assert_not_called()
+        promote.assert_called_once_with(
+            (OciTagPromotion("anatase", "rolling", "stable"),)
+        )
+
+    def test_promote_ci_validates_required_values(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "at least one manifest"):
+            promote_ci(
+                tuple(),
+                prefix="rolling-",
+                from_tag="rolling",
+                to_tag="stable",
+            )
+        with self.assertRaisesRegex(ConfigError, "non-empty --prefix"):
+            promote_ci(
+                (Path("anatase.yml"),),
+                prefix="",
+                from_tag="rolling",
+                to_tag="stable",
+            )
+        with self.assertRaisesRegex(ConfigError, "must differ"):
+            promote_ci(
+                (Path("anatase.yml"),),
+                prefix="rolling-",
+                from_tag="stable",
+                to_tag="stable",
+            )
 
 
 class UploadCiTests(unittest.TestCase):

@@ -16,9 +16,11 @@ from ludos.upload.registry import (
     DEFAULT_MANIFEST_MEDIA_TYPE,
     OCI_IMMUTABLE_CACHE_CONTROL,
     OCI_MUTABLE_CACHE_CONTROL,
+    OciTagPromotion,
     delete_oci_tags,
     list_oci_tags,
     prune_oci_tags,
+    promote_oci_tags,
     registry_init,
     tree_shake_oci,
     update_flatpak_static_index,
@@ -33,6 +35,76 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class UploadRegistryTests(unittest.TestCase):
+    def test_promote_oci_tags_preflights_mirrors_and_deduplicates(self) -> None:
+        manifest = json.dumps({"schemaVersion": 2, "layers": []}).encode()
+        client = FakeS3Client(
+            {
+                ("anatase-artifacts", "v2/anatase/manifests/rolling"): manifest,
+                ("anatase-artifacts", "v2/anatase/manifests/stable"): b"old",
+            }
+        )
+        promotion = OciTagPromotion("anatase", "rolling", "stable")
+
+        promoted = promote_oci_tags(
+            (promotion, promotion),
+            environ=ENV,
+            client=client,
+        )
+
+        self.assertEqual(len(promoted), 1)
+        self.assertEqual(
+            promoted[0].manifest_digest,
+            f"sha256:{hashlib.sha256(manifest).hexdigest()}",
+        )
+        self.assertEqual(
+            client.objects[
+                ("anatase-artifacts", "v2/anatase/manifests/stable")
+            ],
+            manifest,
+        )
+        target_puts = [
+            put
+            for put in client.puts
+            if put["Key"] == "v2/anatase/manifests/stable"
+        ]
+        self.assertEqual(len(target_puts), 1)
+        self.assertEqual(target_puts[0]["ContentType"], DEFAULT_MANIFEST_MEDIA_TYPE)
+        self.assertEqual(target_puts[0]["CacheControl"], OCI_MUTABLE_CACHE_CONTROL)
+        tags = json.loads(
+            client.objects[("anatase-artifacts", "v2/anatase/tags/list")]
+        )
+        self.assertEqual(tags, {"name": "anatase", "tags": ["rolling", "stable"]})
+
+    def test_promote_oci_tags_missing_source_writes_nothing(self) -> None:
+        manifest = json.dumps({"schemaVersion": 2, "layers": []}).encode()
+        client = FakeS3Client(
+            {
+                ("anatase-artifacts", "v2/anatase/manifests/rolling"): manifest,
+            }
+        )
+
+        with self.assertRaisesRegex(ConfigError, "OCI source tag is missing"):
+            promote_oci_tags(
+                (
+                    OciTagPromotion("anatase", "rolling", "stable"),
+                    OciTagPromotion("flatpaks/kate", "rolling-f44", "f44"),
+                ),
+                environ=ENV,
+                client=client,
+            )
+
+        self.assertEqual(client.puts, [])
+
+    def test_promote_oci_tags_rejects_invalid_or_identical_tags(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "invalid OCI tag"):
+            promote_oci_tags(
+                (OciTagPromotion("anatase", "bad/tag", "stable"),)
+            )
+        with self.assertRaisesRegex(ConfigError, "must differ"):
+            promote_oci_tags(
+                (OciTagPromotion("anatase", "stable", "stable"),)
+            )
+
     def test_registry_init_parser(self) -> None:
         args = build_parser().parse_args(["registry", "init"])
 

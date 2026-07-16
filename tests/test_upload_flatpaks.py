@@ -21,13 +21,17 @@ from ludos.model import (
 )
 from ludos.upload.common import REGISTRY_IMMUTABLE_CACHE_CONTROL
 from ludos.upload.flatpaks import (
+    FlatpakPromotionPlan,
     export_flatpak_oci_images,
+    finish_flatpak_promotions,
+    plan_flatpak_promotions,
     tree_shake_flatpaks,
     update_flatpak_index,
     upload_dummy_runtime,
     upload_flatpaks,
     _flatpak_signature_payload,
 )
+from ludos.upload.registry import PromotedOciTag
 from .test_upload_file import ENV, FakeS3Client
 
 
@@ -35,6 +39,104 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class UploadFlatpaksTests(unittest.TestCase):
+    def test_plan_flatpak_promotions_uses_only_manifest_flatpaks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(
+                root,
+                ("flatpaks/kate", "flatpaks/ark"),
+            )
+
+            plans = plan_flatpak_promotions(manifest, prefix="rolling-")
+
+        self.assertEqual(
+            [(plan.ref, plan.source_tag, plan.target_tag) for plan in plans],
+            [
+                ("flatpaks/kate", "rolling-f44-x86_64", "f44-x86_64"),
+                ("flatpaks/ark", "rolling-f44-x86_64", "f44-x86_64"),
+            ],
+        )
+
+    def test_finish_flatpak_promotions_signs_target_before_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            context = SimpleNamespace(
+                root_dir=root,
+                flatpak_gpg=FlatpakGpgConfig(
+                    identity="https://flatpaks.example.test/",
+                    lookaside="gpg",
+                    verify="",
+                ),
+            )
+            plan = FlatpakPromotionPlan(
+                context=context,
+                ref="flatpaks/kate",
+                source_tag="rolling-f44-x86_64",
+                target_tag="f44-x86_64",
+            )
+            digest = "sha256:" + "a" * 64
+            result = PromotedOciTag(
+                plan.ref,
+                plan.source_tag,
+                plan.target_tag,
+                digest,
+            )
+            events = []
+
+            def sign(payload: bytes, _config: object) -> bytes:
+                data = json.loads(payload)
+                events.append(("sign", data["critical"]["identity"]["docker-reference"]))
+                return b"signed"
+
+            with (
+                patch(
+                    "ludos.upload.flatpaks._flatpak_gpg_signing_config",
+                    return_value=SimpleNamespace(),
+                ),
+                patch(
+                    "ludos.upload.flatpaks.sign_attached_data",
+                    side_effect=sign,
+                ),
+                patch(
+                    "ludos.upload.flatpaks._upload_flatpak_signature",
+                    side_effect=lambda *_args, **_kwargs: events.append(("upload",)),
+                ) as upload_signature,
+                patch(
+                    "ludos.upload.flatpaks.update_flatpak_static_index",
+                    side_effect=lambda tag, **_kwargs: events.append(("refresh", tag)) or 0,
+                ) as refresh,
+            ):
+                self.assertEqual(
+                    finish_flatpak_promotions(
+                        (plan,),
+                        (result,),
+                        refresh=True,
+                    ),
+                    0,
+                )
+
+        self.assertEqual(
+            events,
+            [
+                ("sign", "flatpaks.example.test/flatpaks/kate:f44-x86_64"),
+                ("upload",),
+                ("refresh", "f44-x86_64"),
+            ],
+        )
+        upload_signature.assert_called_once_with(
+            context,
+            "flatpaks/kate",
+            digest,
+            b"signed",
+            environ=None,
+            client=None,
+        )
+        refresh.assert_called_once_with(
+            "f44-x86_64",
+            environ=None,
+            client=None,
+        )
+
     def test_update_flatpak_index_prefixes_distro(self) -> None:
         context = SimpleNamespace(distro="f44-x86_64")
         with (

@@ -58,6 +58,21 @@ class Descriptor:
         return value
 
 
+@dataclass(frozen=True)
+class OciTagPromotion:
+    ref: str
+    source_tag: str
+    target_tag: str
+
+
+@dataclass(frozen=True)
+class PromotedOciTag:
+    ref: str
+    source_tag: str
+    target_tag: str
+    manifest_digest: str
+
+
 def registry_init(
     *,
     environ: Mapping[str, str] | None = None,
@@ -203,6 +218,102 @@ def upload_oci(
     log(f"Uploaded {_format_mb(uploaded_layer_bytes)}.")
     log(f"Uploaded OCI repository {repo_ref} with tags: {', '.join(tag_list)}")
     return 0
+
+
+def promote_oci_tags(
+    promotions: tuple[OciTagPromotion, ...],
+    *,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
+) -> tuple[PromotedOciTag, ...]:
+    prepared: list[tuple[OciTagPromotion, bytes, str]] = []
+    seen: set[OciTagPromotion] = set()
+    sources_by_target: dict[tuple[str, str], str] = {}
+    for promotion in promotions:
+        ref = _validate_ref(promotion.ref)
+        source_tag = _validate_tags(
+            (promotion.source_tag,), command="ci promote"
+        )[0]
+        target_tag = _validate_tags(
+            (promotion.target_tag,), command="ci promote"
+        )[0]
+        if source_tag == target_tag:
+            raise ConfigError(
+                f"CI promotion source and target tags must differ: {ref}:{source_tag}"
+            )
+        normalized = OciTagPromotion(ref, source_tag, target_tag)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        target = (ref, target_tag)
+        previous_source = sources_by_target.setdefault(target, source_tag)
+        if previous_source != source_tag:
+            raise ConfigError(
+                f"conflicting CI promotion sources for {ref}:{target_tag}: "
+                f"{previous_source}, {source_tag}"
+            )
+        prepared.append((normalized, b"", ""))
+
+    if not prepared:
+        return tuple()
+    config = _s3_config_from_env(environ)
+    s3 = client if client is not None else _create_s3_client(config, environ)
+    bucket = config.bucket
+
+    # Read every source before writing any destination so missing staging tags
+    # cannot leave a predictable partial promotion behind.
+    for index, (promotion, _body, _content_type) in enumerate(prepared):
+        key = _tag_key(promotion.ref, promotion.source_tag)
+        try:
+            response = s3.get_object(Bucket=bucket, Key=key)
+        except Exception as exc:
+            if _client_error_code(exc) in ("404", "NoSuchKey", "NotFound"):
+                raise ConfigError(
+                    "OCI source tag is missing: "
+                    f"{promotion.ref}:{promotion.source_tag}"
+                ) from exc
+            raise ConfigError(f"S3 download failed for {key}: {exc}") from exc
+        body = response.get("Body")
+        data = b"" if body is None else body.read()
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        content_type = response.get("ContentType", DEFAULT_MANIFEST_MEDIA_TYPE)
+        if not isinstance(content_type, str) or not content_type:
+            content_type = DEFAULT_MANIFEST_MEDIA_TYPE
+        _loads_json(data, f"OCI source manifest {key}")
+        prepared[index] = (promotion, data, content_type)
+
+    promoted = []
+    changed_refs: dict[str, None] = {}
+    for promotion, body, content_type in prepared:
+        target_key = _tag_key(promotion.ref, promotion.target_tag)
+        log(
+            f"Promoting OCI tag: {promotion.ref}:{promotion.source_tag} "
+            f"to {promotion.ref}:{promotion.target_tag}"
+        )
+        try:
+            s3.put_object(
+                Bucket=bucket,
+                Key=target_key,
+                Body=body,
+                ContentType=content_type,
+                CacheControl=OCI_MUTABLE_CACHE_CONTROL,
+            )
+        except Exception as exc:
+            raise ConfigError(f"S3 upload failed for {target_key}: {exc}") from exc
+        changed_refs.setdefault(promotion.ref, None)
+        promoted.append(
+            PromotedOciTag(
+                ref=promotion.ref,
+                source_tag=promotion.source_tag,
+                target_tag=promotion.target_tag,
+                manifest_digest=f"sha256:{hashlib.sha256(body).hexdigest()}",
+            )
+        )
+
+    for ref in changed_refs:
+        _upload_tags_list(s3, bucket, ref, _list_oci_tags(s3, bucket, ref))
+    return tuple(promoted)
 
 
 def delete_oci_tags(
