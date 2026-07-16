@@ -32,6 +32,7 @@ from ludos.ci import (
     _metadata_from_seed_entry,
     _prepare_seed_rpms,
     _read_seed_entries,
+    _remove_ci_remote_image,
     _rebase_ci_entry,
     _restore_ci_build_context,
     _seed_rpm_download_sizes,
@@ -40,6 +41,7 @@ from ludos.ci import (
     init_ci,
     prepare_ci,
     promote_ci,
+    remove_ci,
     seed_ci,
     upload_ci,
     write_ci_env,
@@ -245,6 +247,23 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.prefix, "rolling-")
         self.assertEqual(args.from_tag, "rolling")
         self.assertEqual(args.to_tag, "stable")
+
+    def test_parser_accepts_composable_ci_remove_selectors(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "remove",
+                "image-id",
+                "flatpak-id",
+                "--images",
+                "--flatpaks",
+            ]
+        )
+
+        self.assertEqual(args.ci_action, "remove")
+        self.assertEqual(args.remove_ids, ["image-id", "flatpak-id"])
+        self.assertTrue(args.images)
+        self.assertTrue(args.flatpaks)
 
     def test_prepare_ci_rejects_unsupported_options(self) -> None:
         parser = build_parser()
@@ -467,6 +486,21 @@ class CiParserTests(unittest.TestCase):
             images=False,
             flatpaks=False,
             refresh=True,
+        )
+
+    def test_ci_command_calls_remove_ci(self) -> None:
+        args = build_parser().parse_args(
+            ["ci", "remove", "image", "0", "--flatpaks"]
+        )
+
+        with patch("ludos.__main__.remove_ci", return_value=0) as remove:
+            exit_code = ci_command(args)
+
+        self.assertEqual(exit_code, 0)
+        remove.assert_called_once_with(
+            ("image", "0"),
+            images=False,
+            flatpaks=True,
         )
 
     def test_main_returns_7_for_seed_disk_space_error(self) -> None:
@@ -1940,6 +1974,76 @@ class UploadCiTests(unittest.TestCase):
     def test_upload_ci_requires_an_output_selector(self) -> None:
         with self.assertRaisesRegex(ConfigError, "at least one CI upload ID"):
             upload_ci(tuple())
+
+    def test_remove_ci_removes_selected_registry_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = self._write_manifest(root)
+            build_manifest = self._write_build_manifest(root, manifest)
+
+            with (
+                patch("ludos.ci.Path.cwd", return_value=root.resolve()),
+                patch("ludos.ci._remove_ci_remote_image") as remove,
+            ):
+                result = remove_ci(
+                    ("f44-anatase",),
+                    build_manifest=build_manifest,
+                    flatpaks=True,
+                )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            remove.call_args_list,
+            [
+                call("images:f44-anatase-output", "ghcr.io/example"),
+                call("flatpaks:f44-kate-output", "ghcr.io/example"),
+            ],
+        )
+
+    def test_remove_ci_attempts_every_output_before_reporting_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = self._write_manifest(root)
+            build_manifest = self._write_build_manifest(root, manifest)
+
+            with (
+                patch("ludos.ci.Path.cwd", return_value=root.resolve()),
+                patch(
+                    "ludos.ci._remove_ci_remote_image",
+                    side_effect=(ConfigError("first failed"), None),
+                ) as remove,
+                self.assertRaisesRegex(ConfigError, "first failed"),
+            ):
+                remove_ci(
+                    tuple(),
+                    build_manifest=build_manifest,
+                    images=True,
+                    flatpaks=True,
+                )
+
+        self.assertEqual(remove.call_count, 2)
+
+    def test_remove_ci_requires_an_output_selector(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "at least one CI remove ID"):
+            remove_ci(tuple())
+
+    def test_remove_ci_remote_image_ignores_missing_manifest(self) -> None:
+        with (
+            patch("ludos.ci.shutil.which", return_value="/usr/bin/skopeo"),
+            patch(
+                "ludos.ci._run_streamed_command",
+                return_value=(1, "manifest unknown"),
+            ) as run,
+        ):
+            _remove_ci_remote_image("flatpaks:output", "ghcr.io/example")
+
+        run.assert_called_once_with(
+            [
+                "/usr/bin/skopeo",
+                "delete",
+                "docker://ghcr.io/example/flatpaks:output",
+            ]
+        )
 
     def _write_manifest(self, root: Path) -> Path:
         manifest = root / "anatase.yml"

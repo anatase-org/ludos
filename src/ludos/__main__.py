@@ -19,6 +19,7 @@ from .ci import (
     init_ci,
     prepare_ci,
     promote_ci,
+    remove_ci,
     seed_ci,
     upload_ci,
     write_ci_env,
@@ -883,6 +884,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prefix for uploaded flatpak tags and the refreshed static index.",
     )
     ci_upload_parser.set_defaults(func=ci_command)
+    ci_remove_parser = ci_subcommands.add_parser(
+        "remove",
+        help="Remove built final images and flatpaks from the CI registry.",
+    )
+    ci_remove_parser.add_argument(
+        "remove_ids",
+        nargs="*",
+        metavar="OUTPUT_ID",
+        help="Prepared image or flatpak IDs. The ID 0 is a no-op.",
+    )
+    ci_remove_parser.add_argument(
+        "--images",
+        action="store_true",
+        help="Remove every prepared final manifest image.",
+    )
+    ci_remove_parser.add_argument(
+        "--flatpaks",
+        action="store_true",
+        help="Remove every prepared final flatpak image.",
+    )
+    ci_remove_parser.set_defaults(func=ci_command)
     ci_promote_parser = ci_subcommands.add_parser(
         "promote",
         help="Promote image and flatpak tags within the S3 registry.",
@@ -1326,6 +1348,12 @@ def ci_command(args: argparse.Namespace) -> int:
             refresh=args.refresh,
             tags=tuple(args.tags),
             prefix=args.prefix,
+        )
+    if args.ci_action == "remove":
+        return remove_ci(
+            tuple(args.remove_ids),
+            images=args.images,
+            flatpaks=args.flatpaks,
         )
     if args.ci_action == "promote":
         return promote_ci(

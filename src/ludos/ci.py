@@ -512,6 +512,75 @@ def upload_ci(
     return 0
 
 
+def remove_ci(
+    remove_ids: tuple[str, ...],
+    *,
+    build_manifest: Path | None = None,
+    images: bool = False,
+    flatpaks: bool = False,
+) -> int:
+    if not remove_ids and not (images or flatpaks):
+        raise ConfigError("at least one CI remove ID or section flag is required")
+    build_manifest = build_manifest or _default_ci_build_manifest(None)
+    data = _read_ci_build_data(build_manifest)
+    selected = _select_ci_uploads(
+        build_manifest,
+        data,
+        remove_ids,
+        images=images,
+        flatpaks=flatpaks,
+    )
+
+    outputs: dict[str, tuple[str, str]] = {}
+    for remove_id in selected["images"]:
+        entry = _rebase_ci_entry(
+            build_manifest,
+            data["images"][remove_id],
+            metadata_key="build",
+        )
+        metadata = _metadata_from_seed_entry(build_manifest, remove_id, entry)
+        remote = _ci_remote_image(metadata.ci_registry, metadata.output_image)
+        outputs.setdefault(remote, (metadata.ci_registry, metadata.output_image))
+
+    for remove_id in selected["flatpaks"]:
+        entry = _rebase_ci_entry(
+            build_manifest,
+            data["flatpaks"][remove_id],
+            metadata_key="build",
+        )
+        if not isinstance(entry, dict):
+            raise ConfigError(
+                f"{build_manifest}: invalid flatpaks entry '{remove_id}'"
+            )
+        metadata = _metadata_from_mapping(
+            build_manifest,
+            remove_id,
+            entry.get("build"),
+        )
+        image_values = entry.get("images")
+        image = (
+            str(image_values.get("output", ""))
+            if isinstance(image_values, dict)
+            else ""
+        )
+        if not image:
+            raise ConfigError(
+                f"{build_manifest}: invalid flatpaks entry '{remove_id}'"
+            )
+        remote = _ci_remote_image(metadata.ci_registry, image)
+        outputs.setdefault(remote, (metadata.ci_registry, image))
+
+    errors = []
+    for ci_registry, image in outputs.values():
+        try:
+            _remove_ci_remote_image(image, ci_registry)
+        except ConfigError as exc:
+            errors.append(str(exc))
+    if errors:
+        raise ConfigError("; ".join(errors))
+    return 0
+
+
 def promote_ci(
     manifest_paths: tuple[Path, ...],
     *,
@@ -1279,6 +1348,32 @@ def _push_ci_image(podman: str, image: str, ci_registry: str) -> None:
     returncode, _output = _run_streamed_command([podman, "push", image, remote])
     if returncode != 0:
         raise ConfigError(f"CI image upload failed with exit status {returncode}")
+
+
+def _remove_ci_remote_image(image: str, ci_registry: str) -> None:
+    remote = _ci_remote_image(ci_registry, image)
+    skopeo = shutil.which("skopeo")
+    if not skopeo:
+        raise ConfigError("skopeo must be installed to remove remote CI images")
+    log(f"Removing CI image: {remote}")
+    returncode, output = _run_streamed_command(
+        [skopeo, "delete", f"docker://{remote}"]
+    )
+    if returncode == 0:
+        return
+    normalized_output = output.casefold()
+    missing_markers = (
+        "manifest unknown",
+        "name unknown",
+        "manifest not found",
+        "name not found",
+    )
+    if any(marker in normalized_output for marker in missing_markers):
+        log(f"CI image is already absent: {remote}")
+        return
+    raise ConfigError(
+        f"CI image removal failed for {remote} with exit status {returncode}"
+    )
 
 
 def _is_orchestrator_image(image: str) -> bool:
