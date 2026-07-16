@@ -279,6 +279,23 @@ class BootcCommandTests(unittest.TestCase):
                 patch("ludos.bootc.build_final_manifest_images", side_effect=mark("final")),
                 patch("ludos.bootc._cleanup_dnf_workspaces", side_effect=mark("cleanup")),
                 patch("ludos.bootc.ostree_import") as ostree_import_mock,
+                patch(
+                    "ludos.bootc._image_inspect",
+                    side_effect=(
+                        {
+                            "Labels": {
+                                "org.opencontainers.image.title": "Anatase",
+                                "org.opencontainers.image.version": "44.20260622",
+                                "org.anatase.ludos.tag": "f44-x86_64-anatase-deadbeef",
+                            }
+                        },
+                        {
+                            "Labels": {
+                                "org.anatase.ludos.tag": "f44-x86_64-other-feedface"
+                            }
+                        },
+                    ),
+                ),
                 patch("ludos.bootc._git_revision", return_value="a" * 40),
                 patch("ludos.bootc._fetch_previous_manifest") as fetch_mock,
                 patch("ludos.bootc.rechunk_main") as rechunk_mock,
@@ -367,6 +384,7 @@ class BootcCommandTests(unittest.TestCase):
                         ).resolve()
                     ),
                     labels=[
+                        "org.anatase.ludos.tag=f44-x86_64-anatase-deadbeef",
                         "org.opencontainers.image.title=Anatase",
                         "org.opencontainers.image.version=44.20260622",
                     ],
@@ -405,7 +423,7 @@ class BootcCommandTests(unittest.TestCase):
                             / "results.txt"
                         ).resolve()
                     ),
-                    labels=[],
+                    labels=["org.anatase.ludos.tag=f44-x86_64-other-feedface"],
                     revision="a" * 40,
                     git_dir=str(root),
                     ostree_image="localhost/other:f44-x86_64",

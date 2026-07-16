@@ -150,6 +150,7 @@ def _export_bootc_images(
 
     for manifest, result in zip(metadata, results, strict=True):
         image = result.output_image
+        image_labels = _image_labels(_image_inspect(result.podman, image))
         safe_name = _bootc_artifact_name(manifest.image, manifest.distro)
         work_dir = work_root / safe_name
         git_dir = Path(manifest.root_dir)
@@ -176,7 +177,7 @@ def _export_bootc_images(
             contentmeta_fn=str(contentmeta),
             chunks_fn=str(chunks_path),
             result_fn=str(result_fn),
-            labels=_manifest_labels(manifest.manifest_labels),
+            labels=_manifest_labels(image_labels),
             revision=revision,
             git_dir=str(git_dir),
             ostree_image=image,
@@ -781,6 +782,19 @@ def _image_label(data: dict, key: str) -> str | None:
     if value:
         return str(value)
     return None
+
+
+def _image_labels(data: dict) -> tuple[tuple[str, str], ...]:
+    labels = data.get("Labels") or {}
+    if not isinstance(labels, dict):
+        return tuple()
+    return tuple(
+        sorted(
+            (str(key), str(value))
+            for key, value in labels.items()
+            if value is not None
+        )
+    )
 
 
 def _image_display_ref(data: dict) -> str:
