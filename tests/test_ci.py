@@ -109,6 +109,12 @@ class CiParserTests(unittest.TestCase):
                 "--version",
                 "20260629",
                 "--full",
+                "--prefix",
+                "rolling-",
+                "--tag",
+                "rolling",
+                "--registry",
+                "i.anatase.org",
                 "--workers",
                 "8",
                 "anatase.yml",
@@ -120,12 +126,18 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.cache_dir, Path("cache"))
         self.assertEqual(args.version, "20260629")
         self.assertTrue(args.full)
+        self.assertEqual(args.prefix, "rolling-")
+        self.assertEqual(args.tag, "rolling")
+        self.assertEqual(args.registry, "i.anatase.org")
         self.assertEqual(args.workers, 8)
 
     def test_parser_defaults_prepare_workers(self) -> None:
         args = build_parser().parse_args(["ci", "prepare", "anatase.yml"])
 
         self.assertEqual(args.workers, DEFAULT_PREPARE_WORKERS)
+        self.assertEqual(args.prefix, "")
+        self.assertEqual(args.tag, "latest")
+        self.assertEqual(args.registry, "")
 
     def test_parser_accepts_seed_ci_options(self) -> None:
         parser = build_parser()
@@ -296,6 +308,12 @@ class CiParserTests(unittest.TestCase):
                 "20260629",
                 "--workers",
                 "8",
+                "--prefix",
+                "rolling-",
+                "--tag",
+                "rolling",
+                "--registry",
+                "i.anatase.org",
                 "anatase.yml",
             ]
         )
@@ -309,6 +327,9 @@ class CiParserTests(unittest.TestCase):
             cache_dir=Path("cache"),
             cache_version="20260629",
             full=False,
+            prefix="rolling-",
+            tag="rolling",
+            registry="i.anatase.org",
             workers=8,
         )
 
@@ -1383,6 +1404,75 @@ class PrepareCiTests(unittest.TestCase):
             ],
         )
 
+    def test_prepare_ci_compares_published_ludos_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+            context = self._context(root)
+            metadata = self._metadata(root, context)
+            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
+            plan = self._flatpak_plan(root, cache)
+
+            def inspect(ref: str) -> dict[str, str]:
+                if ref == "i.anatase.org/anatase:rolling":
+                    return {
+                        "org.anatase.ludos.tag": ci_metadata.output_image.rsplit(
+                            ":", 1
+                        )[-1]
+                    }
+                return {"org.anatase.ludos.tag": "old-flatpak-output"}
+
+            with (
+                patch("ludos.ci.resolve_build_manifest_context", return_value=context),
+                patch(
+                    "ludos.ci.resolve_build_manifests_from_contexts",
+                    return_value=(metadata,),
+                ),
+                patch(
+                    "ludos.ci.plan_manifest_flatpaks_with_context",
+                    return_value=(plan,),
+                ),
+                patch(
+                    "ludos.ci._remote_cache_image_exists",
+                    return_value=True,
+                ) as published_exists,
+                patch(
+                    "ludos.ci._inspect_remote_labels",
+                    side_effect=inspect,
+                ) as inspect_labels,
+                patch(
+                    "ludos.ci._ci_remote_image_exists",
+                    return_value=True,
+                ),
+                patch("ludos.ci._remove_tree"),
+                patch("ludos.ci.log"),
+            ):
+                output = prepare_ci(
+                    (manifest,),
+                    cache_dir=cache,
+                    prefix="rolling-",
+                    tag="rolling",
+                    registry="i.anatase.org/",
+                )
+            data = yaml.safe_load(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["images"], {})
+        self.assertEqual(tuple(data["flatpaks"]), ("f44-kate-output",))
+        expected_refs = [
+            "i.anatase.org/anatase:rolling",
+            "i.anatase.org/flatpaks/kate:rolling-f44-x86_64",
+        ]
+        self.assertEqual(
+            [item.args[0] for item in published_exists.call_args_list],
+            expected_refs,
+        )
+        self.assertEqual(
+            [item.args[0] for item in inspect_labels.call_args_list],
+            expected_refs,
+        )
+
     def test_prepare_ci_keeps_existing_output_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1421,6 +1511,7 @@ class PrepareCiTests(unittest.TestCase):
     def _context(self, root: Path) -> SimpleNamespace:
         return SimpleNamespace(
             root_dir=root,
+            distro="f44-x86_64",
             dnf_workspace_dir=root / "cache" / "f44-x86_64" / "dnf" / "run-test",
             podman="podman",
             ci_registry="ghcr.io/anatase-org",

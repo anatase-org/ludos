@@ -759,6 +759,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include already-built final images and flatpaks in the CI metadata.",
     )
     prepare_parser.add_argument(
+        "--prefix",
+        default="",
+        help="Prefix for the published flatpak tag. Defaults to no prefix.",
+    )
+    prepare_parser.add_argument(
+        "--tag",
+        default="latest",
+        help="Published final image tag to inspect. Defaults to latest.",
+    )
+    prepare_parser.add_argument(
+        "--registry",
+        default="",
+        help=(
+            "Published OCI registry to inspect instead of checking final outputs "
+            "in the CI cache registry."
+        ),
+    )
+    prepare_parser.add_argument(
         "--workers",
         type=int,
         default=DEFAULT_PREPARE_WORKERS,
@@ -1320,6 +1338,9 @@ def ci_command(args: argparse.Namespace) -> int:
             cache_dir=args.cache_dir,
             cache_version=args.version,
             full=args.full,
+            prefix=args.prefix,
+            tag=args.tag,
+            registry=args.registry,
             workers=args.workers,
         )
         return 0

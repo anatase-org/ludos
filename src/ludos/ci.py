@@ -19,6 +19,7 @@ from .bootc import _bootc_artifact_name, _export_bootc_images
 from .build import (
     BuildImagePlan,
     FileRef,
+    LUDOS_TAG_LABEL,
     OciImagePlan,
     PackageImagePlan,
     ResolvedBuildMetadata,
@@ -203,12 +204,18 @@ def prepare_ci(
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     full: bool = False,
+    prefix: str = "",
+    tag: str = "latest",
+    registry: str = "",
     workers: int = DEFAULT_PREPARE_WORKERS,
 ) -> Path:
     if not manifest_paths:
         raise ConfigError("at least one manifest is required")
     if workers < 1:
         raise ConfigError("workers must be a positive integer")
+    registry = registry.strip().rstrip("/")
+    if registry:
+        tag = _validate_tags((tag,), command="ci prepare")[0]
 
     cache_root = _resolve_cache_root(manifest_paths, cache_dir)
     manifest_contexts: list[tuple[Path, ResolvedManifestContext]] = []
@@ -251,6 +258,9 @@ def prepare_ci(
         metadata=metadata,
         flatpaks=flatpaks,
         full=full,
+        prefix=prefix,
+        tag=tag,
+        registry=registry,
         workers=workers,
     )
     log(f"Wrote CI build manifest: {output}")
@@ -1728,6 +1738,9 @@ def _write_ci_build_manifest(
     metadata: tuple[ResolvedBuildMetadata, ...],
     flatpaks: tuple[dict[str, Any], ...],
     full: bool = False,
+    prefix: str = "",
+    tag: str = "latest",
+    registry: str = "",
     workers: int = DEFAULT_PREPARE_WORKERS,
 ) -> tuple[Path, Path]:
     log("Checking current registry for image existence")
@@ -1745,28 +1758,43 @@ def _write_ci_build_manifest(
             metadata,
         )
         if full
-        or not _logged_ci_remote_image_exists(
-            manifest_metadata.podman,
-            manifest_metadata.output_image,
-            getattr(manifest_metadata, "ci_registry", ""),
+        or not _ci_output_is_current(
+            image=manifest_metadata.output_image,
+            podman=manifest_metadata.podman,
+            ci_registry=getattr(manifest_metadata, "ci_registry", ""),
+            published_ref=(
+                f"{registry}/{manifest_metadata.image}:{tag}"
+                if registry
+                else ""
+            ),
         )
     )
     contexts_by_manifest = {
         str(manifest_path): context
         for manifest_path, context in manifest_contexts
     }
+
+    def published_flatpak_ref(entry: dict[str, Any]) -> str:
+        if not registry:
+            return ""
+        context = contexts_by_manifest[str(entry["manifest"])]
+        published_tag = _validate_tags(
+            (f"{prefix}{context.distro}",),
+            command="ci prepare",
+        )[0]
+        return f"{registry}/flatpaks/{entry['app']}:{published_tag}"
+
     included_flatpaks = tuple(
         entry
         for entry in flatpaks
         if full
-        or not _logged_ci_remote_image_exists(
-            contexts_by_manifest[str(entry["manifest"])].podman,
-            str(entry["images"]["output"]),
-            getattr(
-                contexts_by_manifest[str(entry["manifest"])],
-                "ci_registry",
-                "",
+        or not _ci_output_is_current(
+            image=str(entry["images"]["output"]),
+            podman=contexts_by_manifest[str(entry["manifest"])].podman,
+            ci_registry=getattr(
+                contexts_by_manifest[str(entry["manifest"])], "ci_registry", ""
             ),
+            published_ref=published_flatpak_ref(entry),
         )
     )
     cards, builders, builds = _missing_ci_dependency_images(
@@ -1952,6 +1980,24 @@ def _logged_ci_remote_image_exists(
     action = "Reusing" if exists else "Creating"
     log(f"{action} {image} Image")
     return exists
+
+
+def _ci_output_is_current(
+    *,
+    image: str,
+    podman: str,
+    ci_registry: str,
+    published_ref: str,
+) -> bool:
+    if published_ref:
+        exists = _remote_cache_image_exists(published_ref)
+        if exists:
+            labels = _inspect_remote_labels(published_ref)
+            exists = labels.get(LUDOS_TAG_LABEL) == _image_tag(image)
+        action = "Reusing" if exists else "Creating"
+        log(f"{action} {image} Image")
+        return exists
+    return _logged_ci_remote_image_exists(podman, image, ci_registry)
 
 
 def _size_kib(path: Path) -> int:
