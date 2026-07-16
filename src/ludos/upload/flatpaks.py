@@ -372,6 +372,8 @@ def finish_flatpak_promotions(
 def upload_dummy_runtime(
     manifest: Path,
     cache_dir: Path | None = None,
+    *,
+    prefix: str = "",
 ) -> int:
     context = _resolve_flatpak_upload_context(
         manifest,
@@ -382,10 +384,11 @@ def upload_dummy_runtime(
     runtime = _require_runtime_config(context.validation.manifest.runtime, manifest)
     flatpak_arch = _flatpak_arch(context.arch)
     runtime_ref = f"runtime/{runtime.id}/{flatpak_arch}/{runtime.branch}"
+    tag = f"{prefix}{context.distro}"
     layout_dir = flatpak_oci_layout_path(
         context.cache_dir,
         runtime.repo,
-        context.distro,
+        tag,
     )
     _write_dummy_runtime_oci_layout(
         layout_dir,
@@ -398,11 +401,11 @@ def upload_dummy_runtime(
     upload_oci(
         layout_dir,
         f"flatpaks/{runtime.repo}",
-        (context.distro,),
+        (tag,),
         project_root=context.root_dir,
         cosign_config=OciCosignConfig(),
     )
-    return update_flatpak_static_index(context.distro)
+    return update_flatpak_static_index(tag)
 
 
 def _resolve_flatpak_upload_context(

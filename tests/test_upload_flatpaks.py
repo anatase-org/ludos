@@ -300,22 +300,37 @@ class UploadFlatpaksTests(unittest.TestCase):
 
     def test_registry_flatpak_init_dummy_runtime_parser(self) -> None:
         args = build_parser().parse_args(
-            ["registry", "flatpak", "init-dummy-runtime", "anatase.yml"]
+            [
+                "registry",
+                "flatpak",
+                "init-dummy-runtime",
+                "anatase.yml",
+                "--prefix",
+                "rolling-",
+            ]
         )
 
         self.assertEqual(args.registry_action, "flatpak")
         self.assertEqual(args.registry_flatpak_action, "init-dummy-runtime")
         self.assertEqual(args.manifest, Path("anatase.yml"))
+        self.assertEqual(args.prefix, "rolling-")
 
     def test_registry_flatpak_init_dummy_runtime_command_dispatches(self) -> None:
         args = build_parser().parse_args(
-            ["registry", "flatpak", "init-dummy-runtime", "anatase.yml"]
+            [
+                "registry",
+                "flatpak",
+                "init-dummy-runtime",
+                "anatase.yml",
+                "--prefix",
+                "rolling-",
+            ]
         )
 
         with patch("ludos.__main__.upload_dummy_runtime", return_value=0) as upload:
             self.assertEqual(args.func(args), 0)
 
-        upload.assert_called_once_with(Path("anatase.yml"))
+        upload.assert_called_once_with(Path("anatase.yml"), prefix="rolling-")
 
     def test_registry_flatpak_rejects_old_update_spellings(self) -> None:
         parser = build_parser()
@@ -1264,7 +1279,11 @@ class UploadFlatpaksTests(unittest.TestCase):
                     0,
                 )
                 self.assertEqual(
-                    upload_dummy_runtime(manifest, cache_dir=root / "other-cache"),
+                    upload_dummy_runtime(
+                        manifest,
+                        cache_dir=root / "other-cache",
+                        prefix="rolling-",
+                    ),
                     0,
                 )
 
@@ -1273,8 +1292,8 @@ class UploadFlatpaksTests(unittest.TestCase):
             [
                 ("upload", "flatpaks/runtime", ("f44-x86_64",)),
                 ("update", "f44-x86_64"),
-                ("upload", "flatpaks/runtime", ("f44-x86_64",)),
-                ("update", "f44-x86_64"),
+                ("upload", "flatpaks/runtime", ("rolling-f44-x86_64",)),
+                ("update", "rolling-f44-x86_64"),
             ],
         )
         self.assertEqual(len(set(manifest_digests)), 1)

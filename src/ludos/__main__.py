@@ -435,6 +435,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to a Ludos YAML manifest.",
     )
+    registry_flatpak_dummy_runtime.add_argument(
+        "--prefix",
+        default="",
+        help="Prefix for the published flatpak tag. Defaults to no prefix.",
+    )
     registry_flatpak_dummy_runtime.set_defaults(func=registry_command)
 
     registry_oci = registry_subcommands.add_parser(
@@ -1254,7 +1259,7 @@ def registry_command(args: argparse.Namespace) -> int:
         if args.registry_flatpak_action == "refresh":
             return update_flatpak_index(args.manifest)
         if args.registry_flatpak_action == "init-dummy-runtime":
-            return upload_dummy_runtime(args.manifest)
+            return upload_dummy_runtime(args.manifest, prefix=args.prefix)
         raise ConfigError(
             f"unknown registry flatpak action: {args.registry_flatpak_action}"
         )
