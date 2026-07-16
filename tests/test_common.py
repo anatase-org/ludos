@@ -191,6 +191,7 @@ class CachedImageTests(unittest.TestCase):
             "https://ghcr.io/v2/anatase-org/orchestrator/manifests/f44",
         )
         self.assertEqual(headers["Authorization"], "Basic basic-token")
+        self.assertEqual(headers["User-Agent"], common._REGISTRY_USER_AGENT)
         self.assertIn(
             "application/vnd.oci.image.manifest.v1+json",
             headers["Accept"],
@@ -222,6 +223,10 @@ class CachedImageTests(unittest.TestCase):
         self.assertEqual(
             head.call_args_list[1].args[1]["Authorization"],
             "Bearer bearer-token",
+        )
+        self.assertEqual(
+            head.call_args_list[1].args[1]["User-Agent"],
+            common._REGISTRY_USER_AGENT,
         )
 
     def test_remote_image_exists_caches_bearer_token_by_challenge(self) -> None:
@@ -324,4 +329,8 @@ class CachedImageTests(unittest.TestCase):
 
         self.assertEqual(token, "bearer-token")
         self.assertEqual(request.call_count, 2)
+        self.assertEqual(
+            request.call_args.args[1]["User-Agent"],
+            common._REGISTRY_USER_AGENT,
+        )
         sleep.assert_called_once_with(0.25)

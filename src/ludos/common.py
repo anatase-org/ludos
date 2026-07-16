@@ -39,6 +39,7 @@ _OCI_MANIFEST_ACCEPT = ", ".join(
         "application/vnd.docker.distribution.manifest.v2+json",
     )
 )
+_REGISTRY_USER_AGENT = "Ludos/0.0.1"
 _REGISTRY_TIMEOUT = 2.0
 _REGISTRY_RETRY_ATTEMPTS = 4
 _REGISTRY_RETRY_BASE_DELAY = 0.25
@@ -450,7 +451,10 @@ def _remote_cache_image_exists(remote: str) -> bool:
         f"{urllib.parse.quote(repository, safe='/')}/manifests/"
         f"{urllib.parse.quote(reference, safe='')}"
     )
-    headers = {"Accept": _OCI_MANIFEST_ACCEPT}
+    headers = {
+        "Accept": _OCI_MANIFEST_ACCEPT,
+        "User-Agent": _REGISTRY_USER_AGENT,
+    }
     basic_auth = _registry_basic_auth(registry)
     if basic_auth:
         headers["Authorization"] = f"Basic {basic_auth}"
@@ -467,6 +471,7 @@ def _remote_cache_image_exists(remote: str) -> bool:
                 {
                     "Accept": _OCI_MANIFEST_ACCEPT,
                     "Authorization": f"Bearer {token}",
+                    "User-Agent": _REGISTRY_USER_AGENT,
                 },
             )
 
@@ -542,7 +547,10 @@ def _registry_bearer_token(challenge: str, basic_auth: str | None) -> str | None
     token_url = realm
     if query:
         token_url = f"{realm}?{urllib.parse.urlencode(query)}"
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": _REGISTRY_USER_AGENT,
+    }
     if basic_auth:
         headers["Authorization"] = f"Basic {basic_auth}"
 
