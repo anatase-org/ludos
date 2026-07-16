@@ -159,6 +159,9 @@ class ResolvedBuildMetadata:
     latest_image: str = ""
     ci_registry: str = ""
     cache_manifest_labels: tuple[tuple[str, str], ...] | None = None
+    cache_card_envs: (
+        tuple[tuple[str, tuple[tuple[str, str], ...]], ...] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -454,6 +457,7 @@ def _resolve_manifest_metadata(
     root_dir = context.root_dir
     image = context.image
     manifest_env = context.manifest_env
+    cache_manifest_env = getattr(context, "cache_manifest_env", manifest_env)
     local_prefix = context.local_prefix
     cache_version = context.cache_version
     releasever = context.releasever
@@ -521,6 +525,7 @@ def _resolve_manifest_metadata(
     card_oci_package_ids = {}
     spec_source_revisions = {}
     card_envs = {}
+    cache_card_envs = {}
     card_sources = {}
     card_prepare_scripts = {}
     oci_image_plans = []
@@ -557,6 +562,7 @@ def _resolve_manifest_metadata(
         bootstrap_env.update(prepared_env)
 
     inherited_env = dict(manifest_env)
+    cache_inherited_env = dict(cache_manifest_env)
     requested_packages = [] if target_card_name is not None else list(bootstrap_packages)
     for _priority, _insertion_order, card_name, card in card_entries:
         active_target = target_card_name is None or card_name == target_card_name
@@ -565,6 +571,7 @@ def _resolve_manifest_metadata(
         if card.build.strip() and card.specs:
             raise ConfigError(f"{card.source}: card cannot define both build and specs")
         card_env = _card_env(inherited_env, card.env)
+        cache_card_env = _card_env(cache_inherited_env, card.env)
         card_names.append(card_name)
         # log(f"{card_name}: {card_env} {inherited_env}")
         card_sources[card_name] = card.source
@@ -599,8 +606,25 @@ def _resolve_manifest_metadata(
                     image=oci_image,
                 )
             )
+            cache_card_env.update(
+                _oci_env(
+                    dict(cache_inherited_env, **cache_card_env),
+                    oci_input.env,
+                    oci_info.labels,
+                    source=card.source,
+                    image=oci_image,
+                )
+            )
         card_envs[card_name] = card_env
+        cache_card_envs[card_name] = cache_card_env
         inherited_env.update({k: v for k, v in card_env.items() if k not in inherited_env})
+        cache_inherited_env.update(
+            {
+                key: value
+                for key, value in cache_card_env.items()
+                if key not in cache_inherited_env
+            }
+        )
         if card.prepare.strip():
             card_prepare_scripts[card_name] = card.prepare.rstrip()
         card_packages = list(_packages_for_arch(card.packages, arch))
@@ -1063,7 +1087,6 @@ def _resolve_manifest_metadata(
         (key, _substitute_variables(value, manifest_env))
         for key, value in validation.manifest.labels.items()
     )
-    cache_manifest_env = getattr(context, "cache_manifest_env", manifest_env)
     cache_manifest_labels = tuple(
         (key, _substitute_variables(value, cache_manifest_env))
         for key, value in validation.manifest.labels.items()
@@ -1151,6 +1174,10 @@ def _resolve_manifest_metadata(
         card_envs=tuple(
             (card_name, tuple(sorted(card_env.items())))
             for card_name, card_env in card_envs.items()
+        ),
+        cache_card_envs=tuple(
+            (card_name, tuple(sorted(card_env.items())))
+            for card_name, card_env in cache_card_envs.items()
         ),
         card_sources=tuple(
             (card_name, str(card_source))
@@ -2475,6 +2502,11 @@ def _final_manifest_hash(metadata: ResolvedBuildMetadata, *, mode: str) -> str:
         if metadata.cache_manifest_labels is not None
         else metadata.manifest_labels
     )
+    card_envs = (
+        metadata.cache_card_envs
+        if metadata.cache_card_envs is not None
+        else metadata.card_envs
+    )
     payload = {
         "mode": mode,
         "image": metadata.image,
@@ -2515,7 +2547,7 @@ def _final_manifest_hash(metadata: ResolvedBuildMetadata, *, mode: str) -> str:
         ),
         "card_file_sets": _card_file_set_hash_inputs(metadata.card_file_sets),
         "postprocess_blocks": metadata.postprocess_blocks,
-        "card_envs": metadata.card_envs,
+        "card_envs": card_envs,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:HASH_LENGTH]

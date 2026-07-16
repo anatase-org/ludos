@@ -195,6 +195,15 @@ class TargetCardBuildTests(unittest.TestCase):
             encoding="utf-8",
         )
         (self.root / ".env").write_text("dist=.9\n", encoding="utf-8")
+        hhd_card = self.root / "cards" / "gaming" / "hhd.yml"
+        hhd_card.write_text(
+            hhd_card.read_text(encoding="utf-8").replace(
+                "version: 1\n",
+                "version: 1\nenv:\n  tag: $tag\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
 
         def resolve_packages(
             _base, _releasever, packages, package_id_by_nevra, *_args, **_kwargs
@@ -239,24 +248,35 @@ class TargetCardBuildTests(unittest.TestCase):
             ("org.opencontainers.image.title", "Anatase"),
             metadata.manifest_labels,
         )
+        self.assertEqual(
+            dict(dict(metadata.card_envs)["gaming-hhd"])["tag"],
+            "44.20260622.9",
+        )
+        self.assertEqual(
+            dict(dict(metadata.cache_card_envs)["gaming-hhd"])["tag"],
+            "44.20260622",
+        )
 
-    def test_final_manifest_hash_uses_dist_neutral_labels(self) -> None:
+    def test_final_manifest_hash_uses_dist_neutral_labels_and_card_envs(self) -> None:
         cache_labels = (("org.opencontainers.image.version", "20260713"),)
+        cache_card_envs = (("base-finalize", (("tag", "20260713"),)),)
         first = replace(
             self._metadata(),
             manifest_labels=(("org.opencontainers.image.version", "20260713.12"),),
             cache_manifest_labels=cache_labels,
+            card_envs=(("base-finalize", (("tag", "20260713.12"),)),),
+            cache_card_envs=cache_card_envs,
         )
         second = replace(
             first,
             manifest_labels=(("org.opencontainers.image.version", "20260713.13"),),
+            card_envs=(("base-finalize", (("tag", "20260713.13"),)),),
         )
 
         self.assertEqual(
             _final_manifest_hash(first, mode="combined"),
             _final_manifest_hash(second, mode="combined"),
         )
-
     def test_final_manifest_hash_canonicalizes_package_order(self) -> None:
         first = replace(
             self._metadata(),
@@ -323,6 +343,16 @@ class TargetCardBuildTests(unittest.TestCase):
         self.assertEqual(
             _final_manifest_hash(first, mode="combined"),
             _final_manifest_hash(second, mode="combined"),
+        )
+        changed_oci_digest = replace(
+            first,
+            oci_images=(
+                replace(first.oci_images[0], digest="sha256:changed"),
+            ),
+        )
+        self.assertNotEqual(
+            _final_manifest_hash(first, mode="combined"),
+            _final_manifest_hash(changed_oci_digest, mode="combined"),
         )
 
     def test_spec_hash_is_not_part_of_builder_image_hash(self) -> None:

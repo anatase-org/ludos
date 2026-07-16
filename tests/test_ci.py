@@ -1018,7 +1018,10 @@ class PrepareCiTests(unittest.TestCase):
             manifest.write_text("version: 1\n", encoding="utf-8")
             cache = root / "cache"
             context = self._context(root)
-            metadata = self._metadata(root, context)
+            metadata = replace(
+                self._metadata(root, context),
+                cache_card_envs=(("base", (("tag", "20260713"),)),),
+            )
             ci_metadata = _metadata_with_final_image(metadata, mode="combined")
             image_id = ci_metadata.output_image.rsplit(":", 1)[-1]
             plan = self._flatpak_plan(root, cache)
@@ -1239,6 +1242,7 @@ class PrepareCiTests(unittest.TestCase):
             )
             self.assertEqual(restored.output_image, ci_metadata.output_image)
             self.assertEqual(restored.package_images, ci_metadata.package_images)
+            self.assertEqual(restored.cache_card_envs, ci_metadata.cache_card_envs)
             self.assertIsNone(restored.ccache_dir)
             persistent_ccache = root / "persistent-ccache"
             stale_entry = {
@@ -1593,7 +1597,7 @@ class PrepareCiTests(unittest.TestCase):
             expected_refs,
         )
 
-    def test_prepare_ci_reexports_matching_hash_for_changed_labels(self) -> None:
+    def test_prepare_ci_reuses_matching_hash_despite_changed_labels(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             manifest = root / "anatase.yml"
@@ -1643,10 +1647,7 @@ class PrepareCiTests(unittest.TestCase):
                 )
             data = yaml.safe_load(output.read_text(encoding="utf-8"))
 
-        self.assertEqual(
-            tuple(data["images"]),
-            (ci_metadata.output_image.rsplit(":", 1)[-1],),
-        )
+        self.assertEqual(data["images"], {})
 
     def test_prepare_ci_keeps_existing_output_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
