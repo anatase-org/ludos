@@ -811,7 +811,7 @@ def build_parser() -> argparse.ArgumentParser:
     seed_parser.set_defaults(func=ci_command)
     ci_build_parser = ci_subcommands.add_parser(
         "build",
-        help="Build and upload outputs from prepared CI metadata.",
+        help="Build outputs from prepared CI metadata.",
     )
     ci_build_parser.add_argument(
         "build_ids",
@@ -833,6 +833,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--flatpaks",
         action="store_true",
         help="Build every outstanding final flatpak image.",
+    )
+    ci_build_parser.add_argument(
+        "--upload",
+        action="store_true",
+        help="Upload each output to the CI registry after it is built.",
     )
     ci_build_parser.add_argument(
         "--autoremove",
@@ -1336,6 +1341,7 @@ def ci_command(args: argparse.Namespace) -> int:
             builds=args.builds,
             images=args.images,
             flatpaks=args.flatpaks,
+            upload=args.upload,
             autoremove=args.autoremove,
             ccache=args.ccache,
         )

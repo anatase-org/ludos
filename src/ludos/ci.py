@@ -401,6 +401,7 @@ def build_ci(
     builds: bool = False,
     images: bool = False,
     flatpaks: bool = False,
+    upload: bool = False,
     autoremove: bool = False,
     ccache: bool = False,
 ) -> None:
@@ -426,6 +427,7 @@ def build_ci(
                     build_manifest,
                     build_id,
                     entry,
+                    upload=upload,
                     autoremove=autoremove,
                     ccache=ccache,
                 )
@@ -435,6 +437,7 @@ def build_ci(
                     build_id,
                     entry,
                     restored_contexts=restored_contexts,
+                    upload=upload,
                     autoremove=autoremove,
                     ccache=ccache,
                 )
@@ -444,6 +447,7 @@ def build_ci(
                     build_id,
                     entry,
                     restored_contexts=restored_contexts,
+                    upload=upload,
                     autoremove=autoremove,
                     ccache=ccache,
                 )
@@ -843,6 +847,7 @@ def _build_ci_package(
     build_id: str,
     entry: object,
     *,
+    upload: bool = False,
     autoremove: bool,
     ccache: bool = False,
 ) -> None:
@@ -882,12 +887,13 @@ def _build_ci_package(
             targets=(image,),
             cache_only=False,
         )
-    _upload_ci_output(
-        metadata.podman,
-        image,
-        metadata.ci_registry,
-        autoremove=autoremove,
-    )
+    if upload:
+        _upload_ci_output(
+            metadata.podman,
+            image,
+            metadata.ci_registry,
+            autoremove=autoremove,
+        )
 
 
 def _build_ci_manifest_image(
@@ -896,6 +902,7 @@ def _build_ci_manifest_image(
     entry: object,
     *,
     restored_contexts: set[tuple[str, str, tuple[str, ...]]],
+    upload: bool = False,
     autoremove: bool,
     ccache: bool = False,
 ) -> None:
@@ -924,13 +931,14 @@ def _build_ci_manifest_image(
             f"{build_manifest}: image '{build_id}' resolved to unexpected output "
             f"{result.output_image}"
         )
-    _upload_ci_output(
-        metadata.podman,
-        result.output_image,
-        metadata.ci_registry,
-        autoremove=autoremove,
-        aliases=(result.latest_image,),
-    )
+    if upload:
+        _upload_ci_output(
+            metadata.podman,
+            result.output_image,
+            metadata.ci_registry,
+            autoremove=autoremove,
+            aliases=(result.latest_image,),
+        )
 
 
 def _build_ci_flatpak(
@@ -939,6 +947,7 @@ def _build_ci_flatpak(
     entry: object,
     *,
     restored_contexts: set[tuple[str, str, tuple[str, ...]]],
+    upload: bool = False,
     autoremove: bool,
     ccache: bool = False,
 ) -> None:
@@ -964,13 +973,14 @@ def _build_ci_flatpak(
         (plan,),
         cache_only=False,
     )[0]
-    _upload_ci_output(
-        metadata.podman,
-        result.image,
-        metadata.ci_registry,
-        autoremove=autoremove,
-        aliases=(result.latest_image,),
-    )
+    if upload:
+        _upload_ci_output(
+            metadata.podman,
+            result.image,
+            metadata.ci_registry,
+            autoremove=autoremove,
+            aliases=(result.latest_image,),
+        )
 
 
 def _prepared_flatpak_context(

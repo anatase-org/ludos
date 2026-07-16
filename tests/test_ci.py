@@ -180,6 +180,7 @@ class CiParserTests(unittest.TestCase):
                 "--builds",
                 "--images",
                 "--flatpaks",
+                "--upload",
                 "--autoremove",
             ]
         )
@@ -189,7 +190,13 @@ class CiParserTests(unittest.TestCase):
         self.assertTrue(args.builds)
         self.assertTrue(args.images)
         self.assertTrue(args.flatpaks)
+        self.assertTrue(args.upload)
         self.assertTrue(args.autoremove)
+
+    def test_parser_disables_ci_build_upload_by_default(self) -> None:
+        args = build_parser().parse_args(["ci", "build", "image"])
+
+        self.assertFalse(args.upload)
 
     def test_parser_accepts_composable_ci_upload_selectors(self) -> None:
         args = build_parser().parse_args(
@@ -409,6 +416,7 @@ class CiParserTests(unittest.TestCase):
                 "first",
                 "0",
                 "--images",
+                "--upload",
                 "--autoremove",
                 "--ccache",
             ]
@@ -423,6 +431,7 @@ class CiParserTests(unittest.TestCase):
             builds=False,
             images=True,
             flatpaks=False,
+            upload=True,
             autoremove=True,
             ccache=True,
         )
@@ -1653,7 +1662,14 @@ class BuildCiTests(unittest.TestCase):
 
             def record(section: str):
                 def run(_manifest, build_id, _entry, **_kwargs):
-                    calls.append((section, build_id, _kwargs["ccache"]))
+                    calls.append(
+                        (
+                            section,
+                            build_id,
+                            _kwargs["upload"],
+                            _kwargs["ccache"],
+                        )
+                    )
 
                 return run
 
@@ -1670,16 +1686,17 @@ class BuildCiTests(unittest.TestCase):
                     build_manifest=build_manifest,
                     builds=True,
                     flatpaks=True,
+                    upload=True,
                     ccache=True,
                 )
 
         self.assertEqual(
             calls,
             [
-                ("build", "a", True),
-                ("build", "b", True),
-                ("image", "image", True),
-                ("flatpak", "flatpak", True),
+                ("build", "a", True, True),
+                ("build", "b", True, True),
+                ("image", "image", True, True),
+                ("flatpak", "flatpak", True, True),
             ],
         )
 
@@ -1776,6 +1793,7 @@ class BuildCiTests(unittest.TestCase):
                 Path("cache/ci/build.yml"),
                 "flatpak",
                 {"metadata": {}, "flatpak": {}},
+                upload=True,
                 autoremove=False,
             )
 
@@ -1792,6 +1810,30 @@ class BuildCiTests(unittest.TestCase):
             "registry.example",
             autoremove=False,
         )
+
+    def test_package_build_does_not_upload_by_default(self) -> None:
+        metadata = SimpleNamespace(
+            podman="podman",
+            ci_registry="registry.example",
+        )
+        with (
+            patch("ludos.ci._metadata_from_mapping", return_value=metadata),
+            patch("ludos.ci.build_build_images") as build,
+            patch("ludos.ci._upload_ci_output") as upload,
+        ):
+            _build_ci_package(
+                Path("cache/ci/build.yml"),
+                "package",
+                {"metadata": {}, "image": "builds:package"},
+                autoremove=True,
+            )
+
+        build.assert_called_once_with(
+            (metadata,),
+            targets=("builds:package",),
+            cache_only=False,
+        )
+        upload.assert_not_called()
 
 
 class PromoteCiTests(unittest.TestCase):
