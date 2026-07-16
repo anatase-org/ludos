@@ -219,15 +219,22 @@ class UploadFlatpaksTests(unittest.TestCase):
         service = (
             ROOT / "cards/base/atomic/flatpak/anatase-flatpaks.service"
         ).read_text(encoding="utf-8")
+        helper = (
+            ROOT / "cards/base/atomic/flatpak/anatase-flatpak-remote"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("GPGKey=@gpg@", repo)
-        self.assertIn("xa.signature-lookaside=https://flatpaks.anatase.org/gpg", repo)
-        self.assertIn("--gpg-verify", service)
+        self.assertIn("#GPGKey=@gpg@", repo)
+        self.assertIn("#xa.signature-lookaside=https://flatpaks.anatase.org/gpg", repo)
         self.assertIn(
-            "--gpg-import=/usr/share/anatase/keys/anatase-gpg.pub.asc",
+            "ExecStart=/usr/libexec/anatase-flatpak-remote %distro%",
             service,
         )
-        self.assertIn("--signature-lookaside=https://flatpaks.anatase.org/gpg", service)
+        self.assertIn("--gpg-verify", helper)
+        self.assertIn(
+            "--gpg-import=/usr/share/anatase/keys/anatase-gpg.pub.asc",
+            helper,
+        )
+        self.assertIn("--signature-lookaside=https://flatpaks.anatase.org/gpg", helper)
 
     def test_registry_flatpak_upload_command_dispatches(self) -> None:
         args = build_parser().parse_args(
