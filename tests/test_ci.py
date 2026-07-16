@@ -203,6 +203,8 @@ class CiParserTests(unittest.TestCase):
                 "latest",
                 "--tag",
                 "stable",
+                "--prefix",
+                "rolling-",
             ]
         )
 
@@ -212,6 +214,7 @@ class CiParserTests(unittest.TestCase):
         self.assertTrue(args.flatpaks)
         self.assertTrue(args.refresh)
         self.assertEqual(args.tags, ["candidate", "latest", "stable"])
+        self.assertEqual(args.prefix, "rolling-")
 
     def test_prepare_ci_rejects_unsupported_options(self) -> None:
         parser = build_parser()
@@ -388,6 +391,8 @@ class CiParserTests(unittest.TestCase):
                 "0",
                 "--flatpaks",
                 "--refresh",
+                "--prefix",
+                "rolling-",
             ]
         )
 
@@ -401,6 +406,7 @@ class CiParserTests(unittest.TestCase):
             flatpaks=True,
             refresh=True,
             tags=("candidate", "stable"),
+            prefix="rolling-",
         )
 
     def test_main_returns_7_for_seed_disk_space_error(self) -> None:
@@ -1747,6 +1753,7 @@ class UploadCiTests(unittest.TestCase):
                     ("f44-kate",),
                     build_manifest=build_manifest,
                     refresh=True,
+                    prefix="rolling-",
                 )
 
         self.assertEqual(result, 0)
@@ -1764,8 +1771,9 @@ class UploadCiTests(unittest.TestCase):
             image_overrides={
                 "flatpaks/kate": "flatpaks:f44-kate-output",
             },
+            prefix="rolling-",
         )
-        refresh.assert_called_once_with(manifest.resolve())
+        refresh.assert_called_once_with(manifest.resolve(), prefix="rolling-")
 
     def test_upload_ci_requires_an_output_selector(self) -> None:
         with self.assertRaisesRegex(ConfigError, "at least one CI upload ID"):

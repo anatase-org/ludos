@@ -128,6 +128,7 @@ def upload_flatpaks(
     *,
     cache_only: bool = False,
     image_overrides: Mapping[str, str] | None = None,
+    prefix: str = "",
     environ: Mapping[str, str] | None = None,
     client: Any | None = None,
 ) -> int:
@@ -151,6 +152,7 @@ def upload_flatpaks(
             resolve_images=resolve_images and image_overrides is None,
             cache_only=cache_only,
             image_overrides=image_overrides,
+            prefix=prefix,
         )
         results = {}
         if build:
@@ -263,13 +265,13 @@ def tree_shake_flatpaks(
     return 0
 
 
-def update_flatpak_index(manifest: Path) -> int:
+def update_flatpak_index(manifest: Path, *, prefix: str = "") -> int:
     context = _resolve_flatpak_upload_context(
         manifest,
         cache_dir=None,
         require_podman=False,
     )
-    return update_flatpak_static_index(context.distro)
+    return update_flatpak_static_index(f"{prefix}{context.distro}")
 
 
 def upload_dummy_runtime(
@@ -428,6 +430,7 @@ def _upload_targets(
     resolve_images: bool = True,
     cache_only: bool = False,
     image_overrides: Mapping[str, str] | None = None,
+    prefix: str = "",
 ) -> tuple[FlatpakUploadTarget, ...]:
     selected = (
         flatpaks
@@ -448,7 +451,8 @@ def _upload_targets(
         if image_overrides is not None and source_ref not in image_overrides:
             raise ConfigError(f"missing flatpak image override: {source_ref}")
         name = path.parent.resolve().name
-        export_dir = flatpak_oci_layout_path(context.cache_dir, name, context.distro)
+        tag = f"{prefix}{context.distro}"
+        export_dir = flatpak_oci_layout_path(context.cache_dir, name, tag)
         targets.append(
             FlatpakUploadTarget(
                 path=path,
@@ -468,7 +472,7 @@ def _upload_targets(
                 ),
                 export_dir=export_dir,
                 ref=f"flatpaks/{name}",
-                tag=context.distro,
+                tag=tag,
             )
         )
     return tuple(targets)

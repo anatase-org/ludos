@@ -23,6 +23,7 @@ from ludos.upload.common import REGISTRY_IMMUTABLE_CACHE_CONTROL
 from ludos.upload.flatpaks import (
     export_flatpak_oci_images,
     tree_shake_flatpaks,
+    update_flatpak_index,
     upload_dummy_runtime,
     upload_flatpaks,
     _flatpak_signature_payload,
@@ -34,6 +35,25 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class UploadFlatpaksTests(unittest.TestCase):
+    def test_update_flatpak_index_prefixes_distro(self) -> None:
+        context = SimpleNamespace(distro="f44-x86_64")
+        with (
+            patch(
+                "ludos.upload.flatpaks._resolve_flatpak_upload_context",
+                return_value=context,
+            ),
+            patch(
+                "ludos.upload.flatpaks.update_flatpak_static_index",
+                return_value=0,
+            ) as update,
+        ):
+            self.assertEqual(
+                update_flatpak_index(Path("anatase.yml"), prefix="rolling-"),
+                0,
+            )
+
+        update.assert_called_once_with("rolling-f44-x86_64")
+
     def test_registry_flatpak_upload_parser(self) -> None:
         args = build_parser().parse_args(
             [
@@ -432,6 +452,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                         image_overrides={
                             "flatpaks/kate": "flatpaks:f44-kate-prepared"
                         },
+                        prefix="rolling-",
                     ),
                     0,
                 )
@@ -440,6 +461,16 @@ class UploadFlatpaksTests(unittest.TestCase):
             self.assertEqual(
                 deps.run_streamed.call_args.args[0][-2],
                 "flatpaks:f44-kate-prepared",
+            )
+            self.assertEqual(
+                deps.run_streamed.call_args.args[0][-1],
+                "oci:"
+                f"{root / 'cache' / 'flatpaks' / 'kate-rolling-f44-x86_64'}:"
+                "rolling-f44-x86_64",
+            )
+            self.assertEqual(
+                deps.upload_oci.call_args.args[2],
+                ("rolling-f44-x86_64",),
             )
 
     def test_upload_flatpaks_rejects_missing_local_image_without_build(self) -> None:

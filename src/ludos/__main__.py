@@ -876,6 +876,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TAG",
         help="Image tag to publish. May be specified more than once.",
     )
+    ci_upload_parser.add_argument(
+        "--prefix",
+        default="",
+        help="Prefix for uploaded flatpak tags and the refreshed static index.",
+    )
     ci_upload_parser.set_defaults(func=ci_command)
 
     cleanup = subcommands.add_parser(
@@ -1273,6 +1278,7 @@ def ci_command(args: argparse.Namespace) -> int:
             flatpaks=args.flatpaks,
             refresh=args.refresh,
             tags=tuple(args.tags),
+            prefix=args.prefix,
         )
     raise ConfigError(f"unknown ci action: {args.ci_action}")
 

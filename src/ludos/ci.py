@@ -446,6 +446,7 @@ def upload_ci(
     flatpaks: bool = False,
     refresh: bool = False,
     tags: tuple[str, ...] = tuple(),
+    prefix: str = "",
 ) -> int:
     if not upload_ids and not (images or flatpaks):
         raise ConfigError("at least one CI upload ID or section flag is required")
@@ -488,12 +489,13 @@ def upload_ci(
             cache_dir=cache_root,
             cache_only=True,
             image_overrides=image_overrides,
+            prefix=prefix,
         )
         if result != 0:
             return result
     if refresh:
         for manifest_path in flatpaks_by_manifest:
-            result = update_flatpak_index(manifest_path)
+            result = update_flatpak_index(manifest_path, prefix=prefix)
             if result != 0:
                 return result
     return 0
