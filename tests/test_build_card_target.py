@@ -1092,7 +1092,12 @@ class TargetCardBuildTests(unittest.TestCase):
         self.assertNotIn("kernel-extra-1-1.x86_64.rpm", containerfile)
         self.assertIn(
             "from=oci_base_scx_kernel_0,"
-            "source=/files,target=/ludos/oci-files/0,ro",
+            "source=/,target=/ludos/oci-files/0,ro",
+            containerfile,
+        )
+        self.assertIn(
+            "for dir in /ludos/oci-files/*/files; do "
+            '[ -d "$dir" ] && cp -a "$dir"/. /files/; done',
             containerfile,
         )
         self.assertIn("# build-image: sha256:kernel111", containerfile)
@@ -1121,7 +1126,7 @@ class TargetCardBuildTests(unittest.TestCase):
         self.assertNotIn(f"FROM {pinned_kernel}", lazy_containerfile)
         self.assertIn(
             f"from={pinned_kernel},"
-            "source=/files,target=/ludos/oci-files/0,ro",
+            "source=/,target=/ludos/oci-files/0,ro",
             lazy_containerfile,
         )
         self.assertIn(
