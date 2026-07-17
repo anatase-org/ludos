@@ -769,7 +769,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument(
         "--recreate",
         action="store_true",
-        help="Recreate local orchestrator images even when they already exist in CI.",
+        help="Recreate and upload orchestrator and repository images.",
     )
     init_parser.set_defaults(func=ci_command)
     prepare_parser = ci_subcommands.add_parser(

@@ -928,7 +928,7 @@ class PrepareCiTests(unittest.TestCase):
             create_repo.assert_not_called()
             push.assert_not_called()
 
-    def test_init_ci_recreates_remote_orchestrator_when_requested(self) -> None:
+    def test_init_ci_recreates_and_pushes_all_init_images_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             manifest = root / "anatase.yml"
@@ -948,15 +948,26 @@ class PrepareCiTests(unittest.TestCase):
                     image="orchestrator:f44",
                     packages=tuple(),
                 )
-                self.assertTrue(
+                self.assertFalse(
                     image_exists("podman", "repos:f44-fedora", "ghcr.io/test")
+                )
+                create_repo = kwargs["create_repo_image"]
+                create_repo(
+                    podman="podman",
+                    buildah="buildah",
+                    orchestrator="orchestrator:f44",
+                    root_dir=root,
+                    image="repos:f44-fedora",
+                    repo_name="fedora.repo",
+                    repo_id="fedora",
+                    rendered_repo="[fedora]\n",
                 )
                 return SimpleNamespace(ci_registry="ghcr.io/test")
 
             with (
                 patch("ludos.ci.resolve_manifest_context", side_effect=resolve),
                 patch("ludos.ci._ci_remote_image_exists", return_value=True),
-                patch("ludos.ci._local_image_exists", return_value=False),
+                patch("ludos.ci._local_image_exists", return_value=True),
                 patch("ludos.ci._create_orchestrator_image") as create_orchestrator,
                 patch("ludos.ci._create_repo_image") as create_repo,
                 patch("ludos.ci._push_ci_image") as push,
@@ -969,8 +980,11 @@ class PrepareCiTests(unittest.TestCase):
                 )
 
             create_orchestrator.assert_called_once()
-            create_repo.assert_not_called()
-            push.assert_not_called()
+            create_repo.assert_called_once()
+            self.assertEqual(
+                [call.args[1] for call in push.call_args_list],
+                ["orchestrator:f44", "repos:f44-fedora"],
+            )
 
     def test_init_ci_pulls_remote_orchestrator_for_missing_repo_image(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -301,34 +301,42 @@ def init_ci(
     cache_root = _resolve_cache_root(manifest_paths, cache_dir)
     dnf_workspace_dirs: list[Path] = []
     remote_exists_by_image: dict[str, bool] = {}
+    created_images: set[str] = set()
     current_ci_registry = [""]
 
     def image_exists(podman: str, image: str, ci_registry: str) -> bool:
         current_ci_registry[0] = _require_ci_registry(ci_registry)
+        if image in created_images:
+            return True
         remote_exists = _ci_remote_image_exists(podman, image, ci_registry)
         remote_exists_by_image[image] = remote_exists
+        if recreate:
+            return False
         if _local_image_exists(podman, image):
             if not remote_exists:
                 _push_ci_image(podman, image, ci_registry)
             return True
-        if remote_exists and (not recreate or not _is_orchestrator_image(image)):
+        if remote_exists:
             return True
         return False
 
     def create_orchestrator_image(**kwargs: Any) -> None:
         _create_orchestrator_image(**kwargs)
-        if not remote_exists_by_image.get(str(kwargs["image"]), False):
+        image = str(kwargs["image"])
+        if recreate or not remote_exists_by_image.get(image, False):
             _push_ci_image(
                 str(kwargs["podman"]),
-                str(kwargs["image"]),
+                image,
                 current_ci_registry[0],
             )
+        created_images.add(image)
 
     def create_repo_image(**kwargs: Any) -> None:
         podman = str(kwargs["podman"])
         orchestrator = str(kwargs["orchestrator"])
         if (
             remote_exists_by_image.get(orchestrator, False)
+            and orchestrator not in created_images
             and not _local_image_exists(podman, orchestrator)
             and not _ensure_context_image(
                 podman,
@@ -338,12 +346,14 @@ def init_ci(
         ):
             raise ConfigError(f"failed to pull CI orchestrator image: {orchestrator}")
         _create_repo_image(**kwargs)
-        if not remote_exists_by_image.get(str(kwargs["image"]), False):
+        image = str(kwargs["image"])
+        if recreate or not remote_exists_by_image.get(image, False):
             _push_ci_image(
-                str(kwargs["podman"]),
-                str(kwargs["image"]),
+                podman,
+                image,
                 current_ci_registry[0],
             )
+        created_images.add(image)
 
     def extract_paths(podman: str, image: str, paths: dict[str, Path]) -> None:
         if _local_image_exists(podman, image):
@@ -1482,11 +1492,6 @@ def _remove_ci_remote_image(image: str, ci_registry: str) -> None:
     raise ConfigError(
         f"CI image removal failed for {remote} with exit status {returncode}"
     )
-
-
-def _is_orchestrator_image(image: str) -> bool:
-    repository, _tag = image.rsplit(":", 1)
-    return repository.endswith("orchestrator")
 
 
 def _seed_image(
