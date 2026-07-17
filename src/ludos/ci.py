@@ -218,6 +218,7 @@ def prepare_ci(
     *,
     cache_dir: Path | None = None,
     cache_version: str | None = None,
+    ci: bool = False,
     full: bool = False,
     prefix: str = "",
     tag: str = "latest",
@@ -252,8 +253,9 @@ def prepare_ci(
         cache_only=False,
         workers=workers,
     )
+    mode = "combined" if ci else "separated"
     metadata = tuple(
-        _metadata_with_final_image(item, mode="combined")
+        _metadata_with_final_image(item, mode=mode)
         for item in metadata
     )
     flatpaks = tuple(

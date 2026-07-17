@@ -126,6 +126,7 @@ class CiParserTests(unittest.TestCase):
                 "cache",
                 "--version",
                 "20260629",
+                "--ci",
                 "--full",
                 "--prefix",
                 "rolling-",
@@ -143,6 +144,7 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.manifests, [Path("anatase.yml")])
         self.assertEqual(args.cache_dir, Path("cache"))
         self.assertEqual(args.version, "20260629")
+        self.assertTrue(args.ci)
         self.assertTrue(args.full)
         self.assertEqual(args.prefix, "rolling-")
         self.assertEqual(args.tag, "rolling")
@@ -156,6 +158,7 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.prefix, "")
         self.assertEqual(args.tag, "latest")
         self.assertEqual(args.registry, "")
+        self.assertFalse(args.ci)
 
     def test_parser_accepts_seed_ci_options(self) -> None:
         parser = build_parser()
@@ -341,6 +344,7 @@ class CiParserTests(unittest.TestCase):
                 "cache",
                 "--version",
                 "20260629",
+                "--ci",
                 "--workers",
                 "8",
                 "--prefix",
@@ -361,6 +365,7 @@ class CiParserTests(unittest.TestCase):
             (Path("anatase.yml"),),
             cache_dir=Path("cache"),
             cache_version="20260629",
+            ci=True,
             full=False,
             prefix="rolling-",
             tag="rolling",
@@ -1032,7 +1037,7 @@ class PrepareCiTests(unittest.TestCase):
                 self._metadata(root, context),
                 cache_card_envs=(("base", (("tag", "20260713"),)),),
             )
-            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
+            ci_metadata = _metadata_with_final_image(metadata, mode="separated")
             image_id = ci_metadata.output_image.rsplit(":", 1)[-1]
             plan = self._flatpak_plan(root, cache)
 
@@ -1277,6 +1282,48 @@ class PrepareCiTests(unittest.TestCase):
             self.assertEqual(restored.build_images, ci_metadata.build_images)
             self.assertEqual(restored.oci_images, ci_metadata.oci_images)
 
+    def test_prepare_ci_uses_combined_final_image_metadata_with_ci_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            manifest.write_text("version: 1\n", encoding="utf-8")
+            cache = root / "cache"
+            output = cache / "ci" / "build.yml"
+            encoded = output.with_suffix(".yml.encoded")
+            encoded.parent.mkdir(parents=True)
+            encoded.write_bytes(b"encoded")
+            context = self._context(root)
+            metadata = self._metadata(root, context)
+
+            with (
+                patch(
+                    "ludos.ci.resolve_build_manifest_context",
+                    return_value=context,
+                ),
+                patch(
+                    "ludos.ci.resolve_build_manifests_from_contexts",
+                    return_value=(metadata,),
+                ),
+                patch(
+                    "ludos.ci._metadata_with_final_image",
+                    wraps=_metadata_with_final_image,
+                ) as final_metadata,
+                patch(
+                    "ludos.ci.plan_manifest_flatpaks_with_context",
+                    return_value=tuple(),
+                ),
+                patch(
+                    "ludos.ci._write_ci_build_manifest",
+                    return_value=(output, encoded),
+                ),
+                patch("ludos.ci._remove_tree"),
+                patch("ludos.ci.log"),
+            ):
+                result = prepare_ci((manifest,), cache_dir=cache, ci=True)
+
+        self.assertEqual(result, output)
+        final_metadata.assert_called_once_with(metadata, mode="combined")
+
     def test_prepare_ci_drops_already_built_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1363,7 +1410,7 @@ class PrepareCiTests(unittest.TestCase):
             cache = root / "cache"
             context = self._context(root)
             metadata = self._metadata(root, context)
-            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
+            ci_metadata = _metadata_with_final_image(metadata, mode="separated")
             plan = self._flatpak_plan(root, cache)
 
             def remote_exists(_podman: str, image: str, _registry: str) -> bool:
@@ -1432,7 +1479,7 @@ class PrepareCiTests(unittest.TestCase):
             cache = root / "cache"
             context = self._context(root)
             metadata = self._metadata(root, context)
-            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
+            ci_metadata = _metadata_with_final_image(metadata, mode="separated")
             plan = self._flatpak_plan(root, cache)
 
             with (
@@ -1491,7 +1538,7 @@ class PrepareCiTests(unittest.TestCase):
                 self._metadata(root, context),
                 ci_registry="ghcr.io/anatase-org",
             )
-            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
+            ci_metadata = _metadata_with_final_image(metadata, mode="separated")
             plan = self._flatpak_plan(root, cache)
 
             with (
@@ -1546,7 +1593,7 @@ class PrepareCiTests(unittest.TestCase):
             cache = root / "cache"
             context = self._context(root)
             metadata = self._metadata(root, context)
-            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
+            ci_metadata = _metadata_with_final_image(metadata, mode="separated")
             plan = self._flatpak_plan(root, cache)
 
             def inspect(ref: str) -> dict[str, str]:
@@ -1623,7 +1670,7 @@ class PrepareCiTests(unittest.TestCase):
                     ("org.opencontainers.image.version", "20260713"),
                 ),
             )
-            ci_metadata = _metadata_with_final_image(metadata, mode="combined")
+            ci_metadata = _metadata_with_final_image(metadata, mode="separated")
 
             with (
                 patch("ludos.ci.resolve_build_manifest_context", return_value=context),

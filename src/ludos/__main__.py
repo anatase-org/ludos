@@ -794,6 +794,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repository/package cache version to load. Defaults to the current UTC week's Monday as YYYYMMDD and creates missing cache images.",
     )
     prepare_parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="Prepare final images with combined package and postprocess layers.",
+    )
+    prepare_parser.add_argument(
         "--full",
         action="store_true",
         help="Include already-built final images and flatpaks in the CI metadata.",
@@ -1414,6 +1419,7 @@ def ci_command(args: argparse.Namespace) -> int:
             tuple(args.manifests),
             cache_dir=args.cache_dir,
             cache_version=args.version,
+            ci=args.ci,
             full=args.full,
             prefix=args.prefix,
             tag=args.tag,
