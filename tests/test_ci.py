@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import lzma
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from io import StringIO
@@ -1864,6 +1865,53 @@ class PrepareCiTests(unittest.TestCase):
 
 
 class BuildCiTests(unittest.TestCase):
+    @unittest.skipIf(DEFAULT_PREPARE_WORKERS < 2, "parallel workers unavailable")
+    def test_restore_ci_dependencies_in_parallel(self) -> None:
+        metadata = SimpleNamespace(
+            podman="podman",
+            root_dir="/workspace",
+            repo_images=tuple(),
+            orchestrator="orchestrator:f44",
+            ci_registry="ghcr.io/anatase-org",
+            package_images=(
+                SimpleNamespace(image="cards:f44-base"),
+                SimpleNamespace(image="cards:f44-gaming"),
+            ),
+            build_images=(
+                SimpleNamespace(image="builds:f44-base"),
+            ),
+            oci_images=(
+                SimpleNamespace(image="kernel:f44-x86_64"),
+            ),
+        )
+        restored_contexts = {
+            (metadata.podman, metadata.root_dir, metadata.repo_images),
+        }
+        barrier = threading.Barrier(2)
+
+        def ensure(*_args) -> bool:
+            barrier.wait(timeout=2)
+            return True
+
+        with patch("ludos.ci._ensure_image", side_effect=ensure) as ensure_image:
+            _restore_ci_build_context(
+                metadata,
+                restored_contexts,
+                package_images=True,
+                build_images=True,
+                oci_images=True,
+            )
+
+        self.assertEqual(
+            {item.args[1] for item in ensure_image.call_args_list},
+            {
+                "cards:f44-base",
+                "cards:f44-gaming",
+                "builds:f44-base",
+                "kernel:f44-x86_64",
+            },
+        )
+
     def test_restore_ci_oci_image_uses_ci_registry(self) -> None:
         metadata = SimpleNamespace(
             podman="podman",
@@ -2174,7 +2222,7 @@ class BuildCiTests(unittest.TestCase):
                 "ludos.ci._metadata_with_final_image",
                 return_value=metadata,
             ) as final_metadata,
-            patch("ludos.ci._restore_ci_build_context"),
+            patch("ludos.ci._restore_ci_build_context") as restore_context,
             patch("ludos.ci.build_build_images", return_value=object()),
             patch(
                 "ludos.ci.build_final_manifest_images",
@@ -2200,6 +2248,13 @@ class BuildCiTests(unittest.TestCase):
             },
         )
         final_metadata.assert_called_once_with(metadata, mode="separated")
+        restore_context.assert_called_once_with(
+            metadata,
+            set(),
+            package_images=True,
+            build_images=True,
+            oci_images=True,
+        )
         self.assertEqual(final_build.call_args.kwargs["mode"], "separated")
         self.assertEqual(
             final_build.call_args.kwargs["build_cache"],

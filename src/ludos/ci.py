@@ -967,6 +967,7 @@ def _build_ci_manifest_image(
         metadata,
         restored_contexts,
         package_images=True,
+        build_images=True,
         oci_images=True,
     )
     cleanup_images.update(
@@ -1182,16 +1183,51 @@ def _restore_ci_build_context(
     restored_contexts: set[tuple[str, str, tuple[str, ...]]],
     *,
     package_images: bool = False,
+    build_images: bool = False,
     oci_images: bool = False,
 ) -> None:
     key = (metadata.podman, metadata.root_dir, metadata.repo_images)
-    if key not in restored_contexts:
-        if not _ensure_image(
+    restore_context = key not in restored_contexts
+    required_images: dict[str, str] = {}
+    if restore_context:
+        required_images[metadata.orchestrator] = "CI orchestrator image"
+        required_images.update(
+            (repo_image, "CI repository image")
+            for repo_image in metadata.repo_images
+        )
+    if package_images:
+        required_images.update(
+            (plan.image, "CI card package image")
+            for plan in metadata.package_images
+        )
+    if build_images:
+        required_images.update(
+            (plan.image, "CI build output image")
+            for plan in metadata.build_images
+        )
+    if oci_images:
+        required_images.update(
+            (plan.image, "CI OCI image")
+            for plan in metadata.oci_images
+        )
+
+    def ensure(image: str) -> tuple[str, bool]:
+        return image, _ensure_image(
             metadata.podman,
-            metadata.orchestrator,
+            image,
             metadata.ci_registry,
-        ):
-            raise ConfigError(f"CI orchestrator image is missing: {metadata.orchestrator}")
+        )
+
+    available: dict[str, bool] = {}
+    if required_images:
+        workers = min(DEFAULT_PREPARE_WORKERS, len(required_images))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            available.update(executor.map(ensure, required_images))
+    for image, description in required_images.items():
+        if not available[image]:
+            raise ConfigError(f"{description} is missing: {image}")
+
+    if restore_context:
         paths = {
             "repos": Path(metadata.repo_dir),
             "cache": Path(metadata.dnf_cache_dir),
@@ -1201,19 +1237,8 @@ def _restore_ci_build_context(
             path.mkdir(parents=True, exist_ok=True)
         Path(metadata.dnf_log_dir).mkdir(parents=True, exist_ok=True)
         for repo_image in metadata.repo_images:
-            if not _ensure_image(metadata.podman, repo_image, metadata.ci_registry):
-                raise ConfigError(f"CI repository image is missing: {repo_image}")
             _extract_image_paths(metadata.podman, repo_image, paths)
         restored_contexts.add(key)
-
-    if package_images:
-        for plan in metadata.package_images:
-            if not _ensure_image(metadata.podman, plan.image, metadata.ci_registry):
-                raise ConfigError(f"CI card package image is missing: {plan.image}")
-    if oci_images:
-        for plan in metadata.oci_images:
-            if not _ensure_image(metadata.podman, plan.image, metadata.ci_registry):
-                raise ConfigError(f"CI OCI image is missing: {plan.image}")
 
 
 def _upload_ci_output(
