@@ -638,9 +638,21 @@ class TargetCardBuildTests(unittest.TestCase):
                 build_outputs=BuildImageOutputs(),
                 mode="separated",
                 cache_only=False,
+                build_cache="ghcr.io/anatase-org/cache",
             )
 
         container_build.assert_called_once()
+        build_command = container_build.call_args.args[0]
+        cache_from = build_command.index("--cache-from")
+        self.assertEqual(
+            build_command[cache_from : cache_from + 4],
+            [
+                "--cache-from",
+                "ghcr.io/anatase-org/cache",
+                "--cache-to",
+                "ghcr.io/anatase-org/cache",
+            ],
+        )
         containerfile = Path(metadata.build_dir) / "Containerfile"
         self.assertIn(
             f'LABEL "org.anatase.ludos.tag"="{result.output_image.rsplit(":", 1)[-1]}"',

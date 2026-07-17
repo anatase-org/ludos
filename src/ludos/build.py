@@ -1460,6 +1460,7 @@ def build_final_manifest_images(
     mode: str = "separated",
     cache_only: bool = False,
     force: bool = False,
+    build_cache: str = "",
 ) -> tuple[BuildResult, ...]:
     if mode not in ("separated", "combined"):
         raise ConfigError(f"unknown final image build mode: {mode}")
@@ -1474,6 +1475,7 @@ def build_final_manifest_images(
                 mode=mode,
                 cache_only=cache_only,
                 force=force,
+                build_cache=build_cache,
             )
         )
     return tuple(results)
@@ -1486,6 +1488,7 @@ def _build_final_manifest_image(
     mode: str,
     cache_only: bool,
     force: bool = False,
+    build_cache: str = "",
 ) -> BuildResult:
     metadata = _metadata_with_final_image(metadata, mode=mode)
     if not force and _ensure_image(
@@ -1600,6 +1603,16 @@ def _build_final_manifest_image(
             "build",
             "--layers",
             "--pull=missing",
+            *(
+                (
+                    "--cache-from",
+                    build_cache,
+                    "--cache-to",
+                    build_cache,
+                )
+                if build_cache
+                else ()
+            ),
             "--tag",
             metadata.output_image,
             "--volume",

@@ -903,6 +903,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build final images with combined package and postprocess layers.",
     )
     ci_build_parser.add_argument(
+        "--cache",
+        action="store_true",
+        help="Read and write image build intermediate layers in <ci.registry>/cache.",
+    )
+    ci_build_parser.add_argument(
         "--autoremove",
         action="store_true",
         help=(
@@ -1436,6 +1441,7 @@ def ci_command(args: argparse.Namespace) -> int:
             flatpaks=args.flatpaks,
             upload=args.upload,
             ci=args.ci,
+            cache=args.cache,
             autoremove=args.autoremove,
             ccache=args.ccache,
         )

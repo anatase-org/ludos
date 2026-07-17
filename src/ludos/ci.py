@@ -428,6 +428,7 @@ def build_ci(
     flatpaks: bool = False,
     upload: bool = False,
     ci: bool = False,
+    cache: bool = False,
     autoremove: bool = False,
     ccache: bool = False,
 ) -> None:
@@ -467,6 +468,7 @@ def build_ci(
                     cleanup_images=cleanup_images,
                     upload=upload,
                     ci=ci,
+                    cache=cache,
                     autoremove=autoremove,
                     ccache=ccache,
                 )
@@ -948,6 +950,7 @@ def _build_ci_manifest_image(
     cleanup_images: set[tuple[str, str, str]],
     upload: bool = False,
     ci: bool = False,
+    cache: bool = False,
     autoremove: bool,
     ccache: bool = False,
 ) -> None:
@@ -976,6 +979,11 @@ def _build_ci_manifest_image(
         build_outputs=build_outputs,
         mode=mode,
         cache_only=False,
+        build_cache=(
+            f"{_require_ci_registry(metadata.ci_registry)}/cache"
+            if cache
+            else ""
+        ),
     )[0]
     if result.output_image != expected_metadata.output_image:
         raise ConfigError(
