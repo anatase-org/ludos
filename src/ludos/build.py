@@ -2229,7 +2229,7 @@ def _postprocess_step(
             (
                 "type=bind",
                 f"from={oci_stage_name}",
-                "source=/",
+                "source=/files",
                 f"target=/ludos/oci-files/{mount_index}",
                 "ro",
             )
@@ -2248,7 +2248,7 @@ def _postprocess_step(
             (
                 "type=bind",
                 f"from={build_stage_name}",
-                "source=/",
+                "source=/files",
                 "target=/ludos/build-files",
                 "ro",
             )
@@ -2300,7 +2300,7 @@ def _combined_postprocess_step(
                 (
                     "type=bind",
                     f"from={oci_stage_name}",
-                    "source=/",
+                    "source=/files",
                     f"target=/ludos/oci-files/{identifier}/{mount_index}",
                     "ro",
                 )
@@ -2319,7 +2319,7 @@ def _combined_postprocess_step(
                 (
                     "type=bind",
                     f"from={build_stage_names[card_name]}",
-                    "source=/",
+                    "source=/files",
                     f"target=/ludos/build-files/{identifier}",
                     "ro",
                 )
@@ -2344,9 +2344,9 @@ def _combined_postprocess_step(
 {env_setup}\
 rm -rf /files
 mkdir -p /files
-for dir in /ludos/oci-files/{identifier}/*/files; do [ -d "$dir" ] && cp -a "$dir"/. /files/; done
+for dir in /ludos/oci-files/{identifier}/*; do [ -d "$dir" ] && cp -a "$dir"/. /files/; done
 if [ -d /ludos/card-files/{identifier} ]; then cp -a /ludos/card-files/{identifier}/. /files/; fi
-if [ -d /ludos/build-files/{identifier}/files ]; then cp -a /ludos/build-files/{identifier}/files/. /files/; fi
+if [ -d /ludos/build-files/{identifier} ]; then cp -a /ludos/build-files/{identifier}/. /files/; fi
 {set_command}{postprocess}
 rm -rf /files
 """
@@ -2368,15 +2368,12 @@ def _postprocess_file_setup(
     lines = ["rm -rf /files", "mkdir -p /files"]
     if has_oci_files:
         lines.append(
-            'for dir in /ludos/oci-files/*/files; do [ -d "$dir" ] && cp -a "$dir"/. /files/; done'
+            'for dir in /ludos/oci-files/*; do [ -d "$dir" ] && cp -a "$dir"/. /files/; done'
         )
     if has_card_files:
         lines.append("cp -a /ludos/card-files/. /files/")
     if has_build_files:
-        lines.append(
-            "if [ -d /ludos/build-files/files ]; then "
-            "cp -a /ludos/build-files/files/. /files/; fi"
-        )
+        lines.append("cp -a /ludos/build-files/. /files/")
     return "\n".join(lines) + "\n"
 
 
