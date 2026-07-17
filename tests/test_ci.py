@@ -25,9 +25,6 @@ from ludos.ci import (
     DEFAULT_SEED_BUFFER_RATIO,
     SeedDiskSpaceError,
     _ci_remote_image_exists,
-    _ci_final_build_outputs,
-    _ci_final_dependency_images,
-    _ci_final_oci_outputs,
     _build_ci_package,
     _build_ci_manifest_image,
     _build_ci_flatpak,
@@ -835,76 +832,6 @@ class CiEnvTests(unittest.TestCase):
 
 
 class PrepareCiTests(unittest.TestCase):
-    def test_ci_final_dependencies_are_lazy_and_digest_pinned(self) -> None:
-        root = Path("/workspace")
-        context = self._context(root)
-        metadata = replace(
-            self._metadata(root, context),
-            oci_images=(
-                replace(
-                    self._metadata(root, context).oci_images[0],
-                    declared_package_ids=(
-                        ("kernel-core", "x86_64"),
-                        ("kernel-common", "noarch"),
-                    ),
-                ),
-            ),
-        )
-
-        with patch(
-            "ludos.ci._inspect_remote_digest",
-            side_effect=("sha256:card", "sha256:build"),
-        ) as inspect:
-            dependencies = _ci_final_dependency_images(metadata)
-
-        self.assertEqual(
-            dependencies,
-            {
-                "cards:f44-common": (
-                    "ghcr.io/anatase-org/cards:f44-common@sha256:card"
-                ),
-                "builds:f44-base": (
-                    "ghcr.io/anatase-org/builds:f44-base@sha256:build"
-                ),
-                "kernel:f44": (
-                    "ghcr.io/anatase-org/kernel:f44@sha256:kernel111"
-                ),
-            },
-        )
-        self.assertCountEqual(
-            inspect.call_args_list,
-            [
-                call("ghcr.io/anatase-org/cards:f44-common"),
-                call("ghcr.io/anatase-org/builds:f44-base"),
-            ],
-        )
-
-        build_outputs = _ci_final_build_outputs(metadata)
-        self.assertEqual(
-            build_outputs.images_by_block,
-            (("base", "builds:f44-base"),),
-        )
-        self.assertEqual(
-            build_outputs.rpm_globs_by_block,
-            (("base", ("*.rpm",)),),
-        )
-        self.assertEqual(build_outputs.file_blocks, ("base",))
-
-        oci_outputs = _ci_final_oci_outputs(metadata)
-        self.assertEqual(
-            oci_outputs.rpm_ids_by_index,
-            (
-                (
-                    0,
-                    (
-                        ("kernel-core", "x86_64"),
-                        ("kernel-common", "noarch"),
-                    ),
-                ),
-            ),
-        )
-        self.assertEqual(oci_outputs.file_indexes, (0,))
-
     def test_remote_image_exists_uses_shared_registry_check(self) -> None:
         with patch("ludos.ci._remote_cache_image_exists", return_value=True) as remote:
             exists = _ci_remote_image_exists(
@@ -2228,7 +2155,7 @@ class BuildCiTests(unittest.TestCase):
 
         remove.assert_not_called()
 
-    def test_manifest_build_uses_lazy_pinned_dependencies(self) -> None:
+    def test_manifest_build_marks_card_and_build_images_for_cleanup(self) -> None:
         metadata = SimpleNamespace(
             podman="podman",
             ci_registry="registry.example",
@@ -2241,32 +2168,14 @@ class BuildCiTests(unittest.TestCase):
             latest_image="images:anatase",
         )
         cleanup_images = set()
-        build_outputs = object()
-        oci_outputs = object()
-        dependency_images = {
-            "cards:f44-base": "registry.example/cards:f44-base@sha256:card",
-            "builds:f44-base": "registry.example/builds:f44-base@sha256:build",
-        }
         with (
             patch("ludos.ci._metadata_from_seed_entry", return_value=metadata),
             patch(
                 "ludos.ci._metadata_with_final_image",
                 return_value=metadata,
             ) as final_metadata,
-            patch("ludos.ci._restore_ci_build_context") as restore,
-            patch(
-                "ludos.ci._ci_final_dependency_images",
-                return_value=dependency_images,
-            ),
-            patch(
-                "ludos.ci._ci_final_build_outputs",
-                return_value=build_outputs,
-            ),
-            patch(
-                "ludos.ci._ci_final_oci_outputs",
-                return_value=oci_outputs,
-            ),
-            patch("ludos.ci.build_build_images") as eager_build_outputs,
+            patch("ludos.ci._restore_ci_build_context"),
+            patch("ludos.ci.build_build_images", return_value=object()),
             patch(
                 "ludos.ci.build_final_manifest_images",
                 return_value=(result,),
@@ -2286,28 +2195,12 @@ class BuildCiTests(unittest.TestCase):
         self.assertEqual(
             cleanup_images,
             {
-                (
-                    "podman",
-                    "registry.example/cards:f44-base@sha256:card",
-                    "",
-                ),
-                (
-                    "podman",
-                    "registry.example/builds:f44-base@sha256:build",
-                    "",
-                ),
+                ("podman", "cards:f44-base", "registry.example"),
+                ("podman", "builds:f44-base", "registry.example"),
             },
         )
-        eager_build_outputs.assert_not_called()
-        restore.assert_called_once_with(metadata, set())
         final_metadata.assert_called_once_with(metadata, mode="separated")
         self.assertEqual(final_build.call_args.kwargs["mode"], "separated")
-        self.assertIs(final_build.call_args.kwargs["build_outputs"], build_outputs)
-        self.assertIs(final_build.call_args.kwargs["oci_outputs"], oci_outputs)
-        self.assertEqual(
-            final_build.call_args.kwargs["dependency_images"],
-            dependency_images,
-        )
         self.assertEqual(
             final_build.call_args.kwargs["build_cache"],
             "registry.example/cache",

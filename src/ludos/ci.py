@@ -17,19 +17,16 @@ import yaml
 
 from .bootc import _bootc_artifact_name, _export_bootc_images
 from .build import (
-    BuildImageOutputs,
     BuildImagePlan,
     FileRef,
     LUDOS_TAG_LABEL,
     OciImagePlan,
-    OciImageOutputs,
     PackageImagePlan,
     ResolvedBuildMetadata,
     _create_builder_image,
     _create_package_image,
     _download_exact_packages,
     _ensure_image,
-    _image_digest,
     _image_tag,
     _metadata_build_result,
     _metadata_with_final_image,
@@ -189,7 +186,7 @@ def _manifest_tag(manifest_path: Path, version: str | None = None) -> str:
     return _substitute_variables(manifest.tag, env)
 
 
-def _inspect_remote_image(ref: str, *, arch: str | None = None) -> dict[str, Any]:
+def _inspect_remote_labels(ref: str, *, arch: str | None = None) -> dict[str, str]:
     skopeo = shutil.which("skopeo")
     if not skopeo:
         raise ConfigError("skopeo must be installed to inspect remote OCI images")
@@ -210,24 +207,10 @@ def _inspect_remote_image(ref: str, *, arch: str | None = None) -> dict[str, Any
         data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise ConfigError(f"failed to inspect remote OCI image: {ref}") from exc
-    if not isinstance(data, dict):
-        raise ConfigError(f"failed to inspect remote OCI image: {ref}")
-    return data
-
-
-def _inspect_remote_labels(ref: str, *, arch: str | None = None) -> dict[str, str]:
-    data = _inspect_remote_image(ref, arch=arch)
     labels = data.get("Labels") or {}
     if not isinstance(labels, dict):
         return {}
     return {str(key): str(value) for key, value in labels.items()}
-
-
-def _inspect_remote_digest(ref: str) -> str:
-    digest = _image_digest(_inspect_remote_image(ref))
-    if not digest:
-        raise ConfigError(f"remote OCI image has no digest: {ref}")
-    return digest
 
 
 def prepare_ci(
@@ -960,68 +943,6 @@ def _build_ci_package(
         )
 
 
-def _ci_final_dependency_images(
-    metadata: ResolvedBuildMetadata,
-) -> dict[str, str]:
-    images = tuple(
-        dict.fromkeys(
-            plan.image
-            for plan in (*metadata.package_images, *metadata.build_images)
-        )
-    )
-
-    def pin(image: str) -> tuple[str, str]:
-        remote = _ci_remote_image(metadata.ci_registry, image)
-        digest = _inspect_remote_digest(remote)
-        return image, f"{remote}@{digest}"
-
-    pinned = {}
-    if images:
-        workers = min(DEFAULT_PREPARE_WORKERS, len(images))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            pinned.update(executor.map(pin, images))
-    for plan in metadata.oci_images:
-        if not plan.digest:
-            raise ConfigError(f"CI OCI image has no digest: {plan.image}")
-        remote = _ci_remote_image(metadata.ci_registry, plan.image)
-        pinned[plan.image] = f"{remote}@{plan.digest}"
-    return pinned
-
-
-def _ci_final_build_outputs(
-    metadata: ResolvedBuildMetadata,
-) -> BuildImageOutputs:
-    return BuildImageOutputs(
-        images_by_block=tuple(
-            (plan.block, plan.image)
-            for plan in metadata.build_images
-        ),
-        rpm_globs_by_block=tuple(
-            (plan.block, ("*.rpm",))
-            for plan in metadata.build_images
-        ),
-        file_blocks=tuple(
-            plan.block
-            for plan in metadata.build_images
-        ),
-    )
-
-
-def _ci_final_oci_outputs(
-    metadata: ResolvedBuildMetadata,
-) -> OciImageOutputs:
-    return OciImageOutputs(
-        rpm_ids_by_index=tuple(
-            (
-                index,
-                tuple(dict.fromkeys(plan.declared_package_ids)),
-            )
-            for index, plan in enumerate(metadata.oci_images)
-        ),
-        file_indexes=tuple(range(len(metadata.oci_images))),
-    )
-
-
 def _build_ci_manifest_image(
     build_manifest: Path,
     build_id: str,
@@ -1042,20 +963,22 @@ def _build_ci_manifest_image(
         entry,
         ccache=ccache,
     )
-    _restore_ci_build_context(metadata, restored_contexts)
+    _restore_ci_build_context(
+        metadata,
+        restored_contexts,
+        package_images=True,
+        oci_images=True,
+    )
+    cleanup_images.update(
+        (metadata.podman, plan.image, metadata.ci_registry)
+        for plan in (*metadata.package_images, *metadata.build_images)
+    )
     mode = "combined" if ci else "separated"
     expected_metadata = _metadata_with_final_image(metadata, mode=mode)
-    dependency_images = _ci_final_dependency_images(metadata)
-    cleanup_images.update(
-        (metadata.podman, image, "")
-        for image in dependency_images.values()
-    )
-    build_outputs = _ci_final_build_outputs(metadata)
+    build_outputs = build_build_images((metadata,), cache_only=True)
     result = build_final_manifest_images(
         (metadata,),
         build_outputs=build_outputs,
-        oci_outputs=_ci_final_oci_outputs(metadata),
-        dependency_images=dependency_images,
         mode=mode,
         cache_only=False,
         build_cache=(

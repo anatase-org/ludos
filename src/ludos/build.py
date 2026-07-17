@@ -103,17 +103,7 @@ class OciImagePlan:
 class BuildImageOutputs:
     images_by_block: tuple[tuple[str, str], ...] = tuple()
     rpm_files_by_block: tuple[tuple[str, tuple[str, ...]], ...] = tuple()
-    rpm_globs_by_block: tuple[tuple[str, tuple[str, ...]], ...] = tuple()
     file_blocks: tuple[str, ...] = tuple()
-
-
-@dataclass(frozen=True)
-class OciImageOutputs:
-    rpm_files_by_index: tuple[tuple[int, tuple[str, ...]], ...] = tuple()
-    rpm_ids_by_index: (
-        tuple[tuple[int, tuple[tuple[str, str], ...]], ...]
-    ) = tuple()
-    file_indexes: tuple[int, ...] = tuple()
 
 
 @dataclass(frozen=True)
@@ -1467,8 +1457,6 @@ def build_final_manifest_images(
     metadata: tuple[ResolvedBuildMetadata, ...],
     *,
     build_outputs: BuildImageOutputs | None = None,
-    oci_outputs: OciImageOutputs | None = None,
-    dependency_images: dict[str, str] | None = None,
     mode: str = "separated",
     cache_only: bool = False,
     force: bool = False,
@@ -1484,8 +1472,6 @@ def build_final_manifest_images(
             _build_final_manifest_image(
                 manifest,
                 build_outputs=build_outputs,
-                oci_outputs=oci_outputs,
-                dependency_images=dependency_images,
                 mode=mode,
                 cache_only=cache_only,
                 force=force,
@@ -1499,8 +1485,6 @@ def _build_final_manifest_image(
     metadata: ResolvedBuildMetadata,
     *,
     build_outputs: BuildImageOutputs,
-    oci_outputs: OciImageOutputs | None = None,
-    dependency_images: dict[str, str] | None = None,
     mode: str,
     cache_only: bool,
     force: bool = False,
@@ -1577,22 +1561,15 @@ def _build_final_manifest_image(
         card_file_cards.add(card_name)
         log(f"Staged {staged_file_count} files for card: {card_name}")
 
-    dependency_images = dependency_images or {}
     package_images_by_block = {
-        plan.block: dependency_images.get(plan.image, plan.image)
-        for plan in metadata.package_images
+        plan.block: plan.image for plan in metadata.package_images
     }
-    build_images_by_block = {
-        block: dependency_images.get(image, image)
-        for block, image in build_outputs.images_by_block
-    }
+    build_images_by_block = dict(build_outputs.images_by_block)
     build_rpm_files_by_block = dict(build_outputs.rpm_files_by_block)
-    build_rpm_globs_by_block = dict(build_outputs.rpm_globs_by_block)
     build_file_blocks = set(build_outputs.file_blocks)
-    oci_outputs = oci_outputs or _resolve_oci_output_metadata_for_build(metadata)
-    oci_rpm_files_by_index = dict(oci_outputs.rpm_files_by_index)
-    oci_rpm_ids_by_index = dict(oci_outputs.rpm_ids_by_index)
-    oci_file_indexes = set(oci_outputs.file_indexes)
+    oci_rpm_files_by_index, oci_file_indexes = _resolve_oci_output_metadata_for_build(
+        metadata
+    )
     package_blocks = tuple(
         (block_name, block_packages)
         for block_name, block_packages in metadata.package_blocks
@@ -1611,13 +1588,10 @@ def _build_final_manifest_image(
             package_images_by_block=package_images_by_block,
             build_images_by_block=build_images_by_block,
             build_rpm_files_by_block=build_rpm_files_by_block,
-            build_rpm_globs_by_block=build_rpm_globs_by_block,
             card_file_cards=card_file_cards,
             build_file_blocks=build_file_blocks,
             oci_rpm_files_by_index=oci_rpm_files_by_index,
-            oci_rpm_ids_by_index=oci_rpm_ids_by_index,
             oci_file_indexes=oci_file_indexes,
-            dependency_images=dependency_images,
         ),
         encoding="utf-8",
     )
@@ -1668,9 +1642,9 @@ def _build_final_manifest_image(
 
 def _resolve_oci_output_metadata_for_build(
     metadata: ResolvedBuildMetadata,
-) -> OciImageOutputs:
+) -> tuple[dict[int, tuple[str, ...]], set[int]]:
     if not metadata.oci_images:
-        return OciImageOutputs()
+        return {}, set()
 
     card_sources = {
         card_name: Path(source)
@@ -1695,10 +1669,7 @@ def _resolve_oci_output_metadata_for_build(
         rpm_files_by_index[index] = oci_rpm_files
         if oci_has_files:
             file_indexes.add(index)
-    return OciImageOutputs(
-        rpm_files_by_index=tuple(sorted(rpm_files_by_index.items())),
-        file_indexes=tuple(sorted(file_indexes)),
-    )
+    return rpm_files_by_index, file_indexes
 
 
 def _render_final_containerfile(
@@ -1709,66 +1680,45 @@ def _render_final_containerfile(
     package_images_by_block: dict[str, str],
     build_images_by_block: dict[str, str],
     build_rpm_files_by_block: dict[str, tuple[str, ...]],
-    build_rpm_globs_by_block: dict[str, tuple[str, ...]] | None = None,
     card_file_cards: set[str],
     build_file_blocks: set[str],
     oci_rpm_files_by_index: dict[int, tuple[str, ...]] | None = None,
-    oci_rpm_ids_by_index: (
-        dict[int, tuple[tuple[str, str], ...]] | None
-    ) = None,
     oci_file_indexes: set[int] | None = None,
-    dependency_images: dict[str, str] | None = None,
 ) -> str:
     oci_rpm_files_by_index = oci_rpm_files_by_index or {}
-    oci_rpm_ids_by_index = oci_rpm_ids_by_index or {}
-    build_rpm_globs_by_block = build_rpm_globs_by_block or {}
     oci_file_indexes = oci_file_indexes or set()
-    dependency_images = dependency_images or {}
-    if dependency_images:
-        package_stage_names = {
-            block_name: package_images_by_block[block_name]
-            for block_name, _block_packages in package_blocks
-            if block_name in package_images_by_block
-        }
-        build_stage_names = dict(build_images_by_block)
-        oci_stage_names = {
-            index: dependency_images.get(plan.image, plan.image)
-            for index, plan in enumerate(metadata.oci_images)
-        }
-        stage_lines = ""
-    else:
-        package_stage_names = {
-            block_name: f"cards_{_identifier(block_name)}"
-            for block_name, _block_packages in package_blocks
-            if block_name in package_images_by_block
-        }
-        build_stage_names = {
-            block_name: f"builds_{_identifier(block_name)}"
-            for block_name in build_images_by_block
-        }
-        oci_stage_names = {
-            index: f"oci_{_identifier(plan.block)}_{_identifier(plan.name)}_{index}"
-            for index, plan in enumerate(metadata.oci_images)
-        }
-        stage_lines = "".join(
-            f"FROM {package_images_by_block[block_name]} "
-            f"AS {package_stage_names[block_name]}\n"
-            for block_name, _block_packages in package_blocks
-            if block_name in package_stage_names
-        )
-        stage_lines += "".join(
-            f"FROM {image} AS {build_stage_names[block_name]}\n"
-            for block_name, image in build_images_by_block.items()
-        )
-        stage_lines += "".join(
-            f"FROM {plan.image} AS {oci_stage_names[index]}\n"
-            for index, plan in enumerate(metadata.oci_images)
-        )
+    package_stage_names = {
+        block_name: f"cards_{_identifier(block_name)}"
+        for block_name, _block_packages in package_blocks
+        if block_name in package_images_by_block
+    }
+    build_stage_names = {
+        block_name: f"builds_{_identifier(block_name)}"
+        for block_name in build_images_by_block
+    }
+    oci_stage_names = {
+        index: f"oci_{_identifier(plan.block)}_{_identifier(plan.name)}_{index}"
+        for index, plan in enumerate(metadata.oci_images)
+    }
     oci_images_by_block: dict[str, list[tuple[int, OciImagePlan, str]]] = {}
     for index, plan in enumerate(metadata.oci_images):
         oci_images_by_block.setdefault(plan.block, []).append(
             (index, plan, oci_stage_names[index])
         )
+    stage_lines = "".join(
+        f"FROM {package_images_by_block[block_name]} AS {package_stage_names[block_name]}\n"
+        for block_name, _block_packages in package_blocks
+        if block_name in package_stage_names
+    )
+    stage_lines += "".join(
+        f"FROM {image} AS {build_stage_names[block_name]}\n"
+        for block_name, image in build_images_by_block.items()
+    )
+    stage_lines += "".join(
+        f"FROM {plan.image} AS {oci_stage_names[index]}\n"
+        for index, plan in enumerate(metadata.oci_images)
+    )
+
     label_lines = "".join(
         f"LABEL {json.dumps(key)}={json.dumps(value)}\n"
         for key, value in metadata.manifest_labels
@@ -1853,8 +1803,6 @@ LUDOS_BOOTSTRAP
                 "ro",
             )
         ]
-        install_globs = []
-        install_selectors = []
         build_images = []
         cache_images = []
         for card_name in metadata.card_order:
@@ -1876,10 +1824,6 @@ LUDOS_BOOTSTRAP
                     f"{rpm_mount}/{rpm_file}"
                     for rpm_file in oci_rpm_files_by_index.get(oci_index, tuple())
                 )
-                install_selectors += [
-                    (f"{rpm_mount}/*.rpm", name, arch)
-                    for name, arch in oci_rpm_ids_by_index.get(oci_index, tuple())
-                ]
                 cache_images.append(f"{oci_plan.image}@{oci_plan.digest}")
             card_block_packages = tuple(
                 package
@@ -1903,29 +1847,23 @@ LUDOS_BOOTSTRAP
                     card_block_packages,
                 )
             build_rpm_files = build_rpm_files_by_block.get(card_name, tuple())
-            build_rpm_globs = build_rpm_globs_by_block.get(card_name, tuple())
-            if (build_rpm_files or build_rpm_globs) and card_name in build_stage_names:
-                build_mount = f"/rpms/{_identifier(card_name)}-build"
+            if build_rpm_files and card_name in build_stage_names:
                 mounts.append(
                     (
                         "type=bind",
                         f"from={build_stage_names[card_name]}",
                         "source=/rpms",
-                        f"target={build_mount}",
+                        f"target=/rpms/{_identifier(card_name)}-build",
                         "ro",
                     )
                 )
                 build_images.append(build_images_by_block[card_name])
                 cache_images.append(build_images_by_block[card_name])
                 install_paths += tuple(
-                    f"{build_mount}/{rpm_file}"
+                    f"/rpms/{_identifier(card_name)}-build/{rpm_file}"
                     for rpm_file in build_rpm_files
                 )
-                install_globs += [
-                    f"{build_mount}/{rpm_glob}"
-                    for rpm_glob in build_rpm_globs
-                ]
-        if install_paths or install_globs or install_selectors:
+        if install_paths:
             install_steps.append(
                 _run_with_mounts(
                     mounts,
@@ -1933,8 +1871,6 @@ LUDOS_BOOTSTRAP
                     _dnf_install_script(
                         metadata.releasever,
                         install_paths,
-                        rpm_globs=tuple(install_globs),
-                        rpm_selectors=tuple(install_selectors),
                         cache_images=tuple(cache_images or build_images),
                     ),
                 )
@@ -1991,8 +1927,6 @@ LUDOS_BOOTSTRAP
             )
             installed_common.update(common_needed)
             install_paths = _rpm_paths_for_packages("/rpms/common", common_needed)
-            install_globs = []
-            install_selectors = []
             for oci_index, oci_plan, oci_stage_name in oci_images_by_block.get(
                 card_name,
                 [],
@@ -2011,10 +1945,6 @@ LUDOS_BOOTSTRAP
                     f"{rpm_mount}/{rpm_file}"
                     for rpm_file in oci_rpm_files_by_index.get(oci_index, tuple())
                 )
-                install_selectors += [
-                    (f"{rpm_mount}/*.rpm", name, arch)
-                    for name, arch in oci_rpm_ids_by_index.get(oci_index, tuple())
-                ]
                 cache_images.append(f"{oci_plan.image}@{oci_plan.digest}")
             card_block_packages = card_packages.get(card_name, tuple())
             if card_block_packages and card_name in package_stage_names:
@@ -2032,29 +1962,23 @@ LUDOS_BOOTSTRAP
                     card_block_packages,
                 )
             build_rpm_files = build_rpm_files_by_block.get(card_name, tuple())
-            build_rpm_globs = build_rpm_globs_by_block.get(card_name, tuple())
-            if (build_rpm_files or build_rpm_globs) and card_name in build_stage_names:
-                build_mount = f"/rpms/{_identifier(card_name)}-build"
+            if build_rpm_files and card_name in build_stage_names:
                 mounts.append(
                     (
                         "type=bind",
                         f"from={build_stage_names[card_name]}",
                         "source=/rpms",
-                        f"target={build_mount}",
+                        f"target=/rpms/{_identifier(card_name)}-build",
                         "ro",
                     )
                 )
                 build_images.append(build_images_by_block[card_name])
                 cache_images.append(build_images_by_block[card_name])
                 install_paths += tuple(
-                    f"{build_mount}/{rpm_file}"
+                    f"/rpms/{_identifier(card_name)}-build/{rpm_file}"
                     for rpm_file in build_rpm_files
                 )
-                install_globs += [
-                    f"{build_mount}/{rpm_glob}"
-                    for rpm_glob in build_rpm_globs
-                ]
-            if install_paths or install_globs or install_selectors:
+            if install_paths:
                 install_steps.append(
                     f"""#
 # Install packages: {card_name}
@@ -2066,8 +1990,6 @@ LUDOS_BOOTSTRAP
     _dnf_install_script(
         metadata.releasever,
         install_paths,
-        rpm_globs=tuple(install_globs),
-        rpm_selectors=tuple(install_selectors),
         cache_images=tuple(cache_images or build_images),
     ),
 )}
@@ -2115,47 +2037,18 @@ def _dnf_install_script(
     rpm_paths: tuple[str, ...],
     *,
     installroot: str | None = None,
-    rpm_globs: tuple[str, ...] = tuple(),
-    rpm_selectors: tuple[tuple[str, str, str], ...] = tuple(),
     cache_images: tuple[str, ...] = tuple(),
 ) -> str:
     cache_comments = _mounted_image_cache_comments(cache_images)
-    if not rpm_paths and not rpm_globs and not rpm_selectors:
+    if not rpm_paths:
         return f"{cache_comments}set -e\nexit 0\n"
     installroot_line = f"    --installroot={installroot} \\\n" if installroot else ""
     clean_root = installroot or ""
     clean_cache = f"{clean_root}/var/cache/dnf".replace("//", "/")
     clean_system_cache = f"{clean_root}/var/cache/libdnf5".replace("//", "/")
     clean_logs = f"{clean_root}/var/log/dnf*".replace("//", "/")
-    if rpm_globs or rpm_selectors:
-        rpm_args = " ".join(shlex.quote(path) for path in rpm_paths)
-        rpm_setup = f"set -- {rpm_args}\n".rstrip() + "\n"
-        rpm_setup += "".join(
-            f"for rpm in {_shell_glob(rpm_glob)}; do "
-            '[ -e "$rpm" ] && set -- "$@" "$rpm"; done\n'
-            for rpm_glob in rpm_globs
-        )
-        selector_ids_by_glob: dict[str, list[str]] = {}
-        for rpm_glob, name, arch in rpm_selectors:
-            selector_ids_by_glob.setdefault(rpm_glob, []).append(
-                f"{name}\t{arch}"
-            )
-        rpm_setup += "".join(
-            f"for rpm in {_shell_glob(rpm_glob)}; do\n"
-            '  [ -e "$rpm" ] || continue\n'
-            "  package_id=$(rpm -qp --qf '%{NAME}\\t%{ARCH}' \"$rpm\")\n"
-            f"  case \"$package_id\" in {_shell_case_values(package_ids)}) "
-            'set -- "$@" "$rpm";; esac\n'
-            "done\n"
-            for rpm_glob, package_ids in selector_ids_by_glob.items()
-        )
-        rpm_setup += '[ "$#" -gt 0 ] || exit 0\n'
-        rpm_lines = '    "$@"'
-    else:
-        rpm_setup = ""
-        rpm_lines = " \\\n".join(f"    {shlex.quote(path)}" for path in rpm_paths)
+    rpm_lines = " \\\n".join(f"    {shlex.quote(path)}" for path in rpm_paths)
     return f"""{cache_comments}set -e
-{rpm_setup}\
 dnf5 -y \\
 {installroot_line}    --releasever={releasever} \\
     --setopt=reposdir=/ludos/dnf/repos \\
@@ -2174,14 +2067,6 @@ dnf5 -y \\
     && \\
     rm -rf {clean_cache} {clean_system_cache} {clean_logs}
 """
-
-
-def _shell_glob(value: str) -> str:
-    return "*".join(shlex.quote(part) for part in value.split("*"))
-
-
-def _shell_case_values(values: list[str]) -> str:
-    return "|".join(shlex.quote(value) for value in dict.fromkeys(values))
 
 
 def _mounted_image_cache_comments(images: tuple[str, ...]) -> str:
