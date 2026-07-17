@@ -709,11 +709,20 @@ class TargetCardBuildTests(unittest.TestCase):
             *metadata.package_blocks,
         )
         package_images_by_block = {
-            "common": "localhost/cards:f44-x86_64-common-11111111",
-            "base-scx": "localhost/cards:f44-x86_64-base-scx-22222222",
+            "common": (
+                "ghcr.io/anatase-org/cards:f44-x86_64-common"
+                "@sha256:common111"
+            ),
+            "base-scx": (
+                "ghcr.io/anatase-org/cards:f44-x86_64-base-scx"
+                "@sha256:card222"
+            ),
         }
         build_images_by_block = {
-            "base-scx": "localhost/builds:f44-x86_64-base-scx-33333333",
+            "base-scx": (
+                "ghcr.io/anatase-org/builds:f44-x86_64-base-scx"
+                "@sha256:build333"
+            ),
         }
         metadata = replace(
             metadata,
@@ -727,23 +736,31 @@ class TargetCardBuildTests(unittest.TestCase):
             package_blocks=package_blocks,
             package_images_by_block=package_images_by_block,
             build_images_by_block=build_images_by_block,
-            build_rpm_files_by_block={"base-scx": ("base-scx-1-1.x86_64.rpm",)},
+            build_rpm_files_by_block={},
+            build_rpm_globs_by_block={"base-scx": ("*.rpm",)},
             card_file_cards=set(),
             build_file_blocks=set(),
+            dependency_images={
+                "builds:f44-x86_64-base-scx-33333333": (
+                    build_images_by_block["base-scx"]
+                ),
+            },
         )
 
-        self.assertNotIn(
-            "# build-image: f44-x86_64-common-11111111",
-            containerfile,
-        )
-        self.assertNotIn(
-            "# build-image: f44-x86_64-base-scx-22222222",
+        self.assertNotIn("FROM ghcr.io/anatase-org/cards:", containerfile)
+        self.assertNotIn("# build-image: sha256:common111", containerfile)
+        self.assertNotIn("# build-image: sha256:card222", containerfile)
+        self.assertIn("# build-image: sha256:build333", containerfile)
+        self.assertIn(
+            "from=ghcr.io/anatase-org/builds:f44-x86_64-base-scx"
+            "@sha256:build333,source=/rpms",
             containerfile,
         )
         self.assertIn(
-            "# build-image: f44-x86_64-base-scx-33333333",
+            "for rpm in /rpms/base_scx-build/*.rpm; do",
             containerfile,
         )
+        self.assertIn('install \\\n    --allowerasing \\\n    "$@"', containerfile)
 
     def test_resolve_cache_key_ignores_random_dnf_workspace(self) -> None:
         first = [
@@ -1045,15 +1062,16 @@ class TargetCardBuildTests(unittest.TestCase):
             ("common", (*bootstrap_packages, *common_packages)),
             *metadata.package_blocks,
         )
+        package_images_by_block = {
+            "common": "localhost/cards:f44-x86_64-common-11111111",
+            "base-scx": "localhost/cards:f44-x86_64-base-scx-22222222",
+        }
 
         containerfile = _render_final_containerfile(
             metadata,
             mode="separated",
             package_blocks=package_blocks,
-            package_images_by_block={
-                "common": "localhost/cards:f44-x86_64-common-11111111",
-                "base-scx": "localhost/cards:f44-x86_64-base-scx-22222222",
-            },
+            package_images_by_block=package_images_by_block,
             build_images_by_block={},
             build_rpm_files_by_block={},
             card_file_cards=set(),
@@ -1064,12 +1082,56 @@ class TargetCardBuildTests(unittest.TestCase):
             oci_file_indexes={0},
         )
 
-        self.assertIn("FROM localhost/kernel:f44-x86_64 AS oci_base_scx_kernel_0", containerfile)
+        self.assertIn(
+            "FROM localhost/kernel:f44-x86_64 "
+            "AS oci_base_scx_kernel_0",
+            containerfile,
+        )
         self.assertIn("/rpms/base_scx-oci-kernel/kernel-core-1-1.x86_64.rpm", containerfile)
         self.assertNotIn("/rpms/common/kernel-core-0:1-1.fc44.x86_64.rpm", containerfile)
         self.assertNotIn("kernel-extra-1-1.x86_64.rpm", containerfile)
-        self.assertIn("from=oci_base_scx_kernel_0,source=/files,target=/ludos/oci-files/0,ro", containerfile)
+        self.assertIn(
+            "from=oci_base_scx_kernel_0,"
+            "source=/files,target=/ludos/oci-files/0,ro",
+            containerfile,
+        )
         self.assertIn("# build-image: sha256:kernel111", containerfile)
+
+        pinned_kernel = (
+            "ghcr.io/anatase-org/kernel:f44-x86_64@sha256:kernel111"
+        )
+        lazy_containerfile = _render_final_containerfile(
+            metadata,
+            mode="separated",
+            package_blocks=package_blocks,
+            package_images_by_block=package_images_by_block,
+            build_images_by_block={},
+            build_rpm_files_by_block={},
+            card_file_cards=set(),
+            build_file_blocks=set(),
+            oci_rpm_ids_by_index={
+                0: (("kernel-core", "x86_64"),),
+            },
+            oci_file_indexes={0},
+            dependency_images={
+                "localhost/kernel:f44-x86_64": pinned_kernel,
+            },
+        )
+
+        self.assertNotIn(f"FROM {pinned_kernel}", lazy_containerfile)
+        self.assertIn(
+            f"from={pinned_kernel},"
+            "source=/files,target=/ludos/oci-files/0,ro",
+            lazy_containerfile,
+        )
+        self.assertIn(
+            "for rpm in /rpms/base_scx-oci-kernel/*.rpm; do",
+            lazy_containerfile,
+        )
+        self.assertIn(
+            "case \"$package_id\" in 'kernel-core\tx86_64')",
+            lazy_containerfile,
+        )
 
     def test_combined_containerfile_omits_card_rpm_replaced_by_later_build(self) -> None:
         metadata = replace(
