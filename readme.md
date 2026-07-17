@@ -44,13 +44,13 @@ Time: **1 - 3 minutes** to do a local deploy with minor changes, on a **VM** or 
 
 #### Diffed updates
 
-Ludos traces its roots in the [rechunk](https://github.com/hhd-dev/rechunk/) project, which provided partitioning rules for ostree-ext-rs (now `bootc internals ostree-ext`). The code for this analysis remains and got a fresh coat of paint. The major improvement was processing speed.
+Ludos traces its roots in the [rechunk](https://github.com/hhd-dev/rechunk/) project, which provided partitioning rules for ostree-ext-rs (now `bootc internals ostree-ext`). The code for this analysis remains and got a fresh coat of paint. The major improvement Ludos introduces is processing speed.
 
-Instead of hacky scripts that modify the container root in place using rootful podman (see [here](https://github.com/hhd-dev/rechunk/blob/master/1_prune.sh)), a tar reader scans your repository and does path rewriting that is fed to ostree. This eliminates whiteout processing from that mount. In addition, ostree-ext was taught to parallelize, becoming 4x faster. Finally, to do this processing, ludos creates a container from your image, then mounts your image in that container, using the internal bootc of that image. There is no [rechunk registry package](https://github.com/hhd-dev/rechunk/pkgs/container/rechunk), external dependency or pulls.
+Instead of hacky scripts that modify the container root in place using rootful podman (see [here](https://github.com/hhd-dev/rechunk/blob/master/1_prune.sh)), a tar reader scans your repository and does path rewriting that is fed to ostree. This eliminates slow whiteout processing in that mount. In addition, ostree-ext was taught to parallelize, becoming 4x faster. Finally, to do this processing, ludos creates a container from your image, then mounts your image in that container, so it uses the **internal patched bootc** of that image. There is no [rechunk registry package](https://github.com/hhd-dev/rechunk/pkgs/container/rechunk), external dependency or pulls.
 
 The tar rewriter and ostree backend are also used during local deploys, so test deploys and your public images are 1-1.
 
-TLDR: **3x faster, more secure, cleaner (16m -> 6m on 2 core builders; 2min locally)**
+TLDR: **3x faster, more secure, cleaner (16m on 4 core builders -> 6m on 2 core builders; 2min locally)**
 
 The local story is also better compared to something like chunkah (which is not 1-1). ostree-ext pre-calculates the selinux policy and ostree metadata, so bootc happily re-uses them, resulting in **15 second updates with minor changes** and **no fan spin-up** (with the merge commit skip fix).
 
