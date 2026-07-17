@@ -898,6 +898,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upload each output to the CI registry after it is built.",
     )
     ci_build_parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="Build final images with combined package and postprocess layers.",
+    )
+    ci_build_parser.add_argument(
         "--autoremove",
         action="store_true",
         help=(
@@ -1430,6 +1435,7 @@ def ci_command(args: argparse.Namespace) -> int:
             images=args.images,
             flatpaks=args.flatpaks,
             upload=args.upload,
+            ci=args.ci,
             autoremove=args.autoremove,
             ccache=args.ccache,
         )

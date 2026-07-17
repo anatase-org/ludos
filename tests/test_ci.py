@@ -211,6 +211,7 @@ class CiParserTests(unittest.TestCase):
                 "--images",
                 "--flatpaks",
                 "--upload",
+                "--ci",
                 "--autoremove",
             ]
         )
@@ -221,12 +222,14 @@ class CiParserTests(unittest.TestCase):
         self.assertTrue(args.images)
         self.assertTrue(args.flatpaks)
         self.assertTrue(args.upload)
+        self.assertTrue(args.ci)
         self.assertTrue(args.autoremove)
 
     def test_parser_disables_ci_build_upload_by_default(self) -> None:
         args = build_parser().parse_args(["ci", "build", "image"])
 
         self.assertFalse(args.upload)
+        self.assertFalse(args.ci)
 
     def test_parser_accepts_composable_ci_upload_selectors(self) -> None:
         args = build_parser().parse_args(
@@ -468,6 +471,7 @@ class CiParserTests(unittest.TestCase):
                 "0",
                 "--images",
                 "--upload",
+                "--ci",
                 "--autoremove",
                 "--ccache",
             ]
@@ -483,6 +487,7 @@ class CiParserTests(unittest.TestCase):
             images=True,
             flatpaks=False,
             upload=True,
+            ci=True,
             autoremove=True,
             ccache=True,
         )
@@ -1934,6 +1939,7 @@ class BuildCiTests(unittest.TestCase):
                             section,
                             build_id,
                             _kwargs["upload"],
+                            _kwargs.get("ci"),
                             _kwargs["ccache"],
                         )
                     )
@@ -1954,16 +1960,17 @@ class BuildCiTests(unittest.TestCase):
                     builds=True,
                     flatpaks=True,
                     upload=True,
+                    ci=True,
                     ccache=True,
                 )
 
         self.assertEqual(
             calls,
             [
-                ("build", "a", True, True),
-                ("build", "b", True, True),
-                ("image", "image", True, True),
-                ("flatpak", "flatpak", True, True),
+                ("build", "a", True, None, True),
+                ("build", "b", True, None, True),
+                ("image", "image", True, True, True),
+                ("flatpak", "flatpak", True, None, True),
             ],
         )
 
@@ -2109,12 +2116,16 @@ class BuildCiTests(unittest.TestCase):
         cleanup_images = set()
         with (
             patch("ludos.ci._metadata_from_seed_entry", return_value=metadata),
+            patch(
+                "ludos.ci._metadata_with_final_image",
+                return_value=metadata,
+            ) as final_metadata,
             patch("ludos.ci._restore_ci_build_context"),
             patch("ludos.ci.build_build_images", return_value=object()),
             patch(
                 "ludos.ci.build_final_manifest_images",
                 return_value=(result,),
-            ),
+            ) as final_build,
             patch("ludos.ci._upload_ci_output") as upload,
         ):
             _build_ci_manifest_image(
@@ -2133,6 +2144,8 @@ class BuildCiTests(unittest.TestCase):
                 ("podman", "builds:f44-base", "registry.example"),
             },
         )
+        final_metadata.assert_called_once_with(metadata, mode="separated")
+        self.assertEqual(final_build.call_args.kwargs["mode"], "separated")
         upload.assert_not_called()
 
     def test_flatpak_build_marks_build_image_for_cleanup(self) -> None:

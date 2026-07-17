@@ -427,6 +427,7 @@ def build_ci(
     images: bool = False,
     flatpaks: bool = False,
     upload: bool = False,
+    ci: bool = False,
     autoremove: bool = False,
     ccache: bool = False,
 ) -> None:
@@ -465,6 +466,7 @@ def build_ci(
                     restored_contexts=restored_contexts,
                     cleanup_images=cleanup_images,
                     upload=upload,
+                    ci=ci,
                     autoremove=autoremove,
                     ccache=ccache,
                 )
@@ -945,6 +947,7 @@ def _build_ci_manifest_image(
     restored_contexts: set[tuple[str, str, tuple[str, ...]]],
     cleanup_images: set[tuple[str, str, str]],
     upload: bool = False,
+    ci: bool = False,
     autoremove: bool,
     ccache: bool = False,
 ) -> None:
@@ -965,14 +968,16 @@ def _build_ci_manifest_image(
         (metadata.podman, plan.image, metadata.ci_registry)
         for plan in (*metadata.package_images, *metadata.build_images)
     )
+    mode = "combined" if ci else "separated"
+    expected_metadata = _metadata_with_final_image(metadata, mode=mode)
     build_outputs = build_build_images((metadata,), cache_only=True)
     result = build_final_manifest_images(
         (metadata,),
         build_outputs=build_outputs,
-        mode="combined",
+        mode=mode,
         cache_only=False,
     )[0]
-    if result.output_image != metadata.output_image:
+    if result.output_image != expected_metadata.output_image:
         raise ConfigError(
             f"{build_manifest}: image '{build_id}' resolved to unexpected output "
             f"{result.output_image}"
