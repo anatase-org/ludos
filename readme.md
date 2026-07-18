@@ -46,19 +46,21 @@ Time: **1 - 3 minutes** to do a local deploy with minor changes, on a **VM** or 
 
 Ludos traces its roots in the [rechunk](https://github.com/hhd-dev/rechunk/) project, which provided partitioning rules for ostree-ext-rs (now `bootc internals ostree-ext`). The code for this analysis remains and got a fresh coat of paint. The major improvement Ludos introduces is processing speed.
 
-Instead of hacky scripts that modify the container root in place using rootful podman (see [here](https://github.com/hhd-dev/rechunk/blob/master/1_prune.sh)), a tar reader scans your repository and does path rewriting that is fed to ostree. This eliminates slow whiteout processing in that mount. In addition, ostree-ext was taught to parallelize, becoming 4x faster. Finally, to do this processing, ludos creates a container from your image, then mounts your image in that container, so it uses the **internal patched bootc** of that image. There is no [rechunk registry package](https://github.com/hhd-dev/rechunk/pkgs/container/rechunk), external dependency or pulls.
+Instead of hacky scripts that modify the container root in place using rootful podman (see [here](https://github.com/hhd-dev/rechunk/blob/master/1_prune.sh)), a tar reader scans your image and does path rewriting that is fed to ostree. This eliminates slow whiteout processing from doing modifications directly in that mount. In addition, ostree-ext was taught to parallelize, becoming 4x faster. Finally, to do this processing, ludos creates a container from your image, then mounts your image in that container, so it uses the **internal patched bootc** of that image. There is no [rechunk registry package](https://github.com/hhd-dev/rechunk/pkgs/container/rechunk), external dependency or pulls.
 
 The tar rewriter and ostree backend are also used during local deploys, so test deploys and your public images are 1-1.
 
 TLDR: **3x faster, more secure, cleaner (16m on 4 core builders -> 6m on 2 core builders; 2min locally)**
 
-The local story is also better compared to something like chunkah (which is not 1-1). ostree-ext pre-calculates the selinux policy and ostree metadata, so bootc happily re-uses them, resulting in **15 second updates with minor changes** and **no fan spin-up** (with the merge commit skip fix).
+The device update story is also better compared to something like chunkah (which is not 1-1). ostree-ext pre-calculates the selinux policy and ostree metadata, so bootc happily re-uses them, resulting in **15 second updates with minor changes** and **no fan spin-up** (with the merge commit skip fix).
 
 #### S3 backend
 
 Ludos contains an optional S3 OCI registry implementation. To put it simply, you point Ludos to an S3 bucket, and it stores everything your distribution needs there: flatpaks, images, ISOs, and flatpak metadata. 
 
-The reason is simple: S3 registries are **faster**, **cheaper**, and **more reliable** than container registries
+The reason is simple: S3 registries are typically **faster**, **cheaper**, and **more reliable** than container registries. This is because they do not need a database or to be consistent. If you ask for a layer you get that layer directly.
+
+This does introduce some limitations that may make them unsuitable for your usecase, such as parallel writers interacting with the registry being able to corrupt it (e.g., a tree-shaker process can remove layers of an image that is currently uploaded causing it to corrupt). But if you have a dedicated bucket for your distribution CI, your CI's concurrency control can solve that.
 
 **But GHCR is free?** That's true, for now, but you tie your updater infrastructure with a URI you don't control and Github lists a one month notice to introduce charging changes for it. If you do URL rewriting through Cloudflare Workers to still use it, you end up paying more than Cloudflare R2. So, just use cloudflare R2 and pay for the storage.
 
@@ -70,7 +72,7 @@ Even in this early stage, Ludos supports using FIPS HSM keys from Google Cloud t
 
 Neither GPG or Cosign are used, with Ludos having a small re-implementation of the formats in it. Specifically for Cosign, Ludos uses both the legacy .sig and the new referrers format.
 
-The reason for the re-implementation is that GPG does not support cloud keys. Well it does, if you combine libkmsp11+gnupg-pkcs11-sc in a cursed ritual. This cursed ritual is enough to make the sub-key but attempting to make that CI friendly with sub-30 second installs is not viable. As for cosign, it is a foreign dependency and wants to touch your registry or it does not work. Ludos will do signature verification with both gpg and cosign if you have them installed after it performs signing.
+The reason for the re-implementation is that GPG does not support cloud keys. Well it does, if you combine libkmsp11 and a patched version of gnupg-pkcs11-sc. This dance is enough to create a sub-key but attempting to make that CI friendly and dependable with sub-30 second installs is not viable. As for cosign, it is a foreign dependency and wants to interact with a real registry or it does not work (we use an S3 read-only registry). Ludos will do signature verification with both gpg and cosign if you have them installed after it performs signing.
 
 ## Roadmap
 
@@ -81,7 +83,5 @@ The initial versions of Ludos focus on ensuring end-user functionality. I.e., st
 Ludos does not currently accept external contributions. You are welcome to post issues in the issue tracker, with suggestions or bug reports.
 
 ## License
-
-Copyright (C) 2024-2026 Antheas Kapenekakis
 
 A copy of Ludos is provided to you under the terms of [GNU Affero General Public License v3.0 or later](LICENSE).
