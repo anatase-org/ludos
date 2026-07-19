@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import subprocess
-import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -40,12 +38,11 @@ from ludos.installer import (
     _kernel_and_initramfs,
     _kernel_asset_script,
     _mcopy_tree_script,
-    _mkfs_erofs_tar_command,
+    _mkfs_erofs_command,
     _resolve_output_dir,
     _run_host,
     _safe_ref_name,
     _source_image_ref,
-    _stream_root_erofs,
     _tool_command,
     _tool_path,
     _xorriso_command,
@@ -838,7 +835,7 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn("set timeout_style=hidden", config)
         self.assertIn('menuentry "Installer"', config)
         self.assertIn("root=live:CDLABEL=ANATASE_ISO", config)
-        self.assertIn("selinux=0", config)
+        self.assertNotIn("selinux=0", config)
         self.assertIn('if [ "$grub_platform" = "efi" ]; then', config)
         self.assertIn("linuxefi /vmlinuz", config)
         self.assertIn("linux /vmlinuz", config)
@@ -889,9 +886,16 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertEqual(_fat_label_for_manifest(manifest, "KEY"), "ANATASE_KEY")
         self.assertEqual(_fat_label_for_manifest(long_manifest, "KEY"), "ANATASE_KEY")
 
-    def test_mkfs_erofs_tar_command_reads_tar_from_stdin(self) -> None:
+    def test_mkfs_erofs_command_labels_mounted_root(self) -> None:
         self.assertEqual(
-            _mkfs_erofs_tar_command("ANATASE_ROOT", Path("root.erofs"), workers=8),
+            _mkfs_erofs_command(
+                "ANATASE_ROOT",
+                Path("root.erofs"),
+                Path("/run/ludos-rootfs"),
+                Path("/run/ludos-rootfs/etc/selinux/targeted/contexts/files/file_contexts"),
+                exclude_paths=("ludos/installer",),
+                workers=8,
+            ),
             [
                 "mkfs.erofs",
                 "-L",
@@ -899,19 +903,24 @@ class InstallerHelperTests(unittest.TestCase):
                 "-z",
                 "zstd,9",
                 "-E",
-                "ztailpacking,fragments",
+                "ztailpacking,fragments,48bit",
+                "--exclude-path=ludos/installer",
                 "--workers=8",
-                "--tar=f",
+                "--ovlfs-strip=1",
+                "--file-contexts=/run/ludos-rootfs/etc/selinux/targeted/contexts/files/file_contexts",
                 "root.erofs",
-                "/proc/self/fd/0",
+                "/run/ludos-rootfs",
             ],
         )
 
-    def test_mkfs_erofs_tar_command_supports_scratch_profile(self) -> None:
+    def test_mkfs_erofs_command_supports_scratch_profile(self) -> None:
         self.assertEqual(
-            _mkfs_erofs_tar_command(
+            _mkfs_erofs_command(
                 "ANATASE_ROOT",
                 Path("root.erofs"),
+                Path("/run/ludos-rootfs"),
+                Path("/run/ludos-rootfs/etc/selinux/targeted/contexts/files/file_contexts"),
+                exclude_paths=("ludos/installer",),
                 profile=_erofs_profile(scratch=True),
                 workers=8,
             ),
@@ -922,11 +931,13 @@ class InstallerHelperTests(unittest.TestCase):
                 "-z",
                 "zstd,3",
                 "-E",
-                "ztailpacking,fragments",
+                "ztailpacking,fragments,48bit",
+                "--exclude-path=ludos/installer",
                 "--workers=8",
-                "--tar=f",
+                "--ovlfs-strip=1",
+                "--file-contexts=/run/ludos-rootfs/etc/selinux/targeted/contexts/files/file_contexts",
                 "root.erofs",
-                "/proc/self/fd/0",
+                "/run/ludos-rootfs",
             ],
         )
 
@@ -956,26 +967,6 @@ class InstallerHelperTests(unittest.TestCase):
             (efi_tree / "payload").write_bytes(b"\0" * (200 * 1024 * 1024))
 
             self.assertEqual(_efi_image_size_kib(efi_tree), 237568)
-
-    def test_stream_root_erofs_reports_erofs_failure_before_export_sigpipe(self) -> None:
-        class ExportProcess:
-            stdout = io.BytesIO(b"tar")
-            stderr = io.BytesIO(b"")
-
-            def wait(self) -> int:
-                return -13
-
-        class ErofsProcess:
-            returncode = 1
-
-            def communicate(self) -> tuple[bytes, bytes]:
-                return b"", b"mkfs failed"
-
-        processes = [ExportProcess(), ErofsProcess()]
-
-        with self.assertRaisesRegex(ConfigError, "mkfs failed"):
-            with patch("ludos.installer.subprocess.Popen", side_effect=processes):
-                _stream_root_erofs(_context(Path("/tmp")), "container")
 
     def test_copy_live_iso_payload_places_erofs_and_efi_image_in_standard_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

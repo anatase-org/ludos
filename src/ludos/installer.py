@@ -249,17 +249,58 @@ def _prepare_output_dir(output_dir: Path) -> None:
 
 def _create_root_erofs(ctx: InstallerContext, source_ref: str, run_ref: str) -> None:
     container = _container_name(ctx)
+    workers = _erofs_worker_count()
+    profile = _erofs_profile(ctx.scratch)
+    rootfs = Path("/run/ludos-rootfs")
+    erofs_command = _mkfs_erofs_command(
+        ctx.rootfs_label,
+        Path(CONTAINER_WORKDIR) / ctx.root_erofs.name,
+        rootfs,
+        rootfs / "etc/selinux/targeted/contexts/files/file_contexts",
+        exclude_paths=(CONTAINER_WORKDIR.removeprefix("/"),),
+        profile=profile,
+        workers=workers,
+    )
+    erofs_script = "\n".join(
+        [
+            f"mkdir -p {shlex.quote(str(rootfs))}",
+            f"mount --bind / {shlex.quote(str(rootfs))}",
+            f"exec {shlex.join(erofs_command)} > /dev/null",
+        ]
+    )
 
     log(f"Preparing installer rootfs container from {source_ref}")
     _run_host([ctx.podman, "rm", "-f", container], check=False)
     result = _run_host(
-        [ctx.podman, "create", "--name", container, run_ref, "/bin/true"],
+        [
+            ctx.podman,
+            "create",
+            "--name",
+            container,
+            "--privileged",
+            "--volume",
+            f"{ctx.output_dir.resolve()}:{CONTAINER_WORKDIR}",
+            "--workdir",
+            CONTAINER_WORKDIR,
+            run_ref,
+            "/bin/sh",
+            "-eu",
+            "-c",
+            erofs_script,
+        ],
         capture=True,
     )
     container_id = result.stdout.strip() or container
     try:
         _copy_boot_assets(ctx, container_id, run_ref)
-        _stream_root_erofs(ctx, container_id)
+        log(f"Creating EROFS image from installer rootfs: {ctx.root_erofs}")
+        log(
+            "Using EROFS compression profile: "
+            f"{profile.name}, compression={profile.compression}, "
+            f"pcluster={profile.pcluster_size or 'default'}, "
+            f"features={profile.features or 'none'}, workers={workers}"
+        )
+        _run_host([ctx.podman, "start", "--attach", container_id])
     finally:
         _run_host([ctx.podman, "rm", "-f", container_id], check=False)
 
@@ -797,57 +838,6 @@ def _efi_asset_script() -> str:
     )
 
 
-def _stream_root_erofs(ctx: InstallerContext, container_id: str) -> None:
-    log(f"Streaming installer rootfs into EROFS image: {ctx.root_erofs}")
-    workers = _erofs_worker_count()
-    profile = _erofs_profile(ctx.scratch)
-    log(
-        "Using EROFS compression profile: "
-        f"{profile.name}, compression={profile.compression}, "
-        f"pcluster={profile.pcluster_size or 'default'}, "
-        f"features={profile.features or 'none'}, workers={workers}"
-    )
-    export_command = [ctx.podman, "export", container_id]
-    erofs_command = _tool_command(
-        ctx,
-        _mkfs_erofs_tar_command(
-            ctx.rootfs_label,
-            _tool_path(ctx, ctx.root_erofs),
-            profile=profile,
-            workers=workers,
-        ),
-        stdin=True,
-    )
-    export_process = subprocess.Popen(
-        export_command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert export_process.stdout is not None
-    erofs_process = subprocess.Popen(
-        erofs_command,
-        stdin=export_process.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    export_process.stdout.close()
-    erofs_stdout, erofs_stderr = erofs_process.communicate()
-    export_stderr = export_process.stderr.read() if export_process.stderr else b""
-    export_status = export_process.wait()
-
-    if erofs_process.returncode != 0:
-        _raise_command_error(
-            erofs_command,
-            erofs_process.returncode,
-            erofs_stderr,
-            erofs_stdout,
-        )
-    if export_status == -signal.SIGPIPE:
-        return
-    if export_status != 0:
-        _raise_command_error(export_command, export_status, export_stderr, b"")
-
-
 def _copy_installer_files(
     installer: InstallerConfig,
     manifest_root: Path,
@@ -989,7 +979,7 @@ def _grub_config(
 ) -> str:
     kernel_args = (
         f"root=live:CDLABEL={iso_label} "
-        "rd.live.image rd.live.overlay.overlayfs=1 selinux=0 quiet rhgb"
+        "rd.live.image rd.live.overlay.overlayfs=1 quiet rhgb"
     )
     if platform == "efi":
         boot_lines = [
@@ -1054,10 +1044,13 @@ def _label_base(name: str) -> str:
     return value or DEFAULT_LABEL_BASE
 
 
-def _mkfs_erofs_tar_command(
+def _mkfs_erofs_command(
     label: str,
     output: Path,
+    source: Path,
+    file_contexts: Path,
     *,
+    exclude_paths: tuple[str, ...] = (),
     profile: ErofsProfile = EROFS_DEFAULT_PROFILE,
     workers: int | None = None,
 ) -> list[str]:
@@ -1068,12 +1061,25 @@ def _mkfs_erofs_tar_command(
         label,
         "-z",
         profile.compression,
+        # unfortunately, if we label an ostree
+        # object first, the hardlink does not get a correct label
+        "--hard-dereference",
     ]
     if profile.pcluster_size:
         command.extend(["-C", profile.pcluster_size])
     if profile.features:
         command.extend(["-E", profile.features])
-    command.extend([f"--workers={worker_count}", "--tar=f", str(output), "/proc/self/fd/0"])
+    for path in exclude_paths:
+        command.append(f"--exclude-path={path}")
+    command.extend(
+        [
+            f"--workers={worker_count}",
+            "--ovlfs-strip=1",
+            f"--file-contexts={file_contexts}",
+            str(output),
+            str(source),
+        ]
+    )
     return command
 
 
