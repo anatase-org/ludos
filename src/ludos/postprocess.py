@@ -664,7 +664,6 @@ def _update_subs_dist(contents: str) -> str:
         output.append(line)
     output.append("# https://github.com/projectatomic/rpm-ostree/pull/1754")
     output.append("/home /var/home")
-    output.append("/var/home /home")
     if not has_usr_etc:
         output.append("# https://github.com/coreos/rpm-ostree/pull/4640")
         output.append("/usr/etc /etc")
