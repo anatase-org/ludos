@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -902,8 +904,9 @@ class InstallerHelperTests(unittest.TestCase):
                 "ANATASE_ROOT",
                 "-z",
                 "zstd,9",
+                "--hard-dereference",
                 "-E",
-                "ztailpacking,fragments,48bit",
+                "ztailpacking,fragments",
                 "--exclude-path=ludos/installer",
                 "--workers=8",
                 "--ovlfs-strip=1",
@@ -930,8 +933,9 @@ class InstallerHelperTests(unittest.TestCase):
                 "ANATASE_ROOT",
                 "-z",
                 "zstd,3",
+                "--hard-dereference",
                 "-E",
-                "ztailpacking,fragments,48bit",
+                "ztailpacking,fragments",
                 "--exclude-path=ludos/installer",
                 "--workers=8",
                 "--ovlfs-strip=1",
