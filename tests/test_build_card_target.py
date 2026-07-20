@@ -11,11 +11,13 @@ from unittest.mock import patch, sentinel
 from ludos.build import (
     BuildImageOutputs,
     BuildImagePlan,
+    CardBuildOutput,
     ImageInfo,
     OciImagePlan,
     PackageImagePlan,
     ResolvedBuildMetadata,
     build_package_card_images,
+    build_build_images,
     build_manifest,
     _cleanup_dnf_workspaces,
     _build_final_manifest_image,
@@ -61,7 +63,6 @@ class TargetCardBuildTests(unittest.TestCase):
                         return_value=(metadata,),
                     ),
                     patch("ludos.build.build_package_card_images") as package_images,
-                    patch("ludos.build.build_builder_images") as builder_images,
                     patch(
                         "ludos.build.build_build_images",
                         return_value=build_outputs,
@@ -72,15 +73,11 @@ class TargetCardBuildTests(unittest.TestCase):
 
                 package_images.assert_not_called()
                 final_images.assert_not_called()
-                builder_images.assert_called_once_with(
-                    (metadata,),
-                    targets=("base-scx",),
-                    cache_only=False,
-                )
                 build_images.assert_called_once_with(
                     (metadata,),
                     targets=("base-scx",),
                     cache_only=False,
+                    create_builders=True,
                 )
                 self.assertEqual(result.package_images, ())
                 self.assertEqual(
@@ -99,13 +96,11 @@ class TargetCardBuildTests(unittest.TestCase):
                 "ludos.build.resolve_build_manifests",
                 return_value=(self._metadata(),),
             ),
-            patch("ludos.build.build_builder_images") as builder_images,
             patch("ludos.build.build_build_images") as build_images,
         ):
             with self.assertRaisesRegex(ConfigError, "card not listed in manifest"):
                 build_manifest(self.manifest, card="cards/base/missing")
 
-        builder_images.assert_not_called()
         build_images.assert_not_called()
 
     def test_targeted_build_rejects_card_without_build_output(self) -> None:
@@ -119,13 +114,11 @@ class TargetCardBuildTests(unittest.TestCase):
 
         with (
             patch("ludos.build.resolve_build_manifests", return_value=(metadata,)),
-            patch("ludos.build.build_builder_images") as builder_images,
             patch("ludos.build.build_build_images") as build_images,
         ):
             with self.assertRaisesRegex(ConfigError, "card has no build or specs"):
                 build_manifest(self.manifest, card="cards/base/base.yml")
 
-        builder_images.assert_not_called()
         build_images.assert_not_called()
 
     def test_targeted_metadata_skips_package_resolution_and_non_target_builders(self) -> None:
@@ -575,11 +568,11 @@ class TargetCardBuildTests(unittest.TestCase):
 
         with (
             patch("ludos.build.resolve_build_manifests", return_value=(metadata,)),
-            patch("ludos.build.build_package_card_images"),
+            patch("ludos.build.build_package_card_images") as package_images,
             patch(
                 "ludos.build.build_build_images",
                 return_value=BuildImageOutputs(),
-            ),
+            ) as build_images,
             patch(
                 "ludos.build.build_final_manifest_images",
                 return_value=(sentinel.result,),
@@ -588,7 +581,79 @@ class TargetCardBuildTests(unittest.TestCase):
             result = build_manifest(self.manifest)
 
         self.assertIs(result, sentinel.result)
+        package_images.assert_called_once()
+        prepared_metadata = package_images.call_args.args[0]
+        self.assertEqual(
+            package_images.call_args.kwargs,
+            {"cache_only": False, "include_builders": False},
+        )
+        build_images.assert_called_once_with(
+            prepared_metadata,
+            cache_only=False,
+            create_builders=True,
+        )
         self.assertFalse(workspace.exists())
+
+    def test_cached_build_output_does_not_load_builder(self) -> None:
+        metadata = self._metadata()
+        plan = metadata.build_images[0]
+
+        with (
+            patch("ludos.build._ensure_image", return_value=True) as ensure_image,
+            patch(
+                "ludos.build._output_metadata_in_image",
+                return_value=(("base-scx-1-1.x86_64.rpm",), False),
+            ),
+            patch("ludos.build._prepare_builder_image") as prepare_builder,
+        ):
+            outputs = build_build_images((metadata,), create_builders=True)
+
+        ensure_image.assert_called_once_with(
+            metadata.podman,
+            plan.image,
+            metadata.ci_registry,
+        )
+        prepare_builder.assert_not_called()
+        self.assertEqual(outputs.images_by_block, ((plan.block, plan.image),))
+
+    def test_missing_build_output_creates_builder_when_requested(self) -> None:
+        metadata = replace(
+            self._metadata(),
+            card_builds=(("base-scx", "true"),),
+        )
+        plan = metadata.build_images[0]
+        build_output = CardBuildOutput(
+            rpm_files=("base-scx-1-1.x86_64.rpm",),
+        )
+
+        with (
+            patch("ludos.build._ensure_image", return_value=False),
+            patch("ludos.build._prepare_builder_image") as prepare_builder,
+            patch(
+                "ludos.build._build_card_output_image",
+                return_value=build_output,
+            ),
+        ):
+            outputs = build_build_images((metadata,), create_builders=True)
+
+        prepare_builder.assert_called_once_with(
+            metadata,
+            plan,
+            cache_only=False,
+        )
+        self.assertEqual(outputs.images_by_block, ((plan.block, plan.image),))
+
+    def test_build_images_default_still_requires_prepared_builder(self) -> None:
+        metadata = self._metadata()
+
+        with (
+            patch("ludos.build._ensure_image", return_value=False),
+            patch("ludos.build._prepare_builder_image") as prepare_builder,
+        ):
+            with self.assertRaisesRegex(ConfigError, "builder image is missing"):
+                build_build_images((metadata,))
+
+        prepare_builder.assert_not_called()
 
     def test_build_manifest_removes_dnf_workspace_after_failure(self) -> None:
         metadata = self._metadata()

@@ -279,11 +279,11 @@ def build_manifest(
                 manifest_path=manifest_path,
                 card=card,
             )
-            build_builder_images(metadata, targets=(target,), cache_only=cache_only)
             build_outputs = build_build_images(
                 metadata,
                 targets=(target,),
                 cache_only=cache_only,
+                create_builders=True,
             )
             return _target_card_build_result(metadata[0], target, build_outputs)
 
@@ -298,8 +298,16 @@ def build_manifest(
             _tag_image(metadata[0].podman, metadata[0].output_image, metadata[0].latest_image)
             return _metadata_build_result(metadata[0])
 
-        build_package_card_images(metadata, cache_only=cache_only)
-        build_outputs = build_build_images(metadata, cache_only=cache_only)
+        build_package_card_images(
+            metadata,
+            cache_only=cache_only,
+            include_builders=False,
+        )
+        build_outputs = build_build_images(
+            metadata,
+            cache_only=cache_only,
+            create_builders=True,
+        )
         return build_final_manifest_images(
             metadata,
             build_outputs=build_outputs,
@@ -1252,6 +1260,7 @@ def build_package_card_images(
     metadata: tuple[ResolvedBuildMetadata, ...],
     *,
     cache_only: bool = False,
+    include_builders: bool = True,
 ) -> None:
     created: set[str] = set()
     for manifest in metadata:
@@ -1278,7 +1287,8 @@ def build_package_card_images(
             )
             created.add(plan.image)
 
-    build_builder_images(metadata, cache_only=cache_only)
+    if include_builders:
+        build_builder_images(metadata, cache_only=cache_only)
 
 
 def build_builder_images(
@@ -1300,39 +1310,47 @@ def build_builder_images(
                 continue
             if plan.builder_image in built_builders:
                 continue
-            if _ensure_image(
-                manifest.podman,
-                plan.builder_image,
-                manifest.ci_registry,
-            ):
-                log(f"Reusing builder image: {plan.builder_image}")
-                built_builders.add(plan.builder_image)
-                continue
-            if cache_only:
-                raise ConfigError(f"builder image is not cached: {plan.builder_image}")
-
-            builder_rpm_files = _download_block_packages(
-                list(manifest.orchestrator_dnf_base),
-                plan.builder_packages,
-                package_dir=Path(manifest.package_dir),
-                resolve_dependencies=True,
-            )
-            log(f"Creating builder image: {plan.builder_image}")
-            _create_builder_image(
-                podman=manifest.podman,
-                buildah=_require_buildah(manifest.buildah),
-                orchestrator=manifest.orchestrator,
-                root_dir=Path(manifest.root_dir),
-                repo_dir=Path(manifest.repo_dir),
-                dnf_cache_dir=Path(manifest.dnf_cache_dir),
-                dnf_persist_dir=Path(manifest.dnf_persist_dir),
-                dnf_log_dir=Path(manifest.dnf_log_dir),
-                image=plan.builder_image,
-                package_dir=Path(manifest.package_dir),
-                rpm_files=builder_rpm_files,
-                releasever=manifest.releasever,
-            )
+            _prepare_builder_image(manifest, plan, cache_only=cache_only)
             built_builders.add(plan.builder_image)
+
+
+def _prepare_builder_image(
+    manifest: ResolvedBuildMetadata,
+    plan: BuildImagePlan,
+    *,
+    cache_only: bool,
+) -> None:
+    if _ensure_image(
+        manifest.podman,
+        plan.builder_image,
+        manifest.ci_registry,
+    ):
+        log(f"Reusing builder image: {plan.builder_image}")
+        return
+    if cache_only:
+        raise ConfigError(f"builder image is not cached: {plan.builder_image}")
+
+    builder_rpm_files = _download_block_packages(
+        list(manifest.orchestrator_dnf_base),
+        plan.builder_packages,
+        package_dir=Path(manifest.package_dir),
+        resolve_dependencies=True,
+    )
+    log(f"Creating builder image: {plan.builder_image}")
+    _create_builder_image(
+        podman=manifest.podman,
+        buildah=_require_buildah(manifest.buildah),
+        orchestrator=manifest.orchestrator,
+        root_dir=Path(manifest.root_dir),
+        repo_dir=Path(manifest.repo_dir),
+        dnf_cache_dir=Path(manifest.dnf_cache_dir),
+        dnf_persist_dir=Path(manifest.dnf_persist_dir),
+        dnf_log_dir=Path(manifest.dnf_log_dir),
+        image=plan.builder_image,
+        package_dir=Path(manifest.package_dir),
+        rpm_files=builder_rpm_files,
+        releasever=manifest.releasever,
+    )
 
 
 def build_build_images(
@@ -1340,8 +1358,10 @@ def build_build_images(
     *,
     targets: tuple[str, ...] = tuple(),
     cache_only: bool = False,
+    create_builders: bool = False,
 ) -> BuildImageOutputs:
     target_set = set(targets)
+    prepared_builders: set[str] = set()
     images_by_block: dict[str, str] = {}
     rpm_files_by_block: dict[str, tuple[str, ...]] = {}
     file_blocks: set[str] = set()
@@ -1375,7 +1395,11 @@ def build_build_images(
                 continue
             if cache_only:
                 raise ConfigError(f"build output image is not cached: {plan.image}")
-            if not _ensure_image(
+            if create_builders:
+                if plan.builder_image not in prepared_builders:
+                    _prepare_builder_image(manifest, plan, cache_only=False)
+                    prepared_builders.add(plan.builder_image)
+            elif not _ensure_image(
                 manifest.podman,
                 plan.builder_image,
                 manifest.ci_registry,
