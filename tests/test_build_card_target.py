@@ -6,7 +6,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch, sentinel
+from unittest.mock import call, patch, sentinel
 
 from ludos.build import (
     BuildImageOutputs,
@@ -576,7 +576,7 @@ class TargetCardBuildTests(unittest.TestCase):
             patch(
                 "ludos.build.build_final_manifest_images",
                 return_value=(sentinel.result,),
-            ),
+            ) as final_images,
         ):
             result = build_manifest(self.manifest)
 
@@ -592,6 +592,7 @@ class TargetCardBuildTests(unittest.TestCase):
             cache_only=False,
             create_builders=True,
         )
+        self.assertTrue(final_images.call_args.kwargs["load_oci_images"])
         self.assertFalse(workspace.exists())
 
     def test_cached_build_output_does_not_load_builder(self) -> None:
@@ -1055,6 +1056,10 @@ class TargetCardBuildTests(unittest.TestCase):
 
         with (
             patch(
+                "ludos.build._ensure_image",
+                side_effect=(False, True),
+            ) as ensure_image,
+            patch(
                 "ludos.build._output_metadata_in_image",
                 return_value=(tuple(), False),
             ),
@@ -1069,8 +1074,18 @@ class TargetCardBuildTests(unittest.TestCase):
                     build_outputs=BuildImageOutputs(),
                     mode="separated",
                     cache_only=False,
+                    load_oci_images=True,
                 )
 
+        self.assertEqual(len(ensure_image.call_args_list), 2)
+        self.assertEqual(
+            ensure_image.call_args_list[1],
+            call(
+                metadata.podman,
+                "localhost/kernel:f44-x86_64",
+                metadata.ci_registry,
+            ),
+        )
         container_build.assert_not_called()
 
     def test_containerfile_mounts_only_selected_oci_rpms_and_files(self) -> None:

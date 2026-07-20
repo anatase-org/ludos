@@ -314,6 +314,7 @@ def build_manifest(
             mode=mode,
             cache_only=cache_only,
             force=force,
+            load_oci_images=True,
         )[0]
     finally:
         _cleanup_dnf_workspaces(metadata)
@@ -1485,6 +1486,7 @@ def build_final_manifest_images(
     cache_only: bool = False,
     force: bool = False,
     build_cache: str = "",
+    load_oci_images: bool = False,
 ) -> tuple[BuildResult, ...]:
     if mode not in ("separated", "combined"):
         raise ConfigError(f"unknown final image build mode: {mode}")
@@ -1500,6 +1502,7 @@ def build_final_manifest_images(
                 cache_only=cache_only,
                 force=force,
                 build_cache=build_cache,
+                load_oci_images=load_oci_images,
             )
         )
     return tuple(results)
@@ -1513,6 +1516,7 @@ def _build_final_manifest_image(
     cache_only: bool,
     force: bool = False,
     build_cache: str = "",
+    load_oci_images: bool = False,
 ) -> BuildResult:
     metadata = _metadata_with_final_image(metadata, mode=mode)
     if not force and _ensure_image(
@@ -1526,6 +1530,9 @@ def _build_final_manifest_image(
             metadata,
             build_outputs=build_outputs,
         )
+
+    if load_oci_images:
+        _load_oci_images(metadata)
 
     build_dir = Path(metadata.build_dir)
     card_files_dir = build_dir / "files"
@@ -1662,6 +1669,26 @@ def _build_final_manifest_image(
         package_blocks=package_blocks,
         build_outputs=build_outputs,
     )
+
+
+def _load_oci_images(metadata: ResolvedBuildMetadata) -> None:
+    loaded: set[str] = set()
+    card_sources = {
+        card_name: Path(source)
+        for card_name, source in metadata.card_sources
+    }
+    for plan in metadata.oci_images:
+        if plan.image in loaded:
+            continue
+        if not _ensure_image(
+            metadata.podman,
+            plan.image,
+            metadata.ci_registry,
+        ):
+            source = card_sources.get(plan.block, Path(plan.block))
+            raise ConfigError(f"{source}: OCI image is not cached: {plan.image}")
+        log(f"Reusing OCI image: {plan.image}")
+        loaded.add(plan.image)
 
 
 def _resolve_oci_output_metadata_for_build(
