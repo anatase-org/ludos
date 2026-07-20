@@ -101,8 +101,12 @@ class PostprocessTests(unittest.TestCase):
             subs = source / "etc/selinux/targeted/contexts/files/file_contexts.subs_dist"
             subs.parent.mkdir(parents=True)
             subs.write_text("/etc/example /var/example\n", encoding="utf-8")
+            semodule = source / "usr/sbin/semodule"
+            semodule.parent.mkdir(parents=True)
+            semodule.write_text("", encoding="utf-8")
 
-            postprocess._prepare_source_overrides(source)
+            with patch("ludos.postprocess.subprocess.run") as run:
+                postprocess._prepare_source_overrides(source)
 
             self.assertEqual(
                 (source / "etc/selinux/semanage.conf").read_text(encoding="utf-8"),
@@ -118,6 +122,10 @@ class PostprocessTests(unittest.TestCase):
             subs_contents = subs.read_text(encoding="utf-8")
             self.assertIn("/usr/etc /etc\n", subs_contents)
             self.assertIn("/usr/etc/example /var/example\n", subs_contents)
+            run.assert_called_once_with(
+                ["chroot", str(source), "/usr/sbin/semodule", "-nB"],
+                check=True,
+            )
 
     def test_collect_var_tmpfiles_skips_selinux_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

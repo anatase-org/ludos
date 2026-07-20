@@ -297,6 +297,15 @@ def _prepare_source_overrides(source: Path) -> None:
         if contents is not None:
             _write(src, _update_subs_dist(contents))
 
+    semodule = source / "usr/sbin/semodule"
+    policy_stores = glob.glob(str(source / "etc/selinux/*/active/modules"))
+    if semodule.exists() and policy_stores:
+        _info("Rebuilding SELinux policy")
+        subprocess.run(
+            ["chroot", str(source), "/usr/sbin/semodule", "-nB"],
+            check=True,
+        )
+
 
 def _assert_authselect_altfiles(source: Path) -> None:
     nsswitch = source / "etc/nsswitch.conf"
