@@ -16,6 +16,11 @@ class PostprocessTests(unittest.TestCase):
             base = root / "base"
             final = root / "final"
             (source / "etc").mkdir(parents=True)
+            (source / "etc/default").mkdir()
+            (source / "etc/default/useradd").write_text(
+                "HOME=/home\n",
+                encoding="utf-8",
+            )
             (source / "etc/nsswitch.conf").write_text(
                 "passwd:     sss files systemd\n"
                 "group:      sss files systemd\n"
@@ -31,6 +36,7 @@ class PostprocessTests(unittest.TestCase):
                 "group: sss files altfiles systemd\n"
                 "hosts:      files dns\n",
             )
+            self.assertFalse((final / "usr/etc/default/useradd").exists())
 
     def test_prepare_projection_ignores_symlinked_nsswitch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,6 +95,9 @@ class PostprocessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "source"
+            useradd = source / "etc/default/useradd"
+            useradd.parent.mkdir(parents=True)
+            useradd.write_text("HOME=/home\n", encoding="utf-8")
             (source / "etc/selinux").mkdir(parents=True)
             (source / "etc/selinux/semanage.conf").write_text(
                 "module-store = direct\n",
@@ -122,6 +131,7 @@ class PostprocessTests(unittest.TestCase):
             subs_contents = subs.read_text(encoding="utf-8")
             self.assertIn("/usr/etc /etc\n", subs_contents)
             self.assertIn("/usr/etc/example /var/example\n", subs_contents)
+            self.assertEqual(useradd.read_text(encoding="utf-8"), "HOME=/var/home\n")
             run.assert_called_once_with(
                 ["chroot", str(source), "/usr/sbin/semodule", "-nB"],
                 check=True,

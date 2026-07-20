@@ -286,6 +286,11 @@ def _approx_entries(source: Path, base: Path, final: Path) -> int:
 
 
 def _prepare_source_overrides(source: Path) -> None:
+    useradd_path = source / "etc/default/useradd"
+    useradd = _read_text(useradd_path)
+    if useradd is not None:
+        _write(useradd_path, _update_useradd(useradd))
+
     semanage = _read_text(source / "etc/selinux/semanage.conf")
     if semanage is not None:
         _write(source / "etc/selinux/semanage.conf", _update_semanage(semanage))
@@ -377,10 +382,6 @@ def _prepare_projection(source: Path, base: Path, final: Path) -> None:
         nsswitch = _read_text(nsswitch_path)
         if nsswitch is not None:
             _write(final / "usr/etc/nsswitch.conf", _add_altfiles(nsswitch))
-
-    useradd = _read_text(source / "etc/default/useradd")
-    if useradd is not None:
-        _write(final / "usr/etc/default/useradd", _update_useradd(useradd))
 
     passwd_split = _split_passwd_file(source / "etc/passwd")
     if passwd_split is not None:
