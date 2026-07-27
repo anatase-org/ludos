@@ -1064,6 +1064,8 @@ def _mkfs_erofs_command(
         # unfortunately, if we label an ostree
         # object first, the hardlink does not get a correct label
         "--hard-dereference",
+        "-T",
+        "0",
     ]
     if profile.pcluster_size:
         command.extend(["-C", profile.pcluster_size])
