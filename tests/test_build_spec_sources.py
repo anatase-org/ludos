@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -589,12 +590,91 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
 
         script = _specs_build_script(staged_specs, workspace_dir, "x86_64")
 
+        self.assertTrue(script.startswith("set -euxo pipefail\n"))
         self.assertIn('spec_source_cache="$source_cache/scx_tools"', script)
         self.assertIn('spec_source_cache="$source_cache/scx_scheds"', script)
         self.assertIn('[ ! -f "$spec_source_cache/$source_name" ]', script)
-        self.assertIn('spectool -g -C "$spec_source_cache"', script)
+        self.assertIn(
+            'spectool -g -C "$spec_source_cache" "$topdir/SPECS/scx-tools.spec" '
+            '2>&1 | tee "$topdir/spectool-download.log"',
+            script,
+        )
+        self.assertIn(
+            "grep -q '^Download failed:' \"$topdir/spectool-download.log\"",
+            script,
+        )
         self.assertIn('cp -f -t "$topdir/SOURCES"', script)
         self.assertNotIn('cp -n -t "$topdir/SOURCES"', script)
+
+    def test_failed_spectool_download_stops_before_rpmbuild(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace_dir = root / "workspace"
+            workspace_dir.mkdir()
+            spec_path = workspace_dir / "missing-source.spec"
+            spec_path.write_text("Name: missing-source\n", encoding="utf-8")
+            staged_specs = (
+                StagedSpec(
+                    spec=SpecBuild(spec="missing-source.spec"),
+                    spec_path=spec_path,
+                    source_dir=workspace_dir,
+                    packages=("missing-source",),
+                    targets=("x86_64",),
+                ),
+            )
+            script = _specs_build_script(
+                staged_specs,
+                workspace_dir,
+                "x86_64",
+            )
+            script = script.replace("/workspace", str(workspace_dir))
+            script = script.replace(
+                "/cache/artifacts/sources",
+                str(root / "source-cache"),
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            spectool = bin_dir / "spectool"
+            spectool.write_text(
+                "\n".join(
+                    (
+                        "#!/bin/sh",
+                        'if [ "$1" = -l ]; then',
+                        "  echo 'Source0: https://example.invalid/missing.tar.gz'",
+                        "else",
+                        "  echo 'Downloading: https://example.invalid/missing.tar.gz'",
+                        "  echo 'Download failed:'",
+                        "  echo '404 Client Error'",
+                        "fi",
+                        "exit 0",
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            spectool.chmod(0o755)
+            rpmbuild_called = root / "rpmbuild-called"
+            rpmbuild = bin_dir / "rpmbuild"
+            rpmbuild.write_text(
+                "#!/bin/sh\ntouch \"$RPMBUILD_CALLED\"\n",
+                encoding="utf-8",
+            )
+            rpmbuild.chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["RPMBUILD_CALLED"] = str(rpmbuild_called)
+
+            result = subprocess.run(
+                ["/bin/bash"],
+                input=script,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Download failed:", result.stdout)
+            self.assertFalse(rpmbuild_called.exists())
 
     def test_spec_output_containerfile_builds_each_spec_stage(self) -> None:
         workspace_dir = Path("/tmp/build/workspace")

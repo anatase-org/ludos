@@ -4612,7 +4612,7 @@ def _specs_build_script(
     rpmbuild_defines = (*rpmbuild_defines, *_rpmbuild_defines_from_env())
     topdir = "/workspace/rpmbuild"
     lines = [
-        "set -eux",
+        "set -euxo pipefail",
         f"topdir={shlex.quote(topdir)}",
         'source_cache="/cache/artifacts/sources"',
         'mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}',
@@ -4663,7 +4663,10 @@ def _specs_build_script(
                 "    fi",
                 "  done < \"$topdir/sources.list\"",
                 "  if [ \"$missing_sources\" -eq 1 ]; then",
-                f"    spectool -g -C \"$spec_source_cache\" \"$topdir/SPECS/{shlex.quote(spec_name)}\"",
+                f"    spectool -g -C \"$spec_source_cache\" \"$topdir/SPECS/{shlex.quote(spec_name)}\" 2>&1 | tee \"$topdir/spectool-download.log\"",
+                "    if grep -q '^Download failed:' \"$topdir/spectool-download.log\"; then",
+                "      exit 1",
+                "    fi",
                 "  fi",
                 '  find "$spec_source_cache" -maxdepth 1 -type f -exec cp -f -t "$topdir/SOURCES" {} +',
                 "  fi",
