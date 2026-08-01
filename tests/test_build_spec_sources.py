@@ -840,6 +840,7 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
             'Authorization: Bearer $(cat /run/secrets/auth_secret)', containerfile
         )
         self.assertIn("https://api.github.com/repos/", containerfile)
+        self.assertIn("archive/refs/tags/", containerfile)
         self.assertIn('--transform "s|^\\.|$github_root|"', containerfile)
         self.assertNotIn("NETRC", containerfile)
         self.assertNotIn("machine github.com", containerfile)

@@ -4726,7 +4726,7 @@ def _specs_build_script(
                         "    while IFS= read -r github_source; do",
                         "      github_url=${github_source#*:}",
                         "      github_url=$(printf '%s\\n' \"$github_url\" | sed 's/^[[:space:]]*//')",
-                        "      github_api=$(printf '%s\\n' \"$github_url\" | sed -E 's|https://github.com/([^/]+)/([^/]+)/archive/([^/]+)/.*|https://api.github.com/repos/\\1/\\2/tarball/\\3|')",
+                        "      github_api=$(printf '%s\\n' \"$github_url\" | sed -E -e 's|https://github.com/([^/]+)/([^/]+)/archive/refs/tags/([^#]+)\\.tar\\.gz(#/.*)?$|https://api.github.com/repos/\\1/\\2/tarball/\\3|' -e 's|https://github.com/([^/]+)/([^/]+)/archive/([^/]+)/.*|https://api.github.com/repos/\\1/\\2/tarball/\\3|')",
                         "      github_name=${github_url##*/}",
                         "      github_name=${github_name%%\\?*}",
                         "      github_archive=$spec_source_cache/$github_name",
