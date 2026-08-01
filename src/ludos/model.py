@@ -94,6 +94,7 @@ class SpecBuild:
     files: tuple[str, ...] = tuple()
     upstream: UpstreamRef | None = None
     patch: PatchRef | None = None
+    auth: str = ""
 
 
 @dataclass(frozen=True)
@@ -706,6 +707,7 @@ def _spec_builds_tuple(
                 files=files,
                 upstream=upstream,
                 patch=patch,
+                auth=_optional_string(item, "auth", path),
             )
         )
 

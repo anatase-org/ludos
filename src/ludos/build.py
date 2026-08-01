@@ -33,6 +33,8 @@ CCACHE_CONTAINER_DIR = "/cache/ccache"
 CCACHE_PATH_PREFIX = "/usr/lib64/ccache:/usr/lib/ccache"
 CCACHE_SLOPPINESS = "include_file_ctime,include_file_mtime,time_macros"
 SCCACHE_CONTAINER_DIR = f"{CCACHE_CONTAINER_DIR}/sccache"
+AUTH_SECRET = "auth_secret"
+SPECTOOL_NETRC_PATH = "/run/spectool.netrc"
 RPM_ARCH_SUFFIXES = frozenset(
     (
         "aarch64",
@@ -3573,6 +3575,23 @@ def _build_specs_output_image(
     if not staged_specs:
         raise ConfigError(f"{card_source}: specs build has no specs")
 
+    auth = next(
+        (staged.spec.auth for staged in staged_specs if staged.spec.auth),
+        "",
+    )
+    match auth:
+        case "":
+            auth_secret = ""
+        case "github":
+            auth_secret = _github_token()
+            if not auth_secret:
+                raise ConfigError(
+                    f"{card_source}: authenticated GitHub sources require GH_TOKEN "
+                    "or 'gh auth login'"
+                )
+        case _:
+            raise ConfigError(f"{card_source}: unknown spec auth type: {auth}")
+
     run_env = dict(card_env if build_env is None else build_env)
     if prepare_script.strip():
         prepared_env = _run_specs_prepare(
@@ -3614,6 +3633,7 @@ def _build_specs_output_image(
         ccache_dir=ccache_dir,
         source_dir=_card_base_dir(card_source),
         workspace_dir=workspace_dir,
+        auth_secret=auth_secret,
     )
 
     rpm_files, has_files = _output_metadata_in_image(podman, image)
@@ -3674,7 +3694,22 @@ def _render_specs_build_output_containerfile(
     for stage_name, staged in zip(stage_names, staged_specs):
         if lines:
             lines.append("")
-        build_script = _ccache_build_prelude(ccache_dir) + _specs_build_script(
+        build_script = _ccache_build_prelude(ccache_dir)
+        stage_env = _build_container_env(card_env, ccache_dir)
+        secrets: tuple[str, ...] = tuple()
+        if staged.spec.auth == "github":
+            stage_env["NETRC"] = SPECTOOL_NETRC_PATH
+            secrets = (AUTH_SECRET,)
+            build_script += (
+                "set +x\n"
+                f"token=$(cat /run/secrets/{AUTH_SECRET})\n"
+                "printf 'machine github.com login x-access-token password %s\\n' "
+                '"$token" > "$NETRC"\n'
+                "unset token\n"
+                "trap 'rm -f \"$NETRC\"' EXIT\n"
+                "set -x\n"
+            )
+        build_script += _specs_build_script(
             (staged,),
             workspace_dir,
             arch,
@@ -3691,8 +3726,9 @@ def _render_specs_build_output_containerfile(
                 _spec_stage_workspace_copy_line(stage_name, staged, workspace_dir),
                 "RUN mkdir -p /rpms /files /cache/artifacts",
                 _containerfile_run_shell_command(
-                    _build_container_env(card_env, ccache_dir),
+                    stage_env,
                     f"LUDOS_SPEC_BUILD_{stage_name}",
+                    secrets=secrets,
                 ),
                 build_script.rstrip(),
                 f"LUDOS_SPEC_BUILD_{stage_name}",
@@ -3792,8 +3828,14 @@ def _build_container_env(
     return env
 
 
-def _containerfile_run_shell_command(env: dict[str, str], heredoc: str) -> str:
+def _containerfile_run_shell_command(
+    env: dict[str, str],
+    heredoc: str,
+    *,
+    secrets: tuple[str, ...] = tuple(),
+) -> str:
     parts = ["RUN"]
+    parts.extend(f"--mount=type=secret,id={secret}" for secret in secrets)
     if env:
         parts.append("env")
         parts.extend(
@@ -3814,6 +3856,7 @@ def _run_build_output_image_build(
     source_dir: Path,
     workspace_dir: Path,
     podman_cache_dir: Path | None = None,
+    auth_secret: str = "",
 ) -> None:
     containerfile = build_dir / "Containerfile"
     command = [
@@ -3836,6 +3879,10 @@ def _run_build_output_image_build(
         command.extend(["--volume", f"{podman_cache_dir}:/cache/podman"])
     if ccache_dir is not None:
         command.extend(["--volume", f"{ccache_dir}:{CCACHE_CONTAINER_DIR}"])
+    build_env = None
+    if auth_secret:
+        command.extend(["--secret", f"id={AUTH_SECRET},env=AUTH_SECRET"])
+        build_env = dict(os.environ, AUTH_SECRET=auth_secret)
     command.extend(
         [
             "--file",
@@ -3850,6 +3897,7 @@ def _run_build_output_image_build(
             workspace_dir=workspace_dir,
             root_dir=Path.cwd(),
         ),
+        env=build_env,
     )
     if returncode == 0:
         return
@@ -3859,6 +3907,22 @@ def _run_build_output_image_build(
     if location is not None:
         message = f"{message}\n\nThe error occurred in:\n{location}"
     raise ConfigError(message)
+
+
+def _github_token() -> str:
+    token = os.environ.get("GH_TOKEN", "").strip()
+    if token:
+        return token
+    gh = shutil.which("gh")
+    if gh is None:
+        return ""
+    result = subprocess.run(
+        [gh, "auth", "token", "--hostname", "github.com"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def _run_specs_prepare(

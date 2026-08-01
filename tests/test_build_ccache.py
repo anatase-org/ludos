@@ -148,6 +148,7 @@ class BuildCcacheTests(unittest.TestCase):
                     podman_cache_dir=podman_cache,
                     source_dir=root / "card",
                     workspace_dir=build_dir / "workspace",
+                    auth_secret="secret-token",
                 )
 
         command = run.call_args.args[0]
@@ -164,3 +165,6 @@ class BuildCcacheTests(unittest.TestCase):
         self.assertIn(f"{podman_cache}:/cache/podman", command)
         self.assertIn(f"{ccache}:{CCACHE_CONTAINER_DIR}", command)
         self.assertIn("localhost/builds:test", command)
+        self.assertIn("id=auth_secret,env=AUTH_SECRET", command)
+        self.assertNotIn("secret-token", command)
+        self.assertEqual(run.call_args.kwargs["env"]["AUTH_SECRET"], "secret-token")

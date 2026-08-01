@@ -10,8 +10,10 @@ from unittest.mock import patch
 
 from ludos.build import (
     StagedSpec,
+    _build_specs_output_image,
     _card_specs_hash,
     _git_source_cache_key,
+    _github_token,
     _render_card_build_output_containerfile,
     _render_specs_build_output_containerfile,
     _resolve_spec_build_requires,
@@ -377,6 +379,46 @@ class GitSpecSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be a list of strings"):
             Card.from_file(scalar_card_path)
 
+    def test_spec_can_request_authenticated_downloads(self) -> None:
+        card_path = self.root / "private-card.yml"
+        card_path.write_text(
+            "\n".join(
+                (
+                    "version: 1",
+                    "specs:",
+                    "  - spec: git+https://github.com/example/private:pkg.spec",
+                    "    auth: github",
+                    "    packages:",
+                    "      - pkg",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        card = Card.from_file(card_path)
+
+        self.assertEqual(card.specs[0].auth, "github")
+
+    def test_github_token_falls_back_to_gh(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="gh-token\n", stderr=""
+        )
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": ""}),
+            patch("ludos.build.shutil.which", return_value="/usr/bin/gh"),
+            patch("ludos.build.subprocess.run", return_value=completed) as run,
+        ):
+            token = _github_token()
+
+        self.assertEqual(token, "gh-token")
+        run.assert_called_once_with(
+            ["/usr/bin/gh", "auth", "token", "--hostname", "github.com"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
     def _spec(
         self,
         spec_path: str,
@@ -733,6 +775,70 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         self.assertIn("COPY files/ /files/", containerfile)
         self.assertIn("COPY --from=spec_scx_tools_0 /rpms/ /rpms/", containerfile)
         self.assertIn("COPY --from=spec_scx_scheds_1 /files/ /files/", containerfile)
+        self.assertNotIn("auth_secret", containerfile)
+
+    def test_unknown_auth_type_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            staged_specs = (
+                StagedSpec(
+                    spec=SpecBuild(spec="private.spec", auth="unknown"),
+                    spec_path=root / "private.spec",
+                    source_dir=root,
+                    packages=("private",),
+                    targets=("x86_64",),
+                ),
+            )
+
+            with (
+                patch("ludos.build._stage_card_specs", return_value=staged_specs),
+                self.assertRaisesRegex(ConfigError, "unknown spec auth type: unknown"),
+            ):
+                _build_specs_output_image(
+                    podman="podman",
+                    orchestrator="builder",
+                    image="output",
+                    build_dir=root / "build",
+                    artifact_cache_dir=root / "artifacts",
+                    ccache_dir=None,
+                    card_name="private",
+                    card_source=root / "card.yml",
+                    card_env={},
+                    specs=(SpecBuild(spec="private.spec", auth="unknown"),),
+                    prepare_script="",
+                    arch="x86_64",
+                    spec_source_cache_dir=root / "spec-cache",
+                    source_revisions=tuple(),
+                )
+
+    def test_auth_mounts_credentials_for_the_requested_spec(self) -> None:
+        workspace_dir = Path("/tmp/build/workspace")
+        staged_specs = (
+            StagedSpec(
+                spec=SpecBuild(spec="spaces.spec", auth="github"),
+                spec_path=workspace_dir / "spaces.spec",
+                source_dir=workspace_dir,
+                packages=("spaces",),
+                targets=("x86_64",),
+            ),
+        )
+
+        containerfile = _render_specs_build_output_containerfile(
+            orchestrator="localhost/builders:f44",
+            staged_specs=staged_specs,
+            workspace_dir=workspace_dir,
+            card_env={"releasever": "44"},
+            arch="x86_64",
+            rpmbuild_defines=tuple(),
+            ccache_dir=None,
+        )
+
+        run_lines = [line for line in containerfile.splitlines() if line.startswith("RUN ")]
+        build_run = next(line for line in run_lines if "LUDOS_SPEC_BUILD" in line)
+        self.assertIn("--mount=type=secret,id=auth_secret", build_run)
+        self.assertIn("NETRC=/run/spectool.netrc", build_run)
+        self.assertIn("machine github.com login x-access-token", containerfile)
+        self.assertIn("trap 'rm -f \"$NETRC\"' EXIT", containerfile)
 
     def test_spec_stage_context_excludes_sibling_specs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
