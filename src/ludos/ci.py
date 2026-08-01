@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import lzma
-import math
 import os
 import shutil
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from typing import Any
 
 import yaml
@@ -81,7 +81,6 @@ from .upload.registry import (
 
 DEFAULT_CI_CACHE_DIR = Path("cache")
 DEFAULT_PREPARE_WORKERS = min(4, os.cpu_count() or 1)
-DEFAULT_SEED_BUFFER_RATIO = 3
 DEFAULT_VERSION_LABEL = "org.opencontainers.image.version"
 
 
@@ -390,26 +389,29 @@ def seed_ci(
     cache_dir: Path | None = None,
     autoremove: bool = False,
     workers: int = DEFAULT_PREPARE_WORKERS,
-    buffer_ratio: float | None = None,
 ) -> None:
     if workers < 1:
         raise ConfigError("workers must be a positive integer")
-    if buffer_ratio is None:
-        buffer_ratio = workers * DEFAULT_SEED_BUFFER_RATIO
-    if not math.isfinite(buffer_ratio) or buffer_ratio <= 0:
-        raise ConfigError("buffer ratio must be a positive finite number")
     build_manifest = build_manifest or _default_ci_build_manifest(cache_dir)
     entries = _read_seed_entries(build_manifest)
-    rpm_files_by_image = _prepare_seed_rpms(entries, buffer_ratio=buffer_ratio)
+    try:
+        rpm_files_by_image = _prepare_seed_rpms(entries)
+    except (ConfigError, OSError) as exc:
+        if _is_enospc_error(exc):
+            raise SeedDiskSpaceError(str(exc)) from exc
+        raise
     total = len(entries)
     progress_width = max(2, len(str(total)))
     progress_lock = Lock()
     progress_index = 0
+    stopped = Event()
 
     def seed(
         entry: tuple[str, ResolvedBuildMetadata, str, tuple[str, ...]],
     ) -> None:
         nonlocal progress_index
+        if stopped.is_set():
+            return
         section, manifest, image, _packages = entry
         with progress_lock:
             progress_index += 1
@@ -418,17 +420,32 @@ def seed_ci(
                 f"{total:0{progress_width}d})"
             )
             log(f"{progress} Creating {image} Image")
-        _seed_image(
-            manifest,
-            image,
-            rpm_files_by_image[image],
-            builder=section == "builders",
-            autoremove=autoremove,
-        )
+        try:
+            _seed_image(
+                manifest,
+                image,
+                rpm_files_by_image[image],
+                builder=section == "builders",
+                autoremove=autoremove,
+            )
+        except BaseException:
+            stopped.set()
+            raise
 
     if entries:
         with ThreadPoolExecutor(max_workers=min(workers, len(entries))) as executor:
-            tuple(executor.map(seed, entries))
+            futures = tuple(executor.submit(seed, entry) for entry in entries)
+            failures: list[BaseException] = []
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except BaseException as exc:
+                    failures.append(exc)
+        for failure in failures:
+            if isinstance(failure, SeedDiskSpaceError):
+                raise failure
+        if failures:
+            raise failures[0]
 
 
 def build_ci(
@@ -1280,8 +1297,6 @@ def _remove_ci_dependency_images(
 
 def _prepare_seed_rpms(
     entries: tuple[tuple[str, ResolvedBuildMetadata, str, tuple[str, ...]], ...],
-    *,
-    buffer_ratio: float,
 ) -> dict[str, tuple[str, ...]]:
     rpm_files_by_image = {
         image: tuple(f"{_rpm_filename_nevra(package)}.rpm" for package in packages)
@@ -1298,8 +1313,6 @@ def _prepare_seed_rpms(
         groups[key][1].update(dict.fromkeys(packages))
 
     download_batches = []
-    missing_files_by_device: dict[int, dict[tuple[Path, str], int]] = {}
-    disk_path_by_device: dict[int, Path] = {}
     planned_paths: set[tuple[Path, str]] = set()
     for (_dnf_base, package_dir), (manifest, package_map) in groups.items():
         package_dir.mkdir(parents=True, exist_ok=True)
@@ -1314,38 +1327,14 @@ def _prepare_seed_rpms(
         )
         if not missing_packages:
             continue
-        sizes = _seed_rpm_download_sizes(
-            list(manifest.orchestrator_dnf_base),
-            missing_packages,
-        )
-        device = package_dir.stat().st_dev
-        disk_path_by_device.setdefault(device, package_dir)
-        device_files = missing_files_by_device.setdefault(device, {})
         for package in missing_packages:
             filename = f"{_rpm_filename_nevra(package)}.rpm"
             path_key = (package_dir, filename)
             planned_paths.add(path_key)
-            device_files[path_key] = sizes[filename]
         download_batches.append((manifest, missing_packages))
 
-    missing_count = sum(len(files) for files in missing_files_by_device.values())
-    missing_bytes = sum(
-        sum(files.values()) for files in missing_files_by_device.values()
-    )
-    log(
-        f"Missing {missing_count} RPMs totaling {_format_seed_bytes(missing_bytes)}"
-    )
-    for device, files in missing_files_by_device.items():
-        required = math.ceil(sum(files.values()) * buffer_ratio)
-        disk_path = disk_path_by_device[device]
-        available = shutil.disk_usage(disk_path).free
-        if available < required:
-            raise SeedDiskSpaceError(
-                f"not enough disk space for seed RPMs in {disk_path}: "
-                f"{_format_seed_bytes(available)} available, "
-                f"{_format_seed_bytes(required)} required "
-                f"({buffer_ratio:g}x buffer)"
-            )
+    missing_count = sum(len(packages) for _manifest, packages in download_batches)
+    log(f"Missing {missing_count} RPMs")
 
     if missing_count:
         operations = len(download_batches)
@@ -1362,61 +1351,6 @@ def _prepare_seed_rpms(
             "/ludos/packages",
         )
     return rpm_files_by_image
-
-
-def _seed_rpm_download_sizes(
-    orchestrator_dnf_base: list[str],
-    packages: tuple[str, ...],
-) -> dict[str, int]:
-    result = subprocess.run(
-        [
-            *orchestrator_dnf_base,
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=system_cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            "repoquery",
-            "--queryformat",
-            "%{location}\t%{downloadsize}\n",
-            *packages,
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    sizes = {}
-    for line in result.stdout.splitlines():
-        fields = line.rsplit("\t", 1)
-        if len(fields) != 2:
-            continue
-        filename = fields[0].rsplit("/", 1)[-1].strip()
-        try:
-            size = int(fields[1])
-        except ValueError:
-            continue
-        if filename.endswith(".rpm"):
-            sizes[filename] = size
-    expected = {
-        f"{_rpm_filename_nevra(package)}.rpm" for package in packages
-    }
-    missing = sorted(expected - sizes.keys())
-    if missing:
-        raise ConfigError(
-            "repoquery did not return download sizes for: " + ", ".join(missing)
-        )
-    return {filename: sizes[filename] for filename in expected}
-
-
-def _format_seed_bytes(value: int) -> str:
-    amount = float(value)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if amount < 1024 or unit == "TiB":
-            return f"{amount:.1f} {unit}"
-        amount /= 1024
-    raise AssertionError("unreachable")
 
 
 def _resolve_cache_root(
@@ -1463,9 +1397,13 @@ def _ci_remote_image_exists(_podman: str, image: str, ci_registry: str) -> bool:
 def _push_ci_image(podman: str, image: str, ci_registry: str) -> None:
     remote = _ci_remote_image(ci_registry, image)
     log(f"Uploading CI image: {remote}")
-    returncode, _output = _run_streamed_command([podman, "push", image, remote])
+    returncode, output = _run_streamed_command([podman, "push", image, remote])
     if returncode != 0:
-        raise ConfigError(f"CI image upload failed with exit status {returncode}")
+        message = f"CI image upload failed with exit status {returncode}"
+        details = "\n".join(output.rstrip().splitlines()[-80:])
+        if details:
+            message = f"{message}:\n{details}"
+        raise ConfigError(message)
 
 
 def _remove_ci_remote_image(image: str, ci_registry: str) -> None:
@@ -1502,17 +1440,30 @@ def _seed_image(
     builder: bool,
     autoremove: bool = False,
 ) -> None:
-    _require_ci_registry(manifest.ci_registry)
-    if not _local_image_exists(manifest.podman, image):
-        create = (
-            _create_seed_builder_image
-            if builder
-            else _create_seed_package_image
-        )
-        create(manifest, image, rpm_files)
-    _push_ci_image(manifest.podman, image, manifest.ci_registry)
-    if autoremove:
-        _remove_image(manifest.podman, image)
+    try:
+        _require_ci_registry(manifest.ci_registry)
+        if not _local_image_exists(manifest.podman, image):
+            create = (
+                _create_seed_builder_image
+                if builder
+                else _create_seed_package_image
+            )
+            create(manifest, image, rpm_files)
+        _push_ci_image(manifest.podman, image, manifest.ci_registry)
+    except (ConfigError, OSError) as exc:
+        if _is_enospc_error(exc):
+            raise SeedDiskSpaceError(str(exc)) from exc
+        raise
+    finally:
+        if autoremove:
+            _remove_image(manifest.podman, image, force=True)
+
+
+def _is_enospc_error(exc: ConfigError | OSError) -> bool:
+    if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+        return True
+    message = str(exc).casefold()
+    return "no space left on device" in message or "enospc" in message
 
 
 def _create_seed_package_image(

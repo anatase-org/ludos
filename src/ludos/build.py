@@ -2760,9 +2760,13 @@ def _ensure_image(podman: str, image: str, ci_registry: str = "") -> bool:
     return _ensure_cached_image(podman, image, ci_registry)
 
 
-def _remove_image(podman: str, image: str) -> None:
+def _remove_image(podman: str, image: str, *, force: bool = False) -> None:
+    command = [podman, "rmi"]
+    if force:
+        command.append("--force")
+    command.append(image)
     subprocess.run(
-        [podman, "rmi", image],
+        command,
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -5526,11 +5530,14 @@ def _is_git_repository(git: str, path: Path) -> bool:
 
 
 def _run_logged_command(command: list[str], description: str) -> None:
-    returncode, _output = _run_streamed_command(command)
+    returncode, output = _run_streamed_command(command)
     if returncode == 0:
         return
-    command_line = " ".join(shlex.quote(str(part)) for part in command)
-    raise ConfigError(f"{description} failed with exit status {returncode}")
+    message = f"{description} failed with exit status {returncode}"
+    details = "\n".join(output.rstrip().splitlines()[-80:])
+    if details:
+        message = f"{message}\n{details}"
+    raise ConfigError(message)
 
 
 def _parse_git_file_source(source: str) -> tuple[str, tuple[str, str], Path]:

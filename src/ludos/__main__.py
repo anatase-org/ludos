@@ -12,7 +12,6 @@ from .build import build_manifest
 from .cleanup import cleanup_local_images
 from .ci import (
     DEFAULT_PREPARE_WORKERS,
-    DEFAULT_SEED_BUFFER_RATIO,
     DEFAULT_VERSION_LABEL,
     SeedDiskSpaceError,
     build_ci,
@@ -851,7 +850,7 @@ def build_parser() -> argparse.ArgumentParser:
     seed_parser.add_argument(
         "--autoremove",
         action="store_true",
-        help="Remove each local seed image after it is uploaded.",
+        help="Remove each local seed image after its build or upload finishes.",
     )
     seed_parser.add_argument(
         "--workers",
@@ -860,15 +859,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Number of parallel image builders. Defaults to the smaller of 4 "
             "and the available CPU count."
-        ),
-    )
-    seed_parser.add_argument(
-        "--buffer-ratio",
-        type=float,
-        default=None,
-        help=(
-            "Required free disk space as a multiple of missing RPM download "
-            f"bytes. Defaults to --workers × {DEFAULT_SEED_BUFFER_RATIO}."
         ),
     )
     seed_parser.set_defaults(func=ci_command)
@@ -1428,15 +1418,11 @@ def ci_command(args: argparse.Namespace) -> int:
         )
         return 0
     if args.ci_action == "seed":
-        buffer_ratio = args.buffer_ratio
-        if buffer_ratio is None:
-            buffer_ratio = args.workers * DEFAULT_SEED_BUFFER_RATIO
         seed_ci(
             args.build_manifest,
             cache_dir=args.cache_dir,
             autoremove=args.autoremove,
             workers=args.workers,
-            buffer_ratio=buffer_ratio,
         )
         return 0
     if args.ci_action == "build":
