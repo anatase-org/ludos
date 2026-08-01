@@ -34,7 +34,6 @@ CCACHE_PATH_PREFIX = "/usr/lib64/ccache:/usr/lib/ccache"
 CCACHE_SLOPPINESS = "include_file_ctime,include_file_mtime,time_macros"
 SCCACHE_CONTAINER_DIR = f"{CCACHE_CONTAINER_DIR}/sccache"
 AUTH_SECRET = "auth_secret"
-SPECTOOL_NETRC_PATH = "/run/spectool.netrc"
 RPM_ARCH_SUFFIXES = frozenset(
     (
         "aarch64",
@@ -3702,17 +3701,7 @@ def _render_specs_build_output_containerfile(
         stage_env = _build_container_env(card_env, ccache_dir)
         secrets: tuple[str, ...] = tuple()
         if staged.spec.auth == "github":
-            stage_env["NETRC"] = SPECTOOL_NETRC_PATH
             secrets = (AUTH_SECRET,)
-            build_script += (
-                "set +x\n"
-                f"token=$(cat /run/secrets/{AUTH_SECRET})\n"
-                "printf 'machine github.com login x-access-token password %s\\n' "
-                '"$token" > "$NETRC"\n'
-                "unset token\n"
-                "trap 'rm -f \"$NETRC\"' EXIT\n"
-                "set -x\n"
-            )
         build_script += _specs_build_script(
             (staged,),
             workspace_dir,
@@ -4707,6 +4696,7 @@ def _specs_build_script(
         source_dir = f"/workspace/{staged.source_dir.relative_to(workspace_dir).as_posix()}"
         spec_path = f"/workspace/{staged.spec_path.relative_to(workspace_dir).as_posix()}"
         spec_name = staged.spec_path.name
+        github_auth = staged.spec.auth == "github"
         spec_source_cache_name = _identifier(staged.spec_path.stem)
         targets = " ".join(shlex.quote(target) for target in staged.targets)
         i686_target_lines = _i686_target_environment_lines() if "i686" in staged.targets else []
@@ -4731,6 +4721,28 @@ def _specs_build_script(
                 "    fi",
                 "  done < \"$topdir/sources.list\"",
                 "  if [ \"$missing_sources\" -eq 1 ]; then",
+                *(
+                    [
+                        "    while IFS= read -r github_source; do",
+                        "      github_url=${github_source#*:}",
+                        "      github_url=$(printf '%s\\n' \"$github_url\" | sed 's/^[[:space:]]*//')",
+                        "      github_api=$(printf '%s\\n' \"$github_url\" | sed -E 's|https://github.com/([^/]+)/([^/]+)/archive/([^/]+)/.*|https://api.github.com/repos/\\1/\\2/tarball/\\3|')",
+                        "      github_name=${github_url##*/}",
+                        "      github_name=${github_name%%\\?*}",
+                        "      github_archive=$spec_source_cache/$github_name",
+                        '      github_tmp=$(mktemp -d "$spec_source_cache/.github.XXXXXX")',
+                        "      set +x",
+                        f'      curl --fail --location --header "Authorization: Bearer $(cat /run/secrets/{AUTH_SECRET})" --output "$github_archive.api" "$github_api"',
+                        "      set -x",
+                        '      tar -xzf "$github_archive.api" -C "$github_tmp" --strip-components=1',
+                        "      github_root=${github_name%.tar.gz}",
+                        '      tar -czf "$github_archive" -C "$github_tmp" --transform "s|^\\.|$github_root|" .',
+                        '      rm -rf "$github_archive.api" "$github_tmp"',
+                        "    done < <(grep -E '^Source[0-9]*:[[:space:]]+https://github\\.com/[^/]+/[^/]+/archive/[^/]+/[^[:space:]]+\\.tar\\.gz([?][^[:space:]]*)?$' \"$topdir/sources.list\" || true)",
+                    ]
+                    if github_auth
+                    else []
+                ),
                 f"    spectool -g -C \"$spec_source_cache\" \"$topdir/SPECS/{shlex.quote(spec_name)}\" 2>&1 | tee \"$topdir/spectool-download.log\"",
                 "    if grep -q '^Download failed:' \"$topdir/spectool-download.log\"; then",
                 "      exit 1",

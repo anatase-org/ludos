@@ -836,9 +836,13 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         run_lines = [line for line in containerfile.splitlines() if line.startswith("RUN ")]
         build_run = next(line for line in run_lines if "LUDOS_SPEC_BUILD" in line)
         self.assertIn("--mount=type=secret,id=auth_secret", build_run)
-        self.assertIn("NETRC=/run/spectool.netrc", build_run)
-        self.assertIn("machine github.com login x-access-token", containerfile)
-        self.assertIn("trap 'rm -f \"$NETRC\"' EXIT", containerfile)
+        self.assertIn(
+            'Authorization: Bearer $(cat /run/secrets/auth_secret)', containerfile
+        )
+        self.assertIn("https://api.github.com/repos/", containerfile)
+        self.assertIn('--transform "s|^\\.|$github_root|"', containerfile)
+        self.assertNotIn("NETRC", containerfile)
+        self.assertNotIn("machine github.com", containerfile)
 
     def test_spec_stage_context_excludes_sibling_specs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
