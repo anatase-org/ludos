@@ -4671,6 +4671,7 @@ def _specs_build_script(
     lines = [
         "set -euxo pipefail",
         f"topdir={shlex.quote(topdir)}",
+        'ludos_dist="$(rpm --eval \'%{?dist}\').ludos"',
         'source_cache="/cache/artifacts/sources"',
         'mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}',
         'mkdir -p "$source_cache"',
@@ -4757,14 +4758,14 @@ def _specs_build_script(
                 *(
                     [
                         "  if [ \"$target\" = i686 ]; then",
-                        f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\" --define \"__meson $topdir/ludos-meson-i686\"{extra_defines}",
+                        f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\" --define \"dist $ludos_dist\" --define \"__meson $topdir/ludos-meson-i686\"{extra_defines}",
                         "  else",
-                        f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"{extra_defines}",
+                        f"    rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\" --define \"dist $ludos_dist\"{extra_defines}",
                         "  fi",
                     ]
                     if "i686" in staged.targets
                     else [
-                        f"  rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\"{extra_defines}",
+                        f"  rpmbuild -ba \"$topdir/SPECS/{shlex.quote(spec_name)}\" --target \"$target\" --define \"_topdir $topdir\" --define \"dist $ludos_dist\"{extra_defines}",
                     ]
                 ),
                 "done",
