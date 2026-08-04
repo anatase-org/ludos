@@ -1038,6 +1038,58 @@ class TargetCardBuildTests(unittest.TestCase):
             capture_output=True,
         )
 
+    def test_changed_ci_oci_image_is_replaced_when_confirmed(self) -> None:
+        local = ImageInfo(digest="sha256:local", labels={})
+        remote = ImageInfo(digest="sha256:remote", labels={})
+        with (
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._inspect_local_oci_image", return_value=local),
+            patch("ludos.build._try_inspect_remote_oci_image", return_value=remote),
+            patch("ludos.build.confirm", return_value=True) as confirm_replace,
+            patch("ludos.build._replace_local_oci_image") as replace_image,
+        ):
+            info = _inspect_oci_image(
+                "podman",
+                "kernel:f44-x86_64",
+                source=self.scx_source,
+                ci_registry="ghcr.io/anatase-org",
+                check_ci=True,
+            )
+
+        self.assertEqual(info, remote)
+        confirm_replace.assert_called_once_with(
+            "CI cache for kernel:f44-x86_64 changed from sha256:local "
+            "to sha256:remote. Replace the local image?",
+            default=True,
+        )
+        replace_image.assert_called_once_with(
+            "podman",
+            "kernel:f44-x86_64",
+            "ghcr.io/anatase-org/kernel@sha256:remote",
+            source=self.scx_source,
+        )
+
+    def test_changed_ci_oci_image_is_kept_when_declined(self) -> None:
+        local = ImageInfo(digest="sha256:local", labels={})
+        remote = ImageInfo(digest="sha256:remote", labels={})
+        with (
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._inspect_local_oci_image", return_value=local),
+            patch("ludos.build._try_inspect_remote_oci_image", return_value=remote),
+            patch("ludos.build.confirm", return_value=False),
+            patch("ludos.build._replace_local_oci_image") as replace_image,
+        ):
+            info = _inspect_oci_image(
+                "podman",
+                "kernel:f44-x86_64",
+                source=self.scx_source,
+                ci_registry="ghcr.io/anatase-org",
+                check_ci=True,
+            )
+
+        self.assertEqual(info, local)
+        replace_image.assert_not_called()
+
     def test_final_build_rejects_missing_oci_package(self) -> None:
         metadata = replace(
             self._metadata(),

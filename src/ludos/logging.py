@@ -412,12 +412,15 @@ def error(message: object = "") -> None:
     logger.error("%s", message)
 
 
-def confirm(message: str) -> bool:
+def confirm(message: str, *, default: bool = False) -> bool:
     prefix = "" if AGENT else " " * INFO_MESSAGE_INDENT
+    prompt = "[Y/n]" if default else "[y/N]"
     try:
-        response = input(f"{prefix}{message} [y/N] ")
+        response = input(f"{prefix}{message} {prompt} ")
     except EOFError:
-        return False
+        return default
+    if not response.strip():
+        return default
     return response.strip().lower() in {"y", "yes"}
 
 

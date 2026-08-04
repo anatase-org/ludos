@@ -24,7 +24,7 @@ from .common import (
     _remote_cache_image,
     resolve_manifest_context,
 )
-from .logging import log, stream
+from .logging import confirm, log, stream
 from .model import ConfigError, SpecBuild, _resolve_card_path
 
 
@@ -273,6 +273,7 @@ def build_manifest(
             cache_only=cache_only,
             ccache=ccache,
             card=card,
+            check_oci_cache=True,
         )
         if card is not None:
             target = _resolve_target_card(
@@ -349,6 +350,7 @@ def resolve_build_manifests(
     cache_only: bool = False,
     ccache: bool = True,
     card: str | None = None,
+    check_oci_cache: bool = False,
 ) -> tuple[ResolvedBuildMetadata, ...]:
     if not manifest_paths:
         raise ConfigError("at least one manifest is required")
@@ -365,6 +367,7 @@ def resolve_build_manifests(
                 ccache=ccache,
                 target_card=card,
                 dnf_workspace_dirs=dnf_workspace_dirs,
+                check_oci_cache=check_oci_cache,
             )
             for manifest_path in manifest_paths
         )
@@ -451,6 +454,7 @@ def _resolve_manifest_metadata(
     dnf_workspace_dirs: list[Path] | None = None,
     context: ResolvedManifestContext | None = None,
     workers: int = 1,
+    check_oci_cache: bool = False,
 ) -> ResolvedBuildMetadata:
     if workers < 1:
         raise ConfigError("workers must be a positive integer")
@@ -539,6 +543,7 @@ def _resolve_manifest_metadata(
     card_sources = {}
     card_prepare_scripts = {}
     oci_image_plans = []
+    checked_oci_cache_images: set[str] = set()
     postprocess_blocks = []
     bootstrap_card = validation.bootstrap
     if bootstrap_card is None:
@@ -594,7 +599,12 @@ def _resolve_manifest_metadata(
                 oci_image,
                 source=card.source,
                 ci_registry=ci_registry,
+                check_ci=(
+                    check_oci_cache
+                    and oci_image not in checked_oci_cache_images
+                ),
             )
+            checked_oci_cache_images.add(oci_image)
             oci_package_ids = _package_request_ids(oci_packages, arch)
             card_oci_package_ids.setdefault(card_name, set()).update(oci_package_ids)
             oci_image_plans.append(
@@ -2372,6 +2382,7 @@ def _inspect_oci_image(
     *,
     source: Path,
     ci_registry: str = "",
+    check_ci: bool = False,
 ) -> ImageInfo:
     if not _image_exists(podman, image):
         remote_image = _remote_cache_image(ci_registry, image)
@@ -2379,6 +2390,38 @@ def _inspect_oci_image(
             return _inspect_remote_oci_image(remote_image, source=source)
         raise ConfigError(f"{source}: OCI image is not cached: {image}")
 
+    local_info = _inspect_local_oci_image(podman, image, source=source)
+    if not check_ci:
+        return local_info
+
+    remote_image = _remote_cache_image(ci_registry, image)
+    if remote_image is None:
+        return local_info
+
+    log(f"Checking CI for OCI image: {remote_image}")
+    remote_info = _try_inspect_remote_oci_image(remote_image, source=source)
+    if remote_info is None or remote_info.digest == local_info.digest:
+        return local_info
+
+    if not confirm(
+        f"CI cache for {image} changed from {local_info.digest} "
+        f"to {remote_info.digest}. Replace the local image?",
+        default=True,
+    ):
+        return local_info
+
+    remote_repository = remote_image.rsplit(":", 1)[0]
+    pinned_remote_image = f"{remote_repository}@{remote_info.digest}"
+    _replace_local_oci_image(podman, image, pinned_remote_image, source=source)
+    return remote_info
+
+
+def _inspect_local_oci_image(
+    podman: str,
+    image: str,
+    *,
+    source: Path,
+) -> ImageInfo:
     result = subprocess.run(
         [podman, "image", "inspect", image, "--format", "{{json .}}"],
         check=True,
@@ -2393,6 +2436,17 @@ def _inspect_oci_image(
 
 
 def _inspect_remote_oci_image(remote_image: str, *, source: Path) -> ImageInfo:
+    info = _try_inspect_remote_oci_image(remote_image, source=source)
+    if info is None:
+        raise ConfigError(f"{source}: OCI image is not cached: {remote_image}")
+    return info
+
+
+def _try_inspect_remote_oci_image(
+    remote_image: str,
+    *,
+    source: Path,
+) -> ImageInfo | None:
     skopeo = shutil.which("skopeo")
     if not skopeo:
         raise ConfigError("skopeo must be installed to inspect remote OCI images")
@@ -2403,7 +2457,7 @@ def _inspect_remote_oci_image(remote_image: str, *, source: Path) -> ImageInfo:
         capture_output=True,
     )
     if result.returncode != 0:
-        raise ConfigError(f"{source}: OCI image is not cached: {remote_image}")
+        return None
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -2411,6 +2465,20 @@ def _inspect_remote_oci_image(remote_image: str, *, source: Path) -> ImageInfo:
             f"{source}: failed to inspect OCI image: {remote_image}"
         ) from exc
     return _image_info_from_inspect_data(data, remote_image, source=source)
+
+
+def _replace_local_oci_image(
+    podman: str,
+    image: str,
+    remote_image: str,
+    *,
+    source: Path,
+) -> None:
+    returncode, _output = _run_streamed_command([podman, "pull", remote_image])
+    if returncode != 0:
+        raise ConfigError(f"{source}: failed to pull OCI image: {remote_image}")
+    subprocess.run([podman, "tag", remote_image, image], check=True)
+    log(f"Replaced OCI image: {image}")
 
 
 def _image_info_from_inspect_data(

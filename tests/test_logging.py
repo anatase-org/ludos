@@ -243,6 +243,15 @@ class LudosLoggingTests(unittest.TestCase):
         with patch("builtins.input", return_value=""):
             self.assertFalse(confirm("Update card:pkg"))
 
+    def test_confirm_accepts_blank_answer_when_default_is_yes(self) -> None:
+        with (
+            patch("ludos.logging.AGENT", False),
+            patch("builtins.input", return_value="") as input_mock,
+        ):
+            self.assertTrue(confirm("Replace image", default=True))
+
+        input_mock.assert_called_once_with("        Replace image [Y/n] ")
+
     def test_confirm_declines_eof(self) -> None:
         with patch("builtins.input", side_effect=EOFError):
             self.assertFalse(confirm("Update card:pkg"))
