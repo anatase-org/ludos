@@ -4,7 +4,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,8 +16,10 @@ from ludos.build import (
     _card_specs_hash,
     _git_source_cache_key,
     _github_token,
+    _pin_git_source_cache,
     _render_card_build_output_containerfile,
     _render_specs_build_output_containerfile,
+    _resolve_git_spec_source,
     _resolve_spec_build_requires,
     _resolve_staged_spec_builder_packages,
     _stage_spec_build_contexts,
@@ -337,6 +341,66 @@ class GitSpecSourceTests(unittest.TestCase):
 
         self.assertIn("Version: 1", self._workspace_file("hhd.spec").read_text())
         self.assertNotEqual(self._rev_parse(cached_repo), self._rev_parse(self.repo))
+
+    def test_concurrent_pins_serialize_shared_git_cache(self) -> None:
+        self._write("hhd.spec", "Name: hhd\nVersion: 1\n")
+        self._commit("initial")
+        source = self._spec("hhd.spec").spec
+        revision = self._rev_parse(self.repo)
+        first_entered = threading.Event()
+        second_started = threading.Event()
+        second_entered = threading.Event()
+        release = threading.Event()
+        state_lock = threading.Lock()
+        active = 0
+        max_active = 0
+        calls = 0
+
+        def delayed_pin(*args) -> None:
+            nonlocal active, max_active, calls
+            _pin_git_source_cache(*args)
+            with state_lock:
+                calls += 1
+                active += 1
+                max_active = max(max_active, active)
+                if calls == 1:
+                    first_entered.set()
+                else:
+                    second_entered.set()
+            release.wait(timeout=5)
+            with state_lock:
+                active -= 1
+
+        def resolve():
+            return _resolve_git_spec_source(
+                self.card_source,
+                source,
+                self.cache_dir,
+                cache_only=True,
+                revision=revision,
+            )
+
+        def resolve_second():
+            second_started.set()
+            return resolve()
+
+        with patch("ludos.build._pin_git_source_cache", side_effect=delayed_pin):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(resolve)
+                self.assertTrue(first_entered.wait(timeout=5))
+                second = executor.submit(resolve_second)
+                self.assertTrue(second_started.wait(timeout=5))
+                try:
+                    self.assertFalse(second_entered.wait(timeout=0.25))
+                finally:
+                    release.set()
+                first_source = first.result(timeout=5)
+                second_source = second.result(timeout=5)
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(max_active, 1)
+        self.assertEqual(first_source.revision, revision)
+        self.assertEqual(second_source.revision, revision)
 
     def test_spec_files_requires_list(self) -> None:
         card_path = self.root / "list-card.yml"
