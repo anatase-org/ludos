@@ -165,6 +165,43 @@ class UploadFlatpaksTests(unittest.TestCase):
             client=None,
         )
 
+    def test_finish_flatpak_promotions_skips_unchanged_target(self) -> None:
+        context = SimpleNamespace(
+            root_dir=Path("."),
+            flatpak_gpg=FlatpakGpgConfig(
+                identity="https://flatpaks.example.test/",
+                lookaside="gpg",
+                verify="",
+            ),
+        )
+        plan = FlatpakPromotionPlan(
+            context=context,
+            ref="flatpaks/kate",
+            source_tag="rolling-f44-x86_64",
+            target_tag="f44-x86_64",
+        )
+        result = PromotedOciTag(
+            plan.ref,
+            plan.source_tag,
+            plan.target_tag,
+            "sha256:" + "a" * 64,
+            changed=False,
+        )
+
+        with (
+            patch("ludos.upload.flatpaks._flatpak_gpg_signing_config") as signing,
+            patch("ludos.upload.flatpaks._sign_and_upload_flatpak_signature") as sign,
+            patch("ludos.upload.flatpaks.update_flatpak_static_index") as refresh,
+        ):
+            self.assertEqual(
+                finish_flatpak_promotions((plan,), (result,), refresh=True),
+                0,
+            )
+
+        signing.assert_not_called()
+        sign.assert_not_called()
+        refresh.assert_not_called()
+
     def test_update_flatpak_index_prefixes_distro(self) -> None:
         context = SimpleNamespace(distro="f44-x86_64")
         with (

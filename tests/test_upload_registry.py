@@ -338,6 +338,34 @@ class UploadRegistryTests(unittest.TestCase):
         )
         self.assertEqual(tags, {"name": "anatase", "tags": ["rolling", "stable"]})
 
+    def test_promote_oci_tags_skips_unchanged_target(self) -> None:
+        manifest = json.dumps({"schemaVersion": 2, "layers": []}).encode()
+        client = FakeS3Client(
+            {
+                (
+                    "anatase-artifacts",
+                    "v2/flatpaks/kate/manifests/rolling-f44",
+                ): manifest,
+                ("anatase-artifacts", "v2/flatpaks/kate/manifests/f44"): manifest,
+            }
+        )
+
+        promoted = promote_oci_tags(
+            (
+                OciTagPromotion(
+                    "flatpaks/kate",
+                    "rolling-f44",
+                    "f44",
+                ),
+            ),
+            environ=ENV,
+            client=client,
+        )
+
+        self.assertEqual(len(promoted), 1)
+        self.assertFalse(promoted[0].changed)
+        self.assertEqual(client.puts, [])
+
     def test_promote_oci_tags_missing_source_writes_nothing(self) -> None:
         manifest = json.dumps({"schemaVersion": 2, "layers": []}).encode()
         client = FakeS3Client(

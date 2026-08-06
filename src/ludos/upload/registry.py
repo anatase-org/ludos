@@ -71,6 +71,7 @@ class PromotedOciTag:
     source_tag: str
     target_tag: str
     manifest_digest: str
+    changed: bool = True
 
 
 def registry_init(
@@ -386,7 +387,7 @@ def promote_oci_tags(
     environ: Mapping[str, str] | None = None,
     client: Any | None = None,
 ) -> tuple[PromotedOciTag, ...]:
-    prepared: list[tuple[OciTagPromotion, bytes, str]] = []
+    prepared: list[tuple[OciTagPromotion, bytes, str, bool]] = []
     seen: set[OciTagPromotion] = set()
     sources_by_target: dict[tuple[str, str], str] = {}
     for promotion in promotions:
@@ -412,7 +413,7 @@ def promote_oci_tags(
                 f"conflicting CI promotion sources for {ref}:{target_tag}: "
                 f"{previous_source}, {source_tag}"
             )
-        prepared.append((normalized, b"", ""))
+        prepared.append((normalized, b"", "", True))
 
     if not prepared:
         return tuple()
@@ -420,9 +421,9 @@ def promote_oci_tags(
     s3 = client if client is not None else _create_s3_client(config, environ)
     bucket = config.bucket
 
-    # Read every source before writing any destination so missing staging tags
-    # cannot leave a predictable partial promotion behind.
-    for index, (promotion, _body, _content_type) in enumerate(prepared):
+    # Read every source and existing target before writing any destination so
+    # missing staging tags cannot leave a predictable partial promotion behind.
+    for index, (promotion, _body, _content_type, _changed) in enumerate(prepared):
         key = _tag_key(promotion.ref, promotion.source_tag)
         try:
             response = s3.get_object(Bucket=bucket, Key=key)
@@ -441,12 +442,43 @@ def promote_oci_tags(
         if not isinstance(content_type, str) or not content_type:
             content_type = DEFAULT_MANIFEST_MEDIA_TYPE
         _loads_json(data, f"OCI source manifest {key}")
-        prepared[index] = (promotion, data, content_type)
+        changed = True
+        target_key = _tag_key(promotion.ref, promotion.target_tag)
+        try:
+            target_response = s3.get_object(Bucket=bucket, Key=target_key)
+        except Exception as exc:
+            if _client_error_code(exc) not in ("404", "NoSuchKey", "NotFound"):
+                raise ConfigError(
+                    f"S3 download failed for {target_key}: {exc}"
+                ) from exc
+        else:
+            target_body = target_response.get("Body")
+            target_data = b"" if target_body is None else target_body.read()
+            if isinstance(target_data, str):
+                target_data = target_data.encode("utf-8")
+            changed = target_data != data
+        prepared[index] = (promotion, data, content_type, changed)
 
     promoted = []
     changed_refs: dict[str, None] = {}
-    for promotion, body, content_type in prepared:
+    for promotion, body, content_type, changed in prepared:
         target_key = _tag_key(promotion.ref, promotion.target_tag)
+        manifest_digest = f"sha256:{hashlib.sha256(body).hexdigest()}"
+        if not changed:
+            log(
+                f"Skipping unchanged OCI tag: {promotion.ref}:{promotion.source_tag} "
+                f"matches {promotion.ref}:{promotion.target_tag}"
+            )
+            promoted.append(
+                PromotedOciTag(
+                    ref=promotion.ref,
+                    source_tag=promotion.source_tag,
+                    target_tag=promotion.target_tag,
+                    manifest_digest=manifest_digest,
+                    changed=False,
+                )
+            )
+            continue
         log(
             f"Promoting OCI tag: {promotion.ref}:{promotion.source_tag} "
             f"to {promotion.ref}:{promotion.target_tag}"
@@ -467,7 +499,7 @@ def promote_oci_tags(
                 ref=promotion.ref,
                 source_tag=promotion.source_tag,
                 target_tag=promotion.target_tag,
-                manifest_digest=f"sha256:{hashlib.sha256(body).hexdigest()}",
+                manifest_digest=manifest_digest,
             )
         )
 

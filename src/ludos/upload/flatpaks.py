@@ -340,6 +340,8 @@ def finish_flatpak_promotions(
             raise ConfigError(
                 f"flatpak promotion result is missing: {plan.ref}:{plan.target_tag}"
             )
+        if not result.changed:
+            continue
         if not _flatpak_gpg_enabled(plan.context.flatpak_gpg):
             continue
         root_dir = plan.context.root_dir.resolve()
@@ -360,6 +362,11 @@ def finish_flatpak_promotions(
     if refresh:
         refreshed = set()
         for plan in plans:
+            result = promoted_by_target[
+                (plan.ref, plan.source_tag, plan.target_tag)
+            ]
+            if not result.changed:
+                continue
             if plan.target_tag in refreshed:
                 continue
             refreshed.add(plan.target_tag)
