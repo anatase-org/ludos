@@ -54,10 +54,11 @@ CONTAINER_WORKDIR = "/ludos/installer"
 # 20#enwik8            : 100000000 ->  25983520 (x3.849),   1.79 MB/s,  975.8 MB/s
 # 21#enwik8            : 100000000 ->  25535719 (x3.916),   1.62 MB/s,  883.5 MB/s
 # 22#enwik8            : 100000000 ->  25333641 (x3.947),   1.46 MB/s,  893.1 MB/s
-# Level 9 saves around 100mb:
-# - 3) 4.8G 1m19s (browser reports 5.14 GB)
-# - 9) 4.7G 2m33s (browser reports 5.02 GB)
-EROFS_COMPRESSION = "zstd,9"
+# Level 6 retains almost all of level 9's compression ratio while avoiding its
+# much more expensive optimal-block search.  Keep the block size explicit:
+# small blocks are important for random reads during installation.
+EROFS_BLOCK_SIZE = "4096"
+EROFS_COMPRESSION = "zstd,6"
 EROFS_COMPRESSION_SCRATCH = "zstd,3"
 EROFS_FEATURES = "ztailpacking,fragments"
 BIOS_GRUB_DIR = Path("boot/grub/i386-pc")
@@ -1059,6 +1060,8 @@ def _mkfs_erofs_command(
         "mkfs.erofs",
         "-L",
         label,
+        "-b",
+        EROFS_BLOCK_SIZE,
         "-z",
         profile.compression,
         # unfortunately, if we label an ostree
