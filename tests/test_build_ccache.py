@@ -134,6 +134,7 @@ class BuildCcacheTests(unittest.TestCase):
             ccache.mkdir()
 
             with (
+                patch.dict(os.environ, {}, clear=True),
                 patch("ludos.build.os.path.exists", return_value=True),
                 patch(
                     "ludos.build._run_streamed_command", return_value=(0, "")
@@ -161,6 +162,7 @@ class BuildCcacheTests(unittest.TestCase):
         self.assertIn("/dev/fuse", command)
         self.assertIn("--layers", command)
         self.assertIn("--pull=false", command)
+        self.assertNotIn("--jobs", command)
         self.assertIn(f"{artifact_cache}:/cache/artifacts", command)
         self.assertIn(f"{podman_cache}:/cache/podman", command)
         self.assertIn(f"{ccache}:{CCACHE_CONTAINER_DIR}", command)
@@ -168,3 +170,33 @@ class BuildCcacheTests(unittest.TestCase):
         self.assertIn("id=auth_secret,env=AUTH_SECRET", command)
         self.assertNotIn("secret-token", command)
         self.assertEqual(run.call_args.kwargs["env"]["AUTH_SECRET"], "secret-token")
+
+    def test_podman_build_output_uses_configured_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            build_dir = root / "build"
+            build_dir.mkdir()
+            (build_dir / "Containerfile").write_text("FROM scratch\n", encoding="utf-8")
+            artifact_cache = root / "artifacts"
+            artifact_cache.mkdir()
+
+            with (
+                patch.dict(os.environ, {"LUDOS_PODMAN_JOBS": "2"}, clear=True),
+                patch("ludos.build.os.path.exists", return_value=False),
+                patch(
+                    "ludos.build._run_streamed_command", return_value=(0, "")
+                ) as run,
+            ):
+                _run_build_output_image_build(
+                    podman="podman",
+                    build_dir=build_dir,
+                    image="localhost/builds:test",
+                    artifact_cache_dir=artifact_cache,
+                    ccache_dir=None,
+                    source_dir=root / "card",
+                    workspace_dir=build_dir / "workspace",
+                )
+
+        command = run.call_args.args[0]
+        jobs_index = command.index("--jobs")
+        self.assertEqual(command[jobs_index + 1], "2")
