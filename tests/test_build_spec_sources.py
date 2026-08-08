@@ -252,6 +252,67 @@ class GitSpecSourceTests(unittest.TestCase):
             [(2,), (2,), (2,)],
         )
 
+    def test_concurrent_git_spec_revision_lookups_are_serialized(self) -> None:
+        revision = "a" * 40
+        first_entered = threading.Event()
+        second_started = threading.Event()
+        second_entered = threading.Event()
+        release = threading.Event()
+        state_lock = threading.Lock()
+        active = 0
+        max_active = 0
+        calls = 0
+
+        def delayed_lookup(*_args, **_kwargs) -> subprocess.CompletedProcess[str]:
+            nonlocal active, max_active, calls
+            with state_lock:
+                calls += 1
+                active += 1
+                max_active = max(max_active, active)
+                if calls == 1:
+                    first_entered.set()
+                else:
+                    second_entered.set()
+            release.wait(timeout=5)
+            with state_lock:
+                active -= 1
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=f"{revision}\tHEAD\n",
+                stderr="",
+            )
+
+        def resolve(source: str) -> str:
+            return _git_spec_source_revision(
+                source,
+                self.cache_dir,
+                cache_only=False,
+            )
+
+        def resolve_second() -> str:
+            second_started.set()
+            return resolve("git+https://example.com/other:hhd.spec")
+
+        with patch(
+            "ludos.build._run_captured_command",
+            side_effect=delayed_lookup,
+        ):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(resolve, self._spec("hhd.spec").spec)
+                self.assertTrue(first_entered.wait(timeout=5))
+                second = executor.submit(resolve_second)
+                self.assertTrue(second_started.wait(timeout=5))
+                try:
+                    self.assertFalse(second_entered.wait(timeout=0.25))
+                finally:
+                    release.set()
+                self.assertEqual(first.result(timeout=5), revision)
+                self.assertEqual(second.result(timeout=5), revision)
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(max_active, 1)
+
     def test_git_spec_hash_cache_only_uses_cached_head(self) -> None:
         self._write("hhd-git.spec", "Name: hhd\nVersion: 1\n")
         self._commit("initial")

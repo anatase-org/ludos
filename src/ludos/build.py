@@ -5248,7 +5248,8 @@ def _resolve_git_spec_source(
 
     with _git_spec_source_cache_lock(repo_dir):
         if revision:
-            _pin_git_source_cache(git, repo_dir, repo_url, revision, source)
+            with _git_spec_source_network_lock(spec_source_cache_dir):
+                _pin_git_source_cache(git, repo_dir, repo_url, revision, source)
         elif cache_only:
             if not _is_git_repository(git, repo_dir):
                 raise ConfigError(
@@ -5256,7 +5257,8 @@ def _resolve_git_spec_source(
                 )
             log(f"Using cached git spec source: {source}")
         else:
-            _update_git_source_cache(git, repo_dir, repo_url, ref, source)
+            with _git_spec_source_network_lock(spec_source_cache_dir):
+                _update_git_source_cache(git, repo_dir, repo_url, ref, source)
 
         spec_path = (repo_dir / spec_relpath).resolve()
         try:
@@ -5268,7 +5270,8 @@ def _resolve_git_spec_source(
         if not spec_path.is_file():
             raise ConfigError(f"{card_source}: spec '{source}' is missing")
         if (not cache_only or revision) and _git_spec_needs_history(spec_path):
-            _fetch_git_spec_history(git, repo_dir, source)
+            with _git_spec_source_network_lock(spec_source_cache_dir):
+                _fetch_git_spec_history(git, repo_dir, source)
         revision = _git_stdout(
             git,
             repo_dir,
@@ -5289,6 +5292,23 @@ def _git_spec_source_cache_lock(repo_dir: Path) -> Iterator[None]:
     # Shallow metadata is shared mutable state. Resolver threads and separate
     # ludos processes may use the same cache, so the lock must be filesystem-wide.
     lock_path = repo_dir.parent / ".lock"
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _git_spec_source_network_lock(
+    spec_source_cache_dir: Path,
+) -> Iterator[None]:
+    # Fedora dist-git becomes unreliable under bursts from resolver workers.
+    # Serialize remote Git operations across threads and ludos processes while
+    # leaving the rest of card and flatpak resolution parallel.
+    spec_source_cache_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = spec_source_cache_dir / ".network.lock"
     with lock_path.open("a", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
@@ -5326,11 +5346,12 @@ def _git_spec_source_revision(
 
     lookup_ref = _git_fetch_ref(ref)
     log(f"Looking up git spec source revision: {source}")
-    result = _run_captured_command(
-        [git, "ls-remote", repo_url, lookup_ref, f"{lookup_ref}^{{}}"],
-        "git spec source revision lookup",
-        soft_retry=True,
-    )
+    with _git_spec_source_network_lock(spec_source_cache_dir):
+        result = _run_captured_command(
+            [git, "ls-remote", repo_url, lookup_ref, f"{lookup_ref}^{{}}"],
+            "git spec source revision lookup",
+            soft_retry=True,
+        )
     revisions = [
         line.split("\t", 1)[0]
         for line in result.stdout.splitlines()
