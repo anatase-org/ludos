@@ -1006,12 +1006,13 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
             self.assertFalse((stage_dir / "scx-scheds.spec").exists())
 
     def test_card_build_output_containerfile_runs_build_stage(self) -> None:
-        containerfile = _render_card_build_output_containerfile(
-            orchestrator="localhost/builders:f44",
-            card_env={"FOO": "bar baz"},
-            build_script="mkdir -p build/RPMS\nprintf data > /files/output.txt",
-            ccache_dir=Path("/cache/ccache"),
-        )
+        with patch.dict(os.environ, {}, clear=True):
+            containerfile = _render_card_build_output_containerfile(
+                orchestrator="localhost/builders:f44",
+                card_env={"FOO": "bar baz"},
+                build_script="mkdir -p build/RPMS\nprintf data > /files/output.txt",
+                ccache_dir=Path("/cache/ccache"),
+            )
 
         self.assertIn("FROM localhost/builders:f44 AS build", containerfile)
         self.assertIn(
