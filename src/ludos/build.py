@@ -387,7 +387,17 @@ def resolve_build_manifest_context(
     ccache: bool = True,
     dnf_workspace_dirs: list[Path] | None = None,
     dnf_workspace_dir: Path | None = None,
+    check_ci_cache: bool = False,
 ) -> ResolvedManifestContext:
+    def image_exists(podman: str, image: str, ci_registry: str = "") -> bool:
+        return _ensure_image(
+            podman,
+            image,
+            ci_registry,
+            check_ci=check_ci_cache,
+            source=manifest_path,
+        )
+
     return resolve_manifest_context(
         manifest_path,
         cache_dir=cache_dir,
@@ -396,7 +406,7 @@ def resolve_build_manifest_context(
         ccache=ccache,
         dnf_workspace_dirs=dnf_workspace_dirs,
         dnf_workspace_dir=dnf_workspace_dir,
-        image_exists=_ensure_image,
+        image_exists=image_exists,
         create_orchestrator_image=_create_orchestrator_image,
         create_repo_image=_create_repo_image,
         extract_image_paths=_extract_image_paths,
@@ -468,6 +478,7 @@ def _resolve_manifest_metadata(
             cache_only=cache_only,
             ccache=ccache,
             dnf_workspace_dirs=dnf_workspace_dirs,
+            check_ci_cache=check_oci_cache,
         )
     validation = context.validation
     root_dir = context.root_dir
@@ -2400,7 +2411,26 @@ def _inspect_oci_image(
     if remote_image is None:
         return local_info
 
-    log(f"Checking CI for OCI image: {remote_image}")
+    return _check_ci_image_update(
+        podman,
+        image,
+        local_info,
+        remote_image,
+        source=source,
+        kind="OCI image",
+    )
+
+
+def _check_ci_image_update(
+    podman: str,
+    image: str,
+    local_info: ImageInfo,
+    remote_image: str,
+    *,
+    source: Path,
+    kind: str = "image",
+) -> ImageInfo:
+    log(f"Checking CI for {kind}: {remote_image}")
     remote_info = _try_inspect_remote_oci_image(remote_image, source=source)
     if remote_info is None or remote_info.digest == local_info.digest:
         return local_info
@@ -2821,8 +2851,29 @@ def _image_exists(podman: str, image: str) -> bool:
         return False
 
 
-def _ensure_image(podman: str, image: str, ci_registry: str = "") -> bool:
+def _ensure_image(
+    podman: str,
+    image: str,
+    ci_registry: str = "",
+    *,
+    check_ci: bool = False,
+    source: Path | None = None,
+) -> bool:
     if _image_exists(podman, image):
+        if not check_ci:
+            return True
+        remote_image = _remote_cache_image(ci_registry, image)
+        if remote_image is None:
+            return True
+        source = source or Path(image)
+        local_info = _inspect_local_oci_image(podman, image, source=source)
+        _check_ci_image_update(
+            podman,
+            image,
+            local_info,
+            remote_image,
+            source=source,
+        )
         return True
     if not ci_registry:
         return False

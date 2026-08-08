@@ -24,8 +24,10 @@ from ludos.build import (
     _inspect_oci_image,
     _render_final_containerfile,
     _final_manifest_hash,
+    _ensure_image,
     _resolve_manifest_metadata,
     _resolve_cache_key,
+    resolve_build_manifest_context,
 )
 from ludos.model import Card, ConfigError
 
@@ -999,6 +1001,88 @@ class TargetCardBuildTests(unittest.TestCase):
                     "localhost/kernel:f44-x86_64",
                     source=self.scx_source,
                 )
+
+    def test_build_context_checks_ci_for_repo_and_orchestrator_images(self) -> None:
+        context = sentinel.context
+        with patch(
+            "ludos.build.resolve_manifest_context",
+            return_value=context,
+        ) as resolve:
+            result = resolve_build_manifest_context(
+                self.manifest,
+                check_ci_cache=True,
+            )
+
+        self.assertIs(result, context)
+        image_exists = resolve.call_args.kwargs["image_exists"]
+        with patch("ludos.build._ensure_image", return_value=True) as ensure:
+            self.assertTrue(
+                image_exists(
+                    "podman",
+                    "orchestrator:f44-x86_64-base",
+                    "ghcr.io/anatase-org",
+                )
+            )
+
+        ensure.assert_called_once_with(
+            "podman",
+            "orchestrator:f44-x86_64-base",
+            "ghcr.io/anatase-org",
+            check_ci=True,
+            source=self.manifest,
+        )
+
+    def test_changed_ci_context_image_is_replaced_when_confirmed(self) -> None:
+        local = ImageInfo(digest="sha256:local", labels={})
+        remote = ImageInfo(digest="sha256:remote", labels={})
+        with (
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._inspect_local_oci_image", return_value=local),
+            patch("ludos.build._try_inspect_remote_oci_image", return_value=remote),
+            patch("ludos.build.confirm", return_value=True) as confirm_replace,
+            patch("ludos.build._replace_local_oci_image") as replace_image,
+        ):
+            exists = _ensure_image(
+                "podman",
+                "repos:f44-fedora",
+                "ghcr.io/anatase-org",
+                check_ci=True,
+                source=self.manifest,
+            )
+
+        self.assertTrue(exists)
+        confirm_replace.assert_called_once_with(
+            "CI cache for repos:f44-fedora changed from sha256:local "
+            "to sha256:remote. Replace the local image?",
+            default=True,
+        )
+        replace_image.assert_called_once_with(
+            "podman",
+            "repos:f44-fedora",
+            "ghcr.io/anatase-org/repos@sha256:remote",
+            source=self.manifest,
+        )
+
+    def test_changed_ci_context_image_is_kept_when_declined(self) -> None:
+        local = ImageInfo(digest="sha256:local", labels={})
+        remote = ImageInfo(digest="sha256:remote", labels={})
+        with (
+            patch("ludos.build._image_exists", return_value=True),
+            patch("ludos.build._inspect_local_oci_image", return_value=local),
+            patch("ludos.build._try_inspect_remote_oci_image", return_value=remote),
+            patch("ludos.build.confirm", return_value=False),
+            patch("ludos.build._replace_local_oci_image") as replace_image,
+        ):
+            exists = _ensure_image(
+                "podman",
+                "orchestrator:f44-x86_64-base",
+                "ghcr.io/anatase-org",
+                check_ci=True,
+                source=self.manifest,
+            )
+
+        self.assertTrue(exists)
+        replace_image.assert_not_called()
 
     def test_remote_oci_image_is_inspected_with_skopeo(self) -> None:
         with (
