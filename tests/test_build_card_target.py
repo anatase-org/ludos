@@ -836,8 +836,16 @@ class TargetCardBuildTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            _resolve_cache_key(first, ("repo:tag",)),
-            _resolve_cache_key(second, ("repo:tag",)),
+            _resolve_cache_key(first, ("sha256:abc",)),
+            _resolve_cache_key(second, ("sha256:abc",)),
+        )
+
+    def test_resolve_cache_key_changes_with_repo_sha(self) -> None:
+        cmd = ["podman", "run", "dnf5", "repoquery"]
+
+        self.assertNotEqual(
+            _resolve_cache_key(cmd, ("sha256:old",)),
+            _resolve_cache_key(cmd, ("sha256:new",)),
         )
 
     def test_card_parses_oci_strings_as_packages_and_mappings_as_inputs(self) -> None:

@@ -3191,9 +3191,12 @@ def _run_cached_transaction_preview(
     repo_images: tuple[str, ...],
     extra_hash_inputs: tuple[tuple[str, str], ...] = tuple(),
 ) -> subprocess.CompletedProcess[str]:
-    repo_tags = tuple(_image_tag(image) for image in repo_images)
+    repo_shas = tuple(
+        _inspect_local_oci_image(cmd[0], image, source=Path(image)).digest
+        for image in repo_images
+    )
     cache_hash_inputs = (*extra_hash_inputs, *_dnf_repo_hash_inputs(cmd))
-    cache_key = _resolve_cache_key(cmd, repo_tags, cache_hash_inputs)
+    cache_key = _resolve_cache_key(cmd, repo_shas, cache_hash_inputs)
     cache_file = resolve_cache_dir / f"{cache_key}.json"
     if cache_file.exists():
         data = json.loads(cache_file.read_text(encoding="utf-8"))
@@ -3213,7 +3216,7 @@ def _run_cached_transaction_preview(
     resolve_cache_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "args": cmd,
-        "repo_tags": repo_tags,
+        "repo_shas": repo_shas,
         "extra_hash_inputs": cache_hash_inputs,
         "returncode": transaction_preview.returncode,
         "stdout": transaction_preview.stdout,
@@ -3233,14 +3236,14 @@ def _run_cached_transaction_preview(
 
 def _resolve_cache_key(
     cmd: list[str],
-    repo_tags: tuple[str, ...],
+    repo_shas: tuple[str, ...],
     extra_hash_inputs: tuple[tuple[str, str], ...] = tuple(),
 ) -> str:
     payload = json.dumps(
         {
             "cmd": _normalized_dnf_workspace_mounts(cmd),
             "extra_hash_inputs": extra_hash_inputs,
-            "repo_tags": repo_tags,
+            "repo_shas": repo_shas,
         },
         sort_keys=True,
         separators=(",", ":"),
