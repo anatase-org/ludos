@@ -14,6 +14,7 @@ from ludos.build import (
     StagedSpec,
     _build_specs_output_image,
     _card_specs_hash,
+    _git_spec_source_revision,
     _git_source_cache_key,
     _github_token,
     _pin_git_source_cache,
@@ -221,6 +222,36 @@ class GitSpecSourceTests(unittest.TestCase):
 
         self.assertNotEqual(first_hash, second_hash)
 
+    def test_git_spec_revision_lookup_soft_retries_three_times(self) -> None:
+        revision = "a" * 40
+        failure = subprocess.CompletedProcess(
+            args=[], returncode=128, stdout="", stderr="HTTP 503\n"
+        )
+        success = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=f"{revision}\tHEAD\n",
+            stderr="",
+        )
+        source = self._spec("hhd.spec").spec
+
+        with patch(
+            "ludos.build.subprocess.run",
+            side_effect=(failure, failure, failure, success),
+        ) as run, patch("ludos.build.time.sleep") as sleep:
+            resolved = _git_spec_source_revision(
+                source,
+                self.cache_dir,
+                cache_only=False,
+            )
+
+        self.assertEqual(resolved, revision)
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual(
+            [call.args for call in sleep.call_args_list],
+            [(2,), (2,), (2,)],
+        )
+
     def test_git_spec_hash_cache_only_uses_cached_head(self) -> None:
         self._write("hhd-git.spec", "Name: hhd\nVersion: 1\n")
         self._commit("initial")
@@ -322,6 +353,45 @@ class GitSpecSourceTests(unittest.TestCase):
         self._stage(spec, revisions)
 
         self.assertIn("Version: 1", self._workspace_file("hhd.spec").read_text())
+
+    def test_pinned_git_spec_fetch_soft_retries_three_times(self) -> None:
+        repo_dir = self.cache_dir / "source" / "repo"
+        revision = "a" * 40
+        streamed_results = (
+            (0, ""),
+            (0, ""),
+            (128, "HTTP 503\n"),
+            (128, "HTTP 503\n"),
+            (128, "HTTP 503\n"),
+            (0, ""),
+            (0, ""),
+        )
+
+        with (
+            patch("ludos.build._is_git_repository", return_value=False),
+            patch("ludos.build._git_has_revision", return_value=False),
+            patch(
+                "ludos.build._run_streamed_command",
+                side_effect=streamed_results,
+            ) as run,
+            patch("ludos.build.time.sleep") as sleep,
+        ):
+            _pin_git_source_cache(
+                "git",
+                repo_dir,
+                "https://src.fedoraproject.org/rpms/ark",
+                revision,
+                "git+https://src.fedoraproject.org/rpms/ark:ark.spec",
+            )
+
+        self.assertEqual(run.call_count, 7)
+        self.assertEqual(run.call_args_list[2], run.call_args_list[3])
+        self.assertEqual(run.call_args_list[3], run.call_args_list[4])
+        self.assertEqual(run.call_args_list[4], run.call_args_list[5])
+        self.assertEqual(
+            [call.args for call in sleep.call_args_list],
+            [(2,), (2,), (2,)],
+        )
 
     def test_stage_repins_existing_cache_to_promised_revision(self) -> None:
         self._write("hhd.spec", "Name: hhd\nVersion: 1\n")

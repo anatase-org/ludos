@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -53,6 +54,8 @@ RPM_ARCH_SUFFIXES = frozenset(
 )
 ENV_ALWAYS_AVAILABLE = ("arch", "releasever")
 LUDOS_TAG_LABEL = "org.anatase.ludos.tag"
+SOFT_RETRY_COUNT = 3
+SOFT_RETRY_DELAY_SECONDS = 2
 
 
 @dataclass(frozen=True)
@@ -5323,17 +5326,11 @@ def _git_spec_source_revision(
 
     lookup_ref = _git_fetch_ref(ref)
     log(f"Looking up git spec source revision: {source}")
-    result = subprocess.run(
+    result = _run_captured_command(
         [git, "ls-remote", repo_url, lookup_ref, f"{lookup_ref}^{{}}"],
-        check=False,
-        text=True,
-        capture_output=True,
+        "git spec source revision lookup",
+        soft_retry=True,
     )
-    if result.returncode != 0:
-        raise ConfigError(
-            f"git spec source revision lookup failed with exit status "
-            f"{result.returncode}"
-        )
     revisions = [
         line.split("\t", 1)[0]
         for line in result.stdout.splitlines()
@@ -5411,6 +5408,7 @@ def _update_git_source_cache(
             _git_fetch_ref(ref),
         ],
         "git spec source fetch",
+        soft_retry=True,
     )
     _run_logged_command(
         [git, "-C", str(repo_dir), "checkout", "--force", "FETCH_HEAD"],
@@ -5456,6 +5454,7 @@ def _pin_git_source_cache(
                 revision,
             ],
             "git spec source pinned fetch",
+            soft_retry=True,
         )
     _run_logged_command(
         [git, "-C", str(repo_dir), "checkout", "--force", revision],
@@ -5645,6 +5644,7 @@ def _copy_git_file_source(
                 _git_fetch_ref(ref),
             ],
             "git file source fetch",
+            soft_retry=True,
         )
     if repo_path != Path("."):
         raise ConfigError(f"git files source '{source}' does not support subpaths yet")
@@ -5685,10 +5685,48 @@ def _is_git_repository(git: str, path: Path) -> bool:
     return Path(result.stdout.strip()).resolve() == path.resolve()
 
 
-def _run_logged_command(command: list[str], description: str) -> None:
-    returncode, output = _run_streamed_command(command)
-    if returncode == 0:
-        return
+def _run_captured_command(
+    command: list[str],
+    description: str,
+    *,
+    soft_retry: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    attempts = 1 + SOFT_RETRY_COUNT if soft_retry else 1
+    for attempt in range(attempts):
+        result = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            return result
+        if attempt + 1 < attempts:
+            log(f"Retrying {description}")
+            time.sleep(SOFT_RETRY_DELAY_SECONDS)
+    message = f"{description} failed with exit status {result.returncode}"
+    details = "\n".join(
+        "\n".join((result.stdout, result.stderr)).rstrip().splitlines()[-80:]
+    )
+    if details:
+        message = f"{message}\n{details}"
+    raise ConfigError(message)
+
+
+def _run_logged_command(
+    command: list[str],
+    description: str,
+    *,
+    soft_retry: bool = False,
+) -> None:
+    attempts = 1 + SOFT_RETRY_COUNT if soft_retry else 1
+    for attempt in range(attempts):
+        returncode, output = _run_streamed_command(command)
+        if returncode == 0:
+            return
+        if attempt + 1 < attempts:
+            log(f"Retrying {description}")
+            time.sleep(SOFT_RETRY_DELAY_SECONDS)
     message = f"{description} failed with exit status {returncode}"
     details = "\n".join(output.rstrip().splitlines()[-80:])
     if details:
