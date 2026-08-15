@@ -219,6 +219,7 @@ def prepare_ci(
     cache_version: str | None = None,
     ci: bool = False,
     full: bool = False,
+    no_flatpaks: bool = False,
     prefix: str = "",
     tag: str = "latest",
     registry: str = "",
@@ -257,14 +258,18 @@ def prepare_ci(
         _metadata_with_final_image(item, mode=mode)
         for item in metadata
     )
-    flatpaks = tuple(
-        _flatpak_entry(manifest_path, context, plan)
-        for manifest_path, context in manifest_contexts
-        for plan in plan_manifest_flatpaks_with_context(
-            context,
-            manifest_path=manifest_path,
-            cache_only=False,
-            workers=workers,
+    flatpaks = (
+        tuple()
+        if no_flatpaks
+        else tuple(
+            _flatpak_entry(manifest_path, context, plan)
+            for manifest_path, context in manifest_contexts
+            for plan in plan_manifest_flatpaks_with_context(
+                context,
+                manifest_path=manifest_path,
+                cache_only=False,
+                workers=workers,
+            )
         )
     )
     output = cache_root / "ci" / "build.yml"

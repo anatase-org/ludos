@@ -128,6 +128,7 @@ class CiParserTests(unittest.TestCase):
                 "20260629",
                 "--ci",
                 "--full",
+                "--no-flatpaks",
                 "--prefix",
                 "rolling-",
                 "--tag",
@@ -146,6 +147,7 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.version, "20260629")
         self.assertTrue(args.ci)
         self.assertTrue(args.full)
+        self.assertTrue(args.no_flatpaks)
         self.assertEqual(args.prefix, "rolling-")
         self.assertEqual(args.tag, "rolling")
         self.assertEqual(args.registry, "i.anatase.org")
@@ -159,6 +161,7 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.tag, "latest")
         self.assertEqual(args.registry, "")
         self.assertFalse(args.ci)
+        self.assertFalse(args.no_flatpaks)
 
     def test_parser_accepts_seed_ci_options(self) -> None:
         parser = build_parser()
@@ -341,6 +344,7 @@ class CiParserTests(unittest.TestCase):
                 "--version",
                 "20260629",
                 "--ci",
+                "--no-flatpaks",
                 "--workers",
                 "8",
                 "--prefix",
@@ -363,6 +367,7 @@ class CiParserTests(unittest.TestCase):
             cache_version="20260629",
             ci=True,
             full=False,
+            no_flatpaks=True,
             prefix="rolling-",
             tag="rolling",
             registry="i.anatase.org",
@@ -1316,18 +1321,25 @@ class PrepareCiTests(unittest.TestCase):
                 patch(
                     "ludos.ci.plan_manifest_flatpaks_with_context",
                     return_value=tuple(),
-                ),
+                ) as plan_flatpaks,
                 patch(
                     "ludos.ci._write_ci_build_manifest",
                     return_value=(output, encoded),
-                ),
+                ) as write_manifest,
                 patch("ludos.ci._remove_tree"),
                 patch("ludos.ci.log"),
             ):
-                result = prepare_ci((manifest,), cache_dir=cache, ci=True)
+                result = prepare_ci(
+                    (manifest,),
+                    cache_dir=cache,
+                    ci=True,
+                    no_flatpaks=True,
+                )
 
         self.assertEqual(result, output)
         final_metadata.assert_called_once_with(metadata, mode="combined")
+        plan_flatpaks.assert_not_called()
+        self.assertEqual(write_manifest.call_args.kwargs["flatpaks"], tuple())
 
     def test_prepare_ci_drops_already_built_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

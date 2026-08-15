@@ -803,6 +803,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include already-built final images and flatpaks in the CI metadata.",
     )
     prepare_parser.add_argument(
+        "--no-flatpaks",
+        action="store_true",
+        help="Skip Flatpak preparation and omit Flatpaks from the CI metadata.",
+    )
+    prepare_parser.add_argument(
         "--prefix",
         default="",
         help="Prefix for the published flatpak tag. Defaults to no prefix.",
@@ -1411,6 +1416,7 @@ def ci_command(args: argparse.Namespace) -> int:
             cache_version=args.version,
             ci=args.ci,
             full=args.full,
+            no_flatpaks=args.no_flatpaks,
             prefix=args.prefix,
             tag=args.tag,
             registry=args.registry,
