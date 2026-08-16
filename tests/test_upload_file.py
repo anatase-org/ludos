@@ -107,6 +107,7 @@ class FakeS3Client:
         Body: bytes,
         ContentType: str,
         CacheControl: str | None = None,
+        ContentDisposition: str | None = None,
     ) -> None:
         put: dict[str, object] = {
             "Bucket": Bucket,
@@ -116,6 +117,8 @@ class FakeS3Client:
         }
         if CacheControl is not None:
             put["CacheControl"] = CacheControl
+        if ContentDisposition is not None:
+            put["ContentDisposition"] = ContentDisposition
         self.puts.append(put)
         self.calls.append(("put_object", Key))
         self.objects[(Bucket, Key)] = Body
@@ -449,7 +452,12 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(signed_digest.hexdigest(), digest)
         self.assertEqual(
             [
-                (put["Key"], put["ContentType"], put["Body"])
+                (
+                    put["Key"],
+                    put["ContentType"],
+                    put.get("ContentDisposition"),
+                    put["Body"],
+                )
                 for put in client.puts
                 if str(put["Key"]).endswith(".sig")
             ],
@@ -457,11 +465,13 @@ class UploadFileTests(unittest.TestCase):
                 (
                     "isos/anatase.iso.sig",
                     "application/octet-stream",
+                    'attachment; filename="anatase-44.20260627.iso.sig"',
                     b"detached signature",
                 ),
                 (
                     "isos/anatase-44.20260627.iso.sig",
                     "application/octet-stream",
+                    None,
                     b"detached signature",
                 ),
             ],

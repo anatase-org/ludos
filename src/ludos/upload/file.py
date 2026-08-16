@@ -165,6 +165,11 @@ def _upload_detached_signatures(
     prefix = "" if "/" not in target.key else target.key.rsplit("/", 1)[0] + "/"
     for name in names:
         key = f"{prefix}{name}.sig"
+        extra_args = {}
+        if download_name is not None and name == output_name:
+            extra_args["ContentDisposition"] = _content_disposition(
+                f"{download_name}.sig"
+            )
         log(f"Uploading detached signature: {key}")
         try:
             client.put_object(
@@ -173,6 +178,7 @@ def _upload_detached_signatures(
                 Body=signature,
                 ContentType="application/octet-stream",
                 CacheControl=REGISTRY_SHORT_CACHE_CONTROL,
+                **extra_args,
             )
         except Exception as exc:
             raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc
