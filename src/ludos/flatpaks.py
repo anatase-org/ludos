@@ -409,7 +409,7 @@ def _prepare_flatpak_build_plan(
     card_path = _flatpak_card_path(flatpak_path)
     card = FlatpakCard.from_file(card_path)
     flatpak_dir = card_path.parent
-    app_name = _flatpak_name(flatpak_dir)
+    app_name = _flatpak_name(card_path)
     block = f"flatpak-{app_name}"
     manifest_runtime = _require_manifest_runtime(context)
     branch = card.flatpak.version if card.flatpak.runtime else manifest_runtime.branch
@@ -807,8 +807,11 @@ def _manifest_flatpak_path(flatpak_ref: str, root_dir: Path) -> Path:
     return root_dir / path
 
 
-def _flatpak_name(flatpak_dir: Path) -> str:
-    return flatpak_dir.resolve().name
+def _flatpak_name(card_path: Path) -> str:
+    path = card_path.resolve()
+    if path.name in ("card.yaml", "card.yml"):
+        return path.parent.name
+    return path.stem
 
 
 def _substitute_specs(specs: tuple[SpecBuild, ...], env: dict[str, str]) -> tuple[SpecBuild, ...]:

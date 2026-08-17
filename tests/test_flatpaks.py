@@ -677,6 +677,40 @@ specs:
             )
         )
 
+    def test_prepare_flatpak_build_plan_names_app_from_named_card(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            flatpak_dir = root / "flatpaks"
+            flatpak_dir.mkdir()
+            card_path = flatpak_dir / "kate.yml"
+            card_path.write_text(
+                """
+version: 1
+flatpak:
+  id: org.anatase.TextEditor
+  command: kate
+build-deps:
+  - rpm-build
+specs:
+  - spec: kde/kate/kate.spec
+    packages: [kate]
+""".lstrip(),
+                encoding="utf-8",
+            )
+            context = self._flatpak_context(root)
+
+            with self._mock_plan_dependencies():
+                plan = _prepare_flatpak_build_plan(
+                    context,
+                    card_path,
+                    cache_only=False,
+                )
+
+        self.assertEqual(plan.app_name, "kate")
+        self.assertEqual(plan.block, "flatpak-kate")
+        self.assertEqual(plan.latest_image, "flatpaks:kate")
+        self.assertEqual(plan.build_image, "builds:f44-x86_64-kate-spechash")
+
     def test_prepare_flatpak_build_plan_rejects_missing_manifest_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

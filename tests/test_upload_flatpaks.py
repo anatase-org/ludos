@@ -31,6 +31,8 @@ from ludos.upload.flatpaks import (
     upload_flatpaks,
     _flatpak_signature_payload,
     _overlay_icon,
+    _resolved_flatpak_images_by_name,
+    _upload_targets,
 )
 from ludos.upload.registry import PromotedOciTag
 from .test_upload_file import ENV, FakeS3Client
@@ -67,6 +69,87 @@ class UploadFlatpaksTests(unittest.TestCase):
                 ("flatpaks/kate", "rolling-f44-x86_64", "f44-x86_64"),
                 ("flatpaks/ark", "rolling-f44-x86_64", "f44-x86_64"),
             ],
+        )
+
+    def test_plan_flatpak_promotions_names_top_level_card_from_stem(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(
+                root,
+                ("flatpaks/kate.yml", "flatpaks/ark.yml"),
+            )
+
+            plans = plan_flatpak_promotions(manifest, prefix="rolling-")
+
+        self.assertEqual(
+            [plan.ref for plan in plans],
+            ["flatpaks/kate", "flatpaks/ark"],
+        )
+
+    def test_upload_targets_name_top_level_cards_from_stems(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            flatpaks_dir = root / "flatpaks"
+            flatpaks_dir.mkdir()
+            for name in ("kate", "ark"):
+                (flatpaks_dir / f"{name}.yml").write_text(
+                    "version: 1\n",
+                    encoding="utf-8",
+                )
+            context = SimpleNamespace(
+                validation=SimpleNamespace(
+                    manifest=SimpleNamespace(
+                        flatpaks=("flatpaks/kate.yml", "flatpaks/ark.yml")
+                    )
+                ),
+                root_dir=root,
+                cache_dir=root / "cache",
+                distro="f44-x86_64",
+                local_prefix="localhost",
+            )
+
+            targets = _upload_targets(
+                context,
+                tuple(),
+                resolve_images=False,
+            )
+
+        self.assertEqual([target.name for target in targets], ["kate", "ark"])
+        self.assertEqual(
+            [target.ref for target in targets],
+            ["flatpaks/kate", "flatpaks/ark"],
+        )
+        self.assertEqual(
+            [target.source_ref for target in targets],
+            ["flatpaks/kate.yml", "flatpaks/ark.yml"],
+        )
+
+    def test_resolved_registry_images_name_top_level_cards_from_stems(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(
+                root,
+                ("flatpaks/kate.yml", "flatpaks/ark.yml"),
+            )
+            context = _resolved_context(manifest, root, root / "cache")
+
+            with patch(
+                "ludos.upload.flatpaks.resolve_manifest_flatpak_images",
+                return_value=SimpleNamespace(
+                    output_images=("flatpaks:f44-kate", "flatpaks:f44-ark")
+                ),
+            ):
+                images = _resolved_flatpak_images_by_name(
+                    context,
+                    cache_only=False,
+                )
+
+        self.assertEqual(
+            images,
+            {
+                "kate": "flatpaks:f44-kate",
+                "ark": "flatpaks:f44-ark",
+            },
         )
 
     def test_plan_flatpak_promotions_overrides_host_architecture(self) -> None:
@@ -1454,7 +1537,12 @@ def _write_manifest(root: Path, flatpaks: tuple[str, ...]) -> Path:
     (root / "cards/bootstrap.yml").write_text("version: 1\n", encoding="utf-8")
     (root / "cards/base.yml").write_text("version: 1\n", encoding="utf-8")
     for flatpak in flatpaks:
-        card_path = root / flatpak / "card.yaml"
+        flatpak_path = root / flatpak
+        card_path = (
+            flatpak_path
+            if flatpak_path.suffix in (".yml", ".yaml")
+            else flatpak_path / "card.yaml"
+        )
         card_path.parent.mkdir(parents=True, exist_ok=True)
         card_path.write_text("version: 1\n", encoding="utf-8")
     manifest = root / "anatase.yml"

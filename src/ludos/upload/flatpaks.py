@@ -36,6 +36,7 @@ from ..flatpaks import (
     _build_flatpak_with_context,
     _flatpak_arch,
     _flatpak_appstream_labels_with_remote_icon,
+    _flatpak_name,
 )
 from ..build import _remove_tree
 from ..logging import log
@@ -304,7 +305,7 @@ def plan_flatpak_promotions(
         path = _flatpak_card_path(
             _manifest_flatpak_path(Path(flatpak), context.root_dir)
         )
-        ref = f"flatpaks/{path.parent.resolve().name}"
+        ref = f"flatpaks/{_flatpak_name(path)}"
         if ref in seen_refs:
             continue
         seen_refs.add(ref)
@@ -560,7 +561,7 @@ def _upload_targets(
         source_ref = _manifest_flatpak_ref(flatpak, context.root_dir)
         if image_overrides is not None and source_ref not in image_overrides:
             raise ConfigError(f"missing flatpak image override: {source_ref}")
-        name = path.parent.resolve().name
+        name = _flatpak_name(path)
         tag = f"{prefix}{context.distro}"
         export_dir = flatpak_oci_layout_path(context.cache_dir, name, tag)
         targets.append(
@@ -609,9 +610,11 @@ def _resolved_flatpak_images_by_name(
         cache_only=cache_only,
     )
     return {
-        _flatpak_card_path(
-            _manifest_flatpak_path(Path(flatpak_ref), context.root_dir)
-        ).parent.resolve().name: image
+        _flatpak_name(
+            _flatpak_card_path(
+                _manifest_flatpak_path(Path(flatpak_ref), context.root_dir)
+            )
+        ): image
         for flatpak_ref, image in zip(
             context.validation.manifest.flatpaks,
             resolution.output_images,
