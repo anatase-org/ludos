@@ -1065,7 +1065,7 @@ def _write_flatpak_containerfile(
         "set -eux",
         "mkdir -p /flatpak",
         "rpm --root /flatpak --initdb",
-        "rpm --root /flatpak -Uvh --allfiles --nodeps --noscripts --notriggers /rpms/*.rpm",
+        "rpm --root /flatpak --define '_install_langs all' -Uvh --allfiles --nodeps --noscripts --notriggers /rpms/*.rpm",
         "if [ -d /ludos/build-files ]; then cp -a /ludos/build-files/. /flatpak/; fi",
         "LUDOS_INSTALL_FLATPAK_RPMS",
     ]
