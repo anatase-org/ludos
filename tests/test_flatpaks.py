@@ -286,6 +286,26 @@ class FlatpakParserTests(unittest.TestCase):
         self.assertEqual(validation.missing_flatpaks, ("flatpaks/missing",))
         self.assertFalse(validation.ok)
 
+    def test_validate_manifest_resolves_extensionless_named_flatpak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_path = self._write_manifest(
+                root,
+                flatpaks=("flatpaks/gwenview",),
+                create_flatpaks=tuple(),
+            )
+            flatpaks_dir = root / "flatpaks"
+            flatpaks_dir.mkdir()
+            (flatpaks_dir / "gwenview.yml").write_text(
+                "version: 1\n",
+                encoding="utf-8",
+            )
+
+            validation = validate_manifest(manifest_path)
+
+        self.assertEqual(validation.missing_flatpaks, tuple())
+        self.assertTrue(validation.ok)
+
     def test_build_flatpaks_runs_grouped_phases_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -702,7 +722,7 @@ specs:
             with self._mock_plan_dependencies():
                 plan = _prepare_flatpak_build_plan(
                     context,
-                    card_path,
+                    card_path.with_suffix(""),
                     cache_only=False,
                 )
 

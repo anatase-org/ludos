@@ -360,7 +360,11 @@ def _resolve_flatpak_path(flatpak_ref: str, root_dir: Path) -> Path:
                 return card_path
         return path / "card.yaml"
 
-    return path / "card.yaml"
+    for suffix in (".yml", ".yaml"):
+        card_path = path.with_suffix(suffix)
+        if card_path.exists():
+            return card_path
+    return path.with_suffix(".yml")
 
 
 def _validate_repo_vars(repo_ref: RepoRef, env: dict[str, str | int]) -> None:
