@@ -81,6 +81,11 @@ class BuildOrchestratorImageTests(unittest.TestCase):
             stream.call_args_list[1].kwargs["input_text"],
         )
         self.assertIn(
+            "printf '%s\\n' '%_install_langs all' > "
+            '"$mount_path/etc/rpm/macros.image-language-conf"',
+            stream.call_args_list[1].kwargs["input_text"],
+        )
+        self.assertIn(
             'rm -rf "$mount_path/var/cache/dnf" '
             '"$mount_path/var/cache/libdnf5"',
             stream.call_args_list[1].kwargs["input_text"],

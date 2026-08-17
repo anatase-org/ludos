@@ -2954,6 +2954,9 @@ def _create_orchestrator_image(
                 ],
                 raw_suffix=f" {package_args}",
             ),
+            'install -d "$mount_path/etc/rpm"',
+            "printf '%s\\n' '%_install_langs all' > "
+            '"$mount_path/etc/rpm/macros.image-language-conf"',
             'rm -rf "$mount_path/var/cache/dnf" "$mount_path/var/cache/libdnf5"',
             'find "$mount_path/var/log" -maxdepth 1 -name "dnf*" '
             "-exec rm -rf {} + 2>/dev/null || true",
