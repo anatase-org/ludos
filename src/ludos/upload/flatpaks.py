@@ -1406,6 +1406,11 @@ def _flatpak_card_path(flatpak_path: Path) -> Path:
         if yml_path.exists():
             return yml_path
         raise ConfigError(f"{path}: missing card.yaml")
+    if path.suffix not in (".yaml", ".yml"):
+        for suffix in (".yml", ".yaml"):
+            card_path = path.with_suffix(suffix)
+            if card_path.exists():
+                return card_path
     if not path.exists():
         raise ConfigError(f"flatpak definition does not exist: {path}")
     return path

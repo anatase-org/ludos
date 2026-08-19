@@ -86,6 +86,25 @@ class UploadFlatpaksTests(unittest.TestCase):
             ["flatpaks/kate", "flatpaks/ark"],
         )
 
+    def test_plan_flatpak_promotions_resolves_extensionless_top_level_cards(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(
+                root,
+                ("flatpaks/kate.yml", "flatpaks/ark.yml"),
+            )
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(".yml", ""),
+                encoding="utf-8",
+            )
+
+            plans = plan_flatpak_promotions(manifest, prefix="rolling-")
+
+        self.assertEqual(
+            [plan.ref for plan in plans],
+            ["flatpaks/kate", "flatpaks/ark"],
+        )
+
     def test_upload_targets_name_top_level_cards_from_stems(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
