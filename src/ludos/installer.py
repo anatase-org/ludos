@@ -63,7 +63,6 @@ EROFS_COMPRESSION_SCRATCH = "zstd,3"
 EROFS_FEATURES = "ztailpacking,fragments"
 BIOS_GRUB_DIR = Path("boot/grub/i386-pc")
 BIOS_ELTORITO_IMAGE = BIOS_GRUB_DIR / "eltorito.img"
-EFI_BOOT_IMAGE = Path("images/efiboot.img")
 LIVE_ROOT_IMAGE = Path("LiveOS/squashfs.img")
 LUDOS_EFI_ASSET_DIR = Path("/usr/lib/ludos/efi")
 LUDOS_EFI_BOOT_ASSETS = Path("ludos-efi")
@@ -907,11 +906,8 @@ def _create_efi_image(ctx: InstallerContext) -> None:
         shutil.rmtree(efi_tree)
     (efi_tree / "EFI/BOOT").mkdir(parents=True)
 
-    kernel, initramfs = _kernel_and_initramfs(ctx.boot_assets)
-    log(f"Adding UEFI kernel payload: {kernel.parent.name}")
+    log("Adding UEFI bootloader payload")
     _copy_ludos_efi_payload(ctx.boot_assets, efi_tree)
-    shutil.copy2(kernel, efi_tree / "vmlinuz")
-    shutil.copy2(initramfs, efi_tree / "initramfs.img")
     shutil.copy2(ctx.boot_assets / "shimx64.efi", efi_tree / "EFI/BOOT/BOOTX64.EFI")
     shutil.copy2(ctx.boot_assets / "mmx64.efi", efi_tree / "EFI/BOOT/mmx64.efi")
     shutil.copy2(ctx.boot_assets / "grubx64.efi", efi_tree / "EFI/BOOT/grubx64.efi")
@@ -1011,6 +1007,7 @@ def _grub_config(
             "set pager=0",
             "",
             f'menuentry "{_grub_quote(menuentry)}" {{',
+            f"    search --no-floppy --label {iso_label} --set=root",
             *boot_lines,
             "}",
             "",
@@ -1117,6 +1114,7 @@ def _create_iso(ctx: InstallerContext) -> None:
             _tool_path(ctx, iso_tree),
             iso_label=ctx.iso_label,
             bios_mbr=_tool_path(ctx, bios_mbr),
+            efi_partition_image=_tool_path(ctx, ctx.efi_img),
         ),
     )
 
@@ -1127,10 +1125,6 @@ def _copy_live_iso_payload(ctx: InstallerContext, iso_tree: Path) -> None:
     live_root = iso_tree / LIVE_ROOT_IMAGE
     live_root.parent.mkdir(parents=True)
     shutil.copy2(ctx.root_erofs, live_root)
-
-    efi_boot = iso_tree / EFI_BOOT_IMAGE
-    efi_boot.parent.mkdir(parents=True)
-    shutil.copy2(ctx.efi_img, efi_boot)
 
     visible_efi = iso_tree / "EFI/BOOT"
     visible_efi.mkdir(parents=True, exist_ok=True)
@@ -1204,7 +1198,7 @@ def _xorriso_command(
     iso_label: str = "ANATASE_ISO",
     bios_mbr: Path | None = None,
     bios_boot_image: Path = BIOS_ELTORITO_IMAGE,
-    efi_boot_image: Path = EFI_BOOT_IMAGE,
+    efi_partition_image: Path = Path("efi.img"),
 ) -> list[str]:
     command = [
         "xorriso",
@@ -1217,6 +1211,8 @@ def _xorriso_command(
         "-joliet-long",
         "-iso-level",
         "3",
+        "-partition_offset",
+        "16",
         "-o",
         str(iso),
     ]
@@ -1229,6 +1225,11 @@ def _xorriso_command(
         )
     command.extend(
         [
+            "-append_partition",
+            "2",
+            "0xef",
+            str(efi_partition_image),
+            "-appended_part_as_gpt",
             "-b",
             str(bios_boot_image),
             "-no-emul-boot",
@@ -1238,7 +1239,7 @@ def _xorriso_command(
             "--grub2-boot-info",
             "-eltorito-alt-boot",
             "-e",
-            str(efi_boot_image),
+            "--interval:appended_partition_2:all::",
             "-no-emul-boot",
             "-isohybrid-gpt-basdat",
             str(iso_tree),

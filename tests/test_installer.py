@@ -11,7 +11,6 @@ from ludos.__main__ import build_parser
 from ludos.installer import (
     BIOS_ELTORITO_IMAGE,
     CONTAINER_WORKDIR,
-    EFI_BOOT_IMAGE,
     LUDOS_EFI_ASSET_DIR,
     LUDOS_EFI_BOOT_ASSETS,
     InstallerContext,
@@ -35,6 +34,7 @@ from ludos.installer import (
     _fat_label_for_manifest,
     _label_base,
     _container_name,
+    _create_efi_image,
     _erofs_profile,
     _erofs_worker_count,
     _kernel_and_initramfs,
@@ -837,6 +837,7 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn("set timeout_style=hidden", config)
         self.assertIn('menuentry "Installer"', config)
         self.assertIn("root=live:CDLABEL=ANATASE_ISO", config)
+        self.assertIn("search --no-floppy --label ANATASE_ISO --set=root", config)
         self.assertNotIn("selinux=0", config)
         self.assertIn('if [ "$grub_platform" = "efi" ]; then', config)
         self.assertIn("linuxefi /vmlinuz", config)
@@ -980,13 +981,39 @@ class InstallerHelperTests(unittest.TestCase):
 
             self.assertEqual(_efi_image_size_kib(efi_tree), 237568)
 
-    def test_copy_live_iso_payload_places_erofs_and_efi_image_in_standard_paths(self) -> None:
+    def test_efi_image_uses_kernel_and_initramfs_from_iso(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = _context(root)
+            ctx.output_dir.mkdir(parents=True)
+            ctx.boot_assets.mkdir()
+            (ctx.boot_assets / "vmlinuz").write_text("kernel", encoding="utf-8")
+            (ctx.boot_assets / "initramfs.img").write_text("initramfs", encoding="utf-8")
+            (ctx.boot_assets / "shimx64.efi").write_text("shim", encoding="utf-8")
+            (ctx.boot_assets / "mmx64.efi").write_text("mok", encoding="utf-8")
+            (ctx.boot_assets / "grubx64.efi").write_text("grub", encoding="utf-8")
+
+            with patch("ludos.installer._run"):
+                _create_efi_image(ctx)
+
+            efi_tree = ctx.output_dir / "efi-tree"
+            self.assertFalse((efi_tree / "vmlinuz").exists())
+            self.assertFalse((efi_tree / "initramfs.img").exists())
+            self.assertEqual(
+                (efi_tree / "EFI/BOOT/BOOTX64.EFI").read_text(encoding="utf-8"),
+                "shim",
+            )
+            self.assertIn(
+                "search --no-floppy --label ANATASE_ISO --set=root",
+                (efi_tree / "EFI/BOOT/grub.cfg").read_text(encoding="utf-8"),
+            )
+
+    def test_copy_live_iso_payload_places_erofs_and_visible_efi_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ctx = _context(root)
             ctx.output_dir.mkdir(parents=True)
             ctx.root_erofs.write_text("erofs", encoding="utf-8")
-            ctx.efi_img.write_text("efi", encoding="utf-8")
             ctx.boot_assets.mkdir()
             (ctx.boot_assets / "shimx64.efi").write_text("shim", encoding="utf-8")
             (ctx.boot_assets / "mmx64.efi").write_text("mok", encoding="utf-8")
@@ -1007,7 +1034,7 @@ class InstallerHelperTests(unittest.TestCase):
             _copy_live_iso_payload(ctx, iso_tree)
 
             self.assertEqual((iso_tree / LIVE_ROOT_IMAGE).read_text(encoding="utf-8"), "erofs")
-            self.assertEqual((iso_tree / EFI_BOOT_IMAGE).read_text(encoding="utf-8"), "efi")
+            self.assertFalse((iso_tree / "images/efiboot.img").exists())
             self.assertEqual((iso_tree / "EFI/BOOT/BOOTX64.EFI").read_text(encoding="utf-8"), "shim")
             self.assertEqual((iso_tree / "EFI/BOOT/mmx64.efi").read_text(encoding="utf-8"), "mok")
             self.assertEqual((iso_tree / "EFI/BOOT/grubx64.efi").read_text(encoding="utf-8"), "grub")
@@ -1022,6 +1049,7 @@ class InstallerHelperTests(unittest.TestCase):
             Path("installer.iso"),
             Path("."),
             bios_mbr=Path("boot_hybrid.img"),
+            efi_partition_image=Path("efi.img"),
         )
 
         self.assertEqual(command[:3], ["xorriso", "-as", "mkisofs"])
@@ -1032,17 +1060,26 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn("-J", command)
         self.assertIn("-joliet-long", command)
         self.assertEqual(command[command.index("-iso-level") + 1], "3")
+        self.assertEqual(command[command.index("-partition_offset") + 1], "16")
         self.assertIn("--grub2-mbr", command)
         self.assertIn("boot_hybrid.img", command)
+        append_partition = command.index("-append_partition")
+        self.assertEqual(
+            command[append_partition + 1 : append_partition + 4],
+            ["2", "0xef", "efi.img"],
+        )
+        self.assertIn("-appended_part_as_gpt", command)
         self.assertIn("-b", command)
         self.assertEqual(command[command.index("-b") + 1], str(BIOS_ELTORITO_IMAGE))
         self.assertIn("-boot-info-table", command)
         self.assertIn("--grub2-boot-info", command)
         self.assertIn("-eltorito-alt-boot", command)
         self.assertIn("-e", command)
-        self.assertEqual(command[command.index("-e") + 1], str(EFI_BOOT_IMAGE))
+        self.assertEqual(
+            command[command.index("-e") + 1],
+            "--interval:appended_partition_2:all::",
+        )
         self.assertIn("-isohybrid-gpt-basdat", command)
-        self.assertNotIn("-append_partition", command)
         self.assertNotIn("-boot_image", command)
 
     def test_grub_mkimage_command_builds_i386_pc_core(self) -> None:
