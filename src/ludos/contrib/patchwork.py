@@ -178,15 +178,6 @@ def apply_patch(target: str, *, patchwork_dir: Path | None = None) -> int:
             f"{repo_dir}: '{patch_helpers.LUDOS_BRANCH}' is not based on "
             f"patch-sha '{patch_helpers.short_sha(resolved.patch_sha)}'"
         )
-    if (
-        patch_helpers.current_branch(repo_dir) == patch_helpers.LUDOS_BRANCH
-        and not patch_helpers.git_tree_clean(repo_dir)
-    ):
-        raise ConfigError(
-            f"{repo_dir}: '{patch_helpers.LUDOS_BRANCH}' has uncommitted changes. "
-            "Commit or clean them before updating the patch file."
-        )
-
     patch_file = patch_helpers.patch_file_path(
         resolved.card_source,
         resolved.source,

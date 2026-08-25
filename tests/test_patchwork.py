@@ -192,6 +192,25 @@ class PatchworkCommandTests(GitPatchworkTestCase):
         patch_text = (self.spec_dir / "overrides.patch").read_text(encoding="utf-8")
         self.assertIn("+named", patch_text)
 
+    def test_apply_ignores_uncommitted_changes(self) -> None:
+        checkout_patch(f"{self.card_path}:pkg", patchwork_dir=self.patchwork_dir)
+        repo = self.patchwork_dir / "pkg"
+
+        (repo / "hello.txt").write_text(
+            "hello\npatched\nuncommitted\n",
+            encoding="utf-8",
+        )
+
+        apply_patch(f"{self.card_path}:pkg", patchwork_dir=self.patchwork_dir)
+
+        patch_text = (self.spec_dir / "overrides.patch").read_text(encoding="utf-8")
+        self.assertIn("+patched", patch_text)
+        self.assertNotIn("+uncommitted", patch_text)
+        self.assertEqual(
+            (repo / "hello.txt").read_text(encoding="utf-8"),
+            "hello\npatched\nuncommitted\n",
+        )
+
 
 class PatchInitCommandTests(GitPatchworkTestCase):
     def setUp(self) -> None:
