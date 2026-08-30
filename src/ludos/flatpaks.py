@@ -1517,9 +1517,11 @@ def _export_lines(config: FlatpakConfig) -> list[str]:
     app_id = shlex.quote(config.app_id)
     return [
         f"app_id={app_id}",
-        "if [ -f \"/out/files/share/applications/$app_id.desktop\" ]; then",
+        "if [ -d /out/files/share/applications ]; then",
         "  mkdir -p /out/export/share/applications",
-        "  cp -a \"/out/files/share/applications/$app_id.desktop\" /out/export/share/applications/",
+        "  find /out/files/share/applications -maxdepth 1 -type f \\",
+        "    \\( -name \"$app_id.desktop\" -o -name \"$app_id.*.desktop\" -o -name \"$app_id-*.desktop\" \\) \\",
+        "    -exec cp -a -t /out/export/share/applications {} +",
         "fi",
         "for dir in appdata metainfo; do",
         "  if [ -d \"/out/files/share/$dir\" ]; then",
