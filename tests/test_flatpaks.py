@@ -1401,6 +1401,8 @@ postprocess: |
             containerfile,
         )
         self.assertIn("find /out/files/share/mime/packages -maxdepth 1 -type f -name \"$app_id*.xml\"", containerfile)
+        self.assertIn("for dir in kio/servicemenus plasma/kickeractions; do", containerfile)
+        self.assertIn('mkdir -p "/out/export/share/$dir"', containerfile)
         self.assertIn("for dir in dbus-1 gnome-shell krunner; do", containerfile)
         self.assertNotIn("FROM scratch", containerfile)
         self.assertEqual(labels["org.flatpak.ref"], "app/org.kde.kate/x86_64/f44")
@@ -1645,6 +1647,7 @@ specs:
         self.assertIn("-name \"$app_id.metainfo.xml\"", containerfile)
         self.assertIn("find /out/files/share/icons -type f -name \"$app_id.*\"", containerfile)
         self.assertIn("find /out/files/share/mime/packages -maxdepth 1 -type f -name \"$app_id*.xml\"", containerfile)
+        self.assertIn("for dir in kio/servicemenus plasma/kickeractions; do", containerfile)
         self.assertNotIn("for dir in mime dbus-1", containerfile)
 
     def test_flatpak_image_build_labels_with_buildah_squash_commit(
