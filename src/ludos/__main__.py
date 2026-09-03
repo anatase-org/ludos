@@ -143,6 +143,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Update only the selected flatpak from a manifest.",
     )
+    update_target.add_argument(
+        "--flatpaks",
+        action="store_true",
+        help="Update every flatpak declared by the manifest's flatpaks list.",
+    )
     update.add_argument(
         "--cache-dir",
         type=Path,
@@ -1243,6 +1248,7 @@ def update_command(args: argparse.Namespace) -> int:
         assume_yes=args.assume_yes,
         card=args.card,
         flatpak=args.flatpak,
+        flatpaks=args.flatpaks,
     )
 
 
