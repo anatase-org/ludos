@@ -37,6 +37,7 @@ from .build import (
 )
 from .common import (
     ResolvedManifestContext,
+    _oci_platform,
     resolve_manifest_context,
     _run_streamed_command,
 )
@@ -184,11 +185,13 @@ def build_flatpak(
     cache_only: bool = False,
     ccache: bool = True,
     force: bool = False,
+    arch: str | None = None,
 ) -> FlatpakBuildResult:
     context: ResolvedManifestContext | None = None
     try:
         context = resolve_manifest_context(
             manifest_path,
+            arch=arch,
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
@@ -212,11 +215,13 @@ def build_flatpaks(
     cache_only: bool = False,
     ccache: bool = True,
     force: bool = False,
+    arch: str | None = None,
 ) -> tuple[FlatpakBuildResult, ...]:
     context: ResolvedManifestContext | None = None
     try:
         context = resolve_manifest_context(
             manifest_path,
+            arch=arch,
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
@@ -576,6 +581,7 @@ def _ensure_flatpak_builders(
             package_dir=context.package_dir,
             rpm_files=builder_rpm_files,
             releasever=context.releasever,
+            arch=context.arch,
         )
 
 
@@ -673,6 +679,7 @@ def _ensure_flatpak_images(
             plan.output_image,
             plan.metadata,
             plan.card.flatpak.app_id,
+            arch=context.arch,
             flatpak_images=getattr(
                 context,
                 "flatpak_images",
@@ -848,6 +855,8 @@ def _orchestrator_dnf_base(context: ResolvedManifestContext) -> list[str]:
         context.podman,
         "run",
         "--rm",
+        "--platform",
+        _oci_platform(context.arch),
         "--volume",
         f"{context.root_dir / 'repos'}:/workspace/repos:ro",
         "--volume",
@@ -1569,6 +1578,7 @@ def _run_flatpak_image_build(
     metadata: str,
     app_id: str,
     *,
+    arch: str | None = None,
     flatpak_images: FlatpakImagesConfig = FlatpakImagesConfig(),
 ) -> None:
     containerfile = build_dir / "Containerfile"
@@ -1587,6 +1597,7 @@ def _run_flatpak_image_build(
             build_dir,
             build_stage_image,
             build_iidfile,
+            arch=arch,
         )
         returncode, _output = _run_streamed_command(
             command,
@@ -1636,6 +1647,7 @@ def _run_flatpak_image_build(
             final_containerfile,
             build_dir,
             final_iidfile,
+            arch=arch,
         )
         returncode, _output = _run_streamed_command(command)
         if returncode != 0:
@@ -1648,6 +1660,7 @@ def _run_flatpak_image_build(
             source_image=final_image_id,
             image=image,
             labels=labels,
+            arch=arch,
         )
     finally:
         if build_image_id:
@@ -1668,10 +1681,13 @@ def _flatpak_build_stage_command(
     build_dir: Path,
     image: str,
     iidfile: Path,
+    *,
+    arch: str | None = None,
 ) -> list[str]:
     return [
         podman,
         "build",
+        *(["--platform", _oci_platform(arch)] if arch else []),
         "--pull=false",
         "--tag",
         image,
@@ -1706,10 +1722,13 @@ def _flatpak_final_image_build_command(
     containerfile: Path,
     build_dir: Path,
     iidfile: Path,
+    *,
+    arch: str | None = None,
 ) -> list[str]:
     return [
         podman,
         "build",
+        *(["--platform", _oci_platform(arch)] if arch else []),
         "--pull=false",
         "--iidfile",
         str(iidfile),
@@ -1725,11 +1744,18 @@ def _label_flatpak_image(
     source_image: str,
     image: str,
     labels: tuple[tuple[str, str], ...],
+    arch: str | None = None,
 ) -> None:
     container = ""
     try:
         result = _run_buildah_flatpak_command(
-            [buildah, "from", "--quiet", source_image],
+            [
+                buildah,
+                "from",
+                "--quiet",
+                *(["--platform", _oci_platform(arch)] if arch else []),
+                source_image,
+            ],
             action="create label container",
             capture_stdout=True,
         )

@@ -80,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repository/package cache version to load. Defaults to the current UTC week's Monday as YYYYMMDD and creates missing cache images.",
     )
     build.add_argument(
+        "--arch",
+        default=None,
+        help="Target architecture to build. Defaults to the host architecture.",
+    )
+    build.add_argument(
         "--ci",
         action="store_true",
         help="Build the final image with combined package and postprocess layers.",
@@ -1137,6 +1142,7 @@ def build_command(args: argparse.Namespace) -> int:
         result = build_flatpak(
             manifest,
             args.flatpak,
+            arch=args.arch,
             cache_dir=args.cache_dir,
             cache_version=args.version,
             cache_only=args.cache,
@@ -1149,6 +1155,7 @@ def build_command(args: argparse.Namespace) -> int:
     if args.flatpaks:
         results = build_flatpaks(
             manifest,
+            arch=args.arch,
             cache_dir=args.cache_dir,
             cache_version=args.version,
             cache_only=args.cache,
@@ -1162,6 +1169,7 @@ def build_command(args: argparse.Namespace) -> int:
     for manifest in manifests:
         result = build_manifest(
             manifest,
+            arch=args.arch,
             cache_dir=args.cache_dir,
             cache_version=args.version,
             cache_only=args.cache,
@@ -1175,6 +1183,7 @@ def build_command(args: argparse.Namespace) -> int:
         for manifest in manifests:
             results = build_flatpaks(
                 manifest,
+                arch=args.arch,
                 cache_dir=args.cache_dir,
                 cache_version=args.version,
                 cache_only=args.cache,

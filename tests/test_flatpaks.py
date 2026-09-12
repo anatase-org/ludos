@@ -132,6 +132,8 @@ class FlatpakParserTests(unittest.TestCase):
                 "cache",
                 "--version",
                 "20260629",
+                "--arch",
+                "aarch64",
                 "--no-ccache",
                 "--force",
                 "anatase.yml",
@@ -153,6 +155,7 @@ class FlatpakParserTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         build.assert_called_once_with(
             Path("anatase.yml"),
+            arch="aarch64",
             cache_dir=Path("cache"),
             cache_version="20260629",
             cache_only=True,
@@ -798,6 +801,7 @@ specs:
             "localhost/flatpaks:f44-x86_64-kate",
             "[Application]\nname=org.anatase.TextEditor\n",
             "org.anatase.TextEditor",
+            arch="x86_64",
             flatpak_images=context.flatpak_images,
         )
         tag.assert_called_once_with(

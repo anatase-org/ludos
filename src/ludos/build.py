@@ -23,7 +23,10 @@ from typing import Callable, Iterator
 
 from .common import (
     ResolvedManifestContext,
+    _check_arch_runtime,
     _ensure_image as _ensure_cached_image,
+    _is_foreign_arch,
+    _oci_platform,
     _remote_cache_image,
     resolve_manifest_context,
 )
@@ -268,11 +271,13 @@ def build_manifest(
     ccache: bool = True,
     card: str | None = None,
     force: bool = False,
+    arch: str | None = None,
 ) -> BuildResult:
     metadata: tuple[ResolvedBuildMetadata, ...] = tuple()
     try:
         metadata = resolve_build_manifests(
             (manifest_path,),
+            arch=arch,
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
@@ -356,6 +361,7 @@ def resolve_build_manifests(
     ccache: bool = True,
     card: str | None = None,
     check_oci_cache: bool = False,
+    arch: str | None = None,
 ) -> tuple[ResolvedBuildMetadata, ...]:
     if not manifest_paths:
         raise ConfigError("at least one manifest is required")
@@ -366,6 +372,7 @@ def resolve_build_manifests(
         metadata = tuple(
             _resolve_manifest_metadata(
                 manifest_path,
+                arch=arch,
                 cache_dir=cache_dir,
                 cache_version=cache_version,
                 cache_only=cache_only,
@@ -391,6 +398,7 @@ def resolve_build_manifest_context(
     dnf_workspace_dirs: list[Path] | None = None,
     dnf_workspace_dir: Path | None = None,
     check_ci_cache: bool = False,
+    arch: str | None = None,
 ) -> ResolvedManifestContext:
     def image_exists(podman: str, image: str, ci_registry: str = "") -> bool:
         return _ensure_image(
@@ -403,6 +411,7 @@ def resolve_build_manifest_context(
 
     return resolve_manifest_context(
         manifest_path,
+        arch=arch,
         cache_dir=cache_dir,
         cache_version=cache_version,
         cache_only=cache_only,
@@ -470,12 +479,14 @@ def _resolve_manifest_metadata(
     context: ResolvedManifestContext | None = None,
     workers: int = 1,
     check_oci_cache: bool = False,
+    arch: str | None = None,
 ) -> ResolvedBuildMetadata:
     if workers < 1:
         raise ConfigError("workers must be a positive integer")
     if context is None:
         context = resolve_build_manifest_context(
             manifest_path,
+            arch=arch,
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
@@ -742,6 +753,8 @@ def _resolve_manifest_metadata(
         podman,
         "run",
         "--rm",
+        "--platform",
+        _oci_platform(arch),
         "--volume",
         f"{root_dir / 'repos'}:/workspace/repos:ro",
         "--volume",
@@ -1312,6 +1325,7 @@ def build_package_card_images(
                 image=plan.image,
                 package_dir=Path(manifest.package_dir),
                 rpm_files=rpm_files,
+                arch=manifest.arch,
             )
             created.add(plan.image)
 
@@ -1378,6 +1392,7 @@ def _prepare_builder_image(
         package_dir=Path(manifest.package_dir),
         rpm_files=builder_rpm_files,
         releasever=manifest.releasever,
+        arch=manifest.arch,
     )
 
 
@@ -1487,6 +1502,7 @@ def build_build_images(
                     card_source=card_sources[plan.block],
                     card_env=card_env,
                     build_script=card_builds[plan.block],
+                    arch=manifest.arch,
                 )
             if not build_output.rpm_files and build_output.file_count == 0:
                 log(f"No build outputs found for card: {plan.block}")
@@ -1659,6 +1675,8 @@ def _build_final_manifest_image(
         [
             metadata.podman,
             "build",
+            "--platform",
+            _oci_platform(metadata.arch),
             "--layers",
             "--pull=missing",
             *(
@@ -2909,10 +2927,16 @@ def _create_orchestrator_image(
     source: str,
     image: str,
     packages: tuple[str, ...],
+    arch: str | None = None,
 ) -> None:
-    returncode, _output = _run_streamed_command([podman, "pull", source])
+    platform_args = ["--platform", _oci_platform(arch)] if arch else []
+    returncode, _output = _run_streamed_command(
+        [podman, "pull", *platform_args, source]
+    )
     if returncode != 0:
         raise ConfigError(f"failed to pull orchestrator image: {source}")
+    if arch and _is_foreign_arch(arch):
+        _check_arch_runtime(podman, source, arch)
 
     if not packages:
         subprocess.run([podman, "tag", source, image], check=True)
@@ -2922,6 +2946,9 @@ def _create_orchestrator_image(
     package_args = " ".join(shlex.quote(package) for package in packages)
     buildah = _require_buildah(buildah)
     buildah_command = shlex.quote(buildah)
+    from_command = _shell_command(
+        [buildah, "from", "--quiet", *platform_args, source]
+    )
     script = "\n".join(
         [
             "set -eu",
@@ -2934,7 +2961,7 @@ def _create_orchestrator_image(
             f"{buildah_command} rm \"$container\" >/dev/null 2>&1 || true; fi",
             "}",
             "trap cleanup EXIT INT TERM",
-            f"container=$({buildah_command} from --quiet {shlex.quote(source)})",
+            f"container=$({from_command})",
             f"mount_path=$({buildah_command} mount \"$container\")",
             "mounted=1",
             _shell_command(
@@ -2942,6 +2969,7 @@ def _create_orchestrator_image(
                     podman,
                     "run",
                     "--rm",
+                    *platform_args,
                     "--volume",
                     "$mount_path:/target",
                     source,
@@ -3017,8 +3045,10 @@ def _create_builder_image(
     package_dir: Path,
     rpm_files: tuple[str, ...],
     releasever: str,
+    arch: str | None = None,
     quiet: bool = False,
 ) -> None:
+    platform_args = ["--platform", _oci_platform(arch)] if arch else []
     rpm_copy_lines = _copy_files_to_shell_dir_lines(
         (_cached_rpm_path(package_dir, rpm_file) for rpm_file in rpm_files),
         "$rpm_dir",
@@ -3033,6 +3063,7 @@ def _create_builder_image(
                 podman,
                 "run",
                 "--rm",
+                *platform_args,
                 "--volume",
                 f"{root_dir / 'repos'}:/workspace/repos:ro",
                 "--volume",
@@ -3071,7 +3102,13 @@ def _create_builder_image(
         'rm -rf "$mount_path/var/cache/dnf" "$mount_path/var/cache/libdnf5"',
         'find "$mount_path/var/log" -maxdepth 1 -name "dnf*" -exec rm -rf {} + 2>/dev/null || true',
     ]
-    _create_scratch_image(buildah=buildah, image=image, body=body, quiet=quiet)
+    _create_scratch_image(
+        buildah=buildah,
+        image=image,
+        body=body,
+        arch=arch,
+        quiet=quiet,
+    )
 
 
 def _create_repo_image(
@@ -3084,7 +3121,9 @@ def _create_repo_image(
     repo_name: str,
     repo_id: str,
     rendered_repo: str,
+    arch: str | None = None,
 ) -> None:
+    platform_args = ["--platform", _oci_platform(arch)] if arch else []
     body = [
         'mkdir -p "$mount_path/repos" "$mount_path/cache" "$mount_path/persist"',
         f"printf %s {shlex.quote(rendered_repo)} > \"$mount_path/repos/{shlex.quote(repo_name)}\"",
@@ -3095,6 +3134,7 @@ def _create_repo_image(
                 podman,
                 "run",
                 "--rm",
+                *platform_args,
                 "--volume",
                 f"{root_dir / 'repos'}:/workspace/repos:ro",
                 "--volume",
@@ -3121,7 +3161,7 @@ def _create_repo_image(
             ],
         ),
     ]
-    _create_scratch_image(buildah=buildah, image=image, body=body)
+    _create_scratch_image(buildah=buildah, image=image, body=body, arch=arch)
 
 
 def _extract_image_paths(
@@ -3459,6 +3499,7 @@ def _create_package_image(
     package_dir: Path,
     rpm_files: tuple[str, ...],
     files_dir: Path | None = None,
+    arch: str | None = None,
 ) -> None:
     body = ['mkdir -p "$mount_path/rpms" "$mount_path/files"']
     body.extend(
@@ -3470,7 +3511,7 @@ def _create_package_image(
     if files_dir is not None and files_dir.exists():
         body.extend(_copy_tree_to_shell_dir_lines(files_dir, "$mount_path/files"))
 
-    _create_scratch_image(buildah=buildah, image=image, body=body)
+    _create_scratch_image(buildah=buildah, image=image, body=body, arch=arch)
 
 
 def _copy_files_to_shell_dir_lines(
@@ -3512,9 +3553,14 @@ def _create_scratch_image(
     buildah: str,
     image: str,
     body: list[str],
+    arch: str | None = None,
     quiet: bool = False,
 ) -> None:
     buildah_command = shlex.quote(buildah)
+    platform_args = ["--platform", _oci_platform(arch)] if arch else []
+    from_command = _shell_command(
+        [buildah, "from", "--quiet", *platform_args, "scratch"]
+    )
     script = "\n".join(
         [
             "set -eu",
@@ -3529,7 +3575,7 @@ def _create_scratch_image(
             '  if [ -n "$cleanup_dirs" ]; then rm -rf $cleanup_dirs; fi',
             "}",
             "trap cleanup EXIT INT TERM",
-            f"container=$({buildah_command} from --quiet scratch)",
+            f"container=$({from_command})",
             f"mount_path=$({buildah_command} mount \"$container\")",
             "mounted=1",
             *body,
@@ -3629,6 +3675,7 @@ def _build_card_output_image(
     card_source: Path,
     card_env: dict[str, str],
     build_script: str,
+    arch: str,
 ) -> CardBuildOutput:
     card_base_dir = _card_base_dir(card_source)
     workspace_dir = build_dir / "workspace"
@@ -3660,6 +3707,7 @@ def _build_card_output_image(
         podman_cache_dir=podman_cache_dir,
         source_dir=card_base_dir,
         workspace_dir=workspace_dir,
+        arch=arch,
     )
 
     rpm_files, has_files = _output_metadata_in_image(podman, image)
@@ -3744,6 +3792,7 @@ def _build_specs_output_image(
             prepare_script=prepare_script,
             card_source=card_source,
             card_name=card_name,
+            arch=arch,
         )
         if prepared_env:
             card_env.update(prepared_env)
@@ -3772,6 +3821,7 @@ def _build_specs_output_image(
         source_dir=_card_base_dir(card_source),
         workspace_dir=workspace_dir,
         auth_secret=auth_secret,
+        arch=arch,
     )
 
     rpm_files, has_files = _output_metadata_in_image(podman, image)
@@ -3985,11 +4035,13 @@ def _run_build_output_image_build(
     workspace_dir: Path,
     podman_cache_dir: Path | None = None,
     auth_secret: str = "",
+    arch: str | None = None,
 ) -> None:
     containerfile = build_dir / "Containerfile"
     command = [
         podman,
         "build",
+        *(["--platform", _oci_platform(arch)] if arch else []),
         "--layers",
         "--pull=false",
         "--cap-add",
@@ -4069,6 +4121,7 @@ def _run_specs_prepare(
     prepare_script: str,
     card_source: Path,
     card_name: str,
+    arch: str,
 ) -> dict[str, str]:
     env_file = workspace_dir / ".ludos-env"
     env_file.unlink(missing_ok=True)
@@ -4076,6 +4129,8 @@ def _run_specs_prepare(
         podman,
         "run",
         "--rm",
+        "--platform",
+        _oci_platform(arch),
         "--interactive",
         "--volume",
         f"{workspace_dir}:/workspace",

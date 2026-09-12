@@ -8,6 +8,24 @@ from ludos.model import ConfigError
 
 
 class BuildOrchestratorImageTests(unittest.TestCase):
+    def test_scratch_image_uses_target_platform(self) -> None:
+        with patch(
+            "ludos.build._run_streamed_command",
+            return_value=(0, ""),
+        ) as stream:
+            _create_scratch_image(
+                buildah="buildah",
+                image="localhost/packages:f44-aarch64",
+                body=[],
+                arch="aarch64",
+            )
+
+        script = stream.call_args.kwargs["input_text"]
+        self.assertIn(
+            "buildah from --quiet --platform linux/arm64 scratch",
+            script,
+        )
+
     def test_quiet_scratch_build_reports_captured_failure_output(self) -> None:
         with patch(
             "ludos.build._run_streamed_command",
@@ -50,6 +68,29 @@ class BuildOrchestratorImageTests(unittest.TestCase):
                 call(["podman", "tag", image, "localhost/orchestrator:latest"], check=True),
             ],
         )
+
+    def test_foreign_orchestrator_uses_target_platform(self) -> None:
+        source = "quay.io/fedora/fedora:42"
+        image = "localhost/orchestrator:f42-aarch64"
+
+        with (
+            patch("ludos.build._run_streamed_command", return_value=(0, "")) as stream,
+            patch("ludos.build.subprocess.run"),
+            patch("ludos.build._check_arch_runtime") as check_runtime,
+        ):
+            _create_orchestrator_image(
+                podman="podman",
+                buildah=None,
+                source=source,
+                image=image,
+                packages=(),
+                arch="aarch64",
+            )
+
+        stream.assert_called_once_with(
+            ["podman", "pull", "--platform", "linux/arm64", source]
+        )
+        check_runtime.assert_called_once_with("podman", source, "aarch64")
 
     def test_tags_latest_after_building_orchestrator_with_dependencies(self) -> None:
         source = "quay.io/fedora/fedora:42"

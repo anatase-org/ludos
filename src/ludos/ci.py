@@ -1481,6 +1481,7 @@ def _create_seed_package_image(
         image=image,
         package_dir=Path(manifest.package_dir),
         rpm_files=rpm_files,
+        arch=manifest.arch,
     )
 
 
@@ -1502,6 +1503,7 @@ def _create_seed_builder_image(
         package_dir=Path(manifest.package_dir),
         rpm_files=rpm_files,
         releasever=manifest.releasever,
+        arch=manifest.arch,
         quiet=True,
     )
 

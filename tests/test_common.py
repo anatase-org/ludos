@@ -8,6 +8,7 @@ from unittest.mock import call, patch
 
 import ludos.common as common
 from ludos.common import (
+    _check_arch_runtime,
     _default_cache_version,
     _create_repo_image,
     _ensure_image,
@@ -35,6 +36,39 @@ class RepoImageTests(unittest.TestCase):
         self.assertIn("--setopt=cachedir=/ludos/dnf/cache", body)
         self.assertIn("--setopt=system_cachedir=/ludos/dnf/cache", body)
         self.assertIn("makecache --refresh", body)
+
+
+class ArchitectureRuntimeTests(unittest.TestCase):
+    def test_qemu_probe_uses_target_platform(self) -> None:
+        with patch(
+            "ludos.common._run_streamed_command",
+            return_value=(0, ""),
+        ) as run:
+            _check_arch_runtime("podman", "orchestrator:f44-aarch64", "aarch64")
+
+        run.assert_called_once_with(
+            [
+                "podman",
+                "run",
+                "--rm",
+                "--platform",
+                "linux/arm64",
+                "orchestrator:f44-aarch64",
+                "/bin/true",
+            ]
+        )
+
+    def test_qemu_probe_reports_missing_binfmt_handler(self) -> None:
+        with patch(
+            "ludos.common._run_streamed_command",
+            return_value=(126, "exec format error"),
+        ):
+            with self.assertRaisesRegex(ConfigError, "qemu-user-static"):
+                _check_arch_runtime(
+                    "podman",
+                    "orchestrator:f44-aarch64",
+                    "aarch64",
+                )
 
 
 class DefaultCacheVersionTests(unittest.TestCase):

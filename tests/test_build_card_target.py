@@ -1019,9 +1019,11 @@ class TargetCardBuildTests(unittest.TestCase):
             result = resolve_build_manifest_context(
                 self.manifest,
                 check_ci_cache=True,
+                arch="aarch64",
             )
 
         self.assertIs(result, context)
+        self.assertEqual(resolve.call_args.kwargs["arch"], "aarch64")
         image_exists = resolve.call_args.kwargs["image_exists"]
         with patch("ludos.build._ensure_image", return_value=True) as ensure:
             self.assertTrue(

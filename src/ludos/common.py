@@ -5,6 +5,7 @@ import datetime as _datetime
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -49,6 +50,32 @@ _REGISTRY_TRANSIENT_STATUSES = frozenset({0, 408, 425, 429})
 _registry_bearer_tokens: dict[tuple[str, str], str] = {}
 _registry_bearer_token_locks: dict[tuple[str, str], threading.Lock] = {}
 _registry_bearer_tokens_lock = threading.Lock()
+
+_ARCH_ALIASES = {
+    "amd64": "x86_64",
+    "arm64": "aarch64",
+}
+_OCI_ARCHES = {
+    "aarch64": "arm64",
+    "armv7hl": "arm/v7",
+    "x86_64": "amd64",
+}
+
+
+def _normalize_arch(value: str) -> str:
+    arch = value.strip().lower()
+    if not arch:
+        raise ConfigError("architecture must not be empty")
+    return _ARCH_ALIASES.get(arch, arch)
+
+
+def _oci_platform(arch: str) -> str:
+    normalized = _normalize_arch(arch)
+    return f"linux/{_OCI_ARCHES.get(normalized, normalized)}"
+
+
+def _is_foreign_arch(arch: str) -> bool:
+    return _normalize_arch(arch) != _normalize_arch(platform.machine())
 
 
 @dataclass(frozen=True)
@@ -103,6 +130,7 @@ def resolve_manifest_context(
     extract_image_paths=None,
     apply_repo_priority=None,
     require_buildah=None,
+    arch: str | None = None,
 ) -> ResolvedManifestContext:
     image_exists = image_exists or _ensure_image
     create_orchestrator_image = create_orchestrator_image or _create_orchestrator_image
@@ -131,6 +159,8 @@ def resolve_manifest_context(
         key: str(value) for key, value in validation.manifest.env.items()
     }
     local_values = _load_dotenv(root_dir / ".env")
+    if arch is not None:
+        local_values["arch"] = _normalize_arch(arch)
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
     local_prefix = _local_prefix(local_prefix)
     if cache_version is None:
@@ -221,7 +251,13 @@ def resolve_manifest_context(
 
     orchestrator_image = _local_image(local_prefix, "orchestrator", orchestrator_tag)
     ci_registry = project_config.ci.registry
-    if _call_image_exists(image_exists, podman, orchestrator_image, ci_registry):
+    reuse_orchestrator = _call_image_exists(
+        image_exists,
+        podman,
+        orchestrator_image,
+        ci_registry,
+    )
+    if reuse_orchestrator:
         log(f"Reusing orchestrator image: {orchestrator_image}")
     elif cache_only:
         raise ConfigError(f"orchestrator image is not cached: {orchestrator_image}")
@@ -233,8 +269,11 @@ def resolve_manifest_context(
             source=orchestrator_source,
             image=orchestrator_image,
             packages=_build_deps(orchestrator_deps),
+            arch=arch,
         )
     orchestrator = orchestrator_image
+    if reuse_orchestrator and _is_foreign_arch(arch):
+        _check_arch_runtime(podman, orchestrator, arch)
 
     log(f"Using DNF metadata workspace: {dnf_workspace_dir}")
     repo_images = []
@@ -286,6 +325,7 @@ def resolve_manifest_context(
             repo_name=repo.source.name,
             repo_id=repo_id,
             rendered_repo=rendered_repo,
+            arch=arch,
         )
         log(f"Extracting repository metadata: {repo.ref.repo}")
         extract_image_paths(
@@ -718,10 +758,16 @@ def _create_orchestrator_image(
     source: str,
     image: str,
     packages: tuple[str, ...],
+    arch: str | None = None,
 ) -> None:
-    returncode, _output = _run_streamed_command([podman, "pull", source])
+    platform_args = ["--platform", _oci_platform(arch)] if arch else []
+    returncode, _output = _run_streamed_command(
+        [podman, "pull", *platform_args, source]
+    )
     if returncode != 0:
         raise ConfigError(f"failed to pull orchestrator image: {source}")
+    if arch and _is_foreign_arch(arch):
+        _check_arch_runtime(podman, source, arch)
 
     if not packages:
         subprocess.run([podman, "tag", source, image], check=True)
@@ -731,6 +777,9 @@ def _create_orchestrator_image(
     package_args = " ".join(shlex.quote(package) for package in packages)
     buildah = _require_buildah(buildah)
     buildah_command = shlex.quote(buildah)
+    from_command = _shell_command(
+        [buildah, "from", "--quiet", *platform_args, source]
+    )
     script = "\n".join(
         [
             "set -eu",
@@ -743,7 +792,7 @@ def _create_orchestrator_image(
             f"{buildah_command} rm \"$container\" >/dev/null 2>&1 || true; fi",
             "}",
             "trap cleanup EXIT INT TERM",
-            f"container=$({buildah_command} from --quiet {shlex.quote(source)})",
+            f"container=$({from_command})",
             f"mount_path=$({buildah_command} mount \"$container\")",
             "mounted=1",
             _shell_command(
@@ -751,6 +800,7 @@ def _create_orchestrator_image(
                     podman,
                     "run",
                     "--rm",
+                    *platform_args,
                     "--volume",
                     "$mount_path:/target",
                     source,
@@ -786,6 +836,27 @@ def _create_orchestrator_image(
     subprocess.run([podman, "tag", image, _latest_image(image)], check=True)
 
 
+def _check_arch_runtime(podman: str, image: str, arch: str) -> None:
+    target_platform = _oci_platform(arch)
+    log(f"Checking {target_platform} execution through QEMU")
+    returncode, _output = _run_streamed_command(
+        [
+            podman,
+            "run",
+            "--rm",
+            "--platform",
+            target_platform,
+            image,
+            "/bin/true",
+        ]
+    )
+    if returncode != 0:
+        raise ConfigError(
+            f"cannot execute {target_platform} containers; install and enable "
+            "the matching qemu-user-static binfmt handler"
+        )
+
+
 def _repo_id(rendered_repo: str, source: Path) -> str:
     for line in rendered_repo.splitlines():
         match = re.fullmatch(r"\[([^]]+)]", line.strip())
@@ -818,7 +889,9 @@ def _create_repo_image(
     repo_name: str,
     repo_id: str,
     rendered_repo: str,
+    arch: str | None = None,
 ) -> None:
+    platform_args = ["--platform", _oci_platform(arch)] if arch else []
     body = [
         'mkdir -p "$mount_path/repos" "$mount_path/cache" "$mount_path/persist"',
         f"printf %s {shlex.quote(rendered_repo)} > \"$mount_path/repos/{shlex.quote(repo_name)}\"",
@@ -829,6 +902,7 @@ def _create_repo_image(
                 podman,
                 "run",
                 "--rm",
+                *platform_args,
                 "--volume",
                 f"{root_dir / 'repos'}:/workspace/repos:ro",
                 "--volume",
@@ -855,7 +929,7 @@ def _create_repo_image(
             ],
         ),
     ]
-    _create_scratch_image(buildah=buildah, image=image, body=body)
+    _create_scratch_image(buildah=buildah, image=image, body=body, arch=arch)
 
 
 def _extract_image_paths(
@@ -893,8 +967,18 @@ def _shell_arg(value: str) -> str:
     return shlex.quote(value)
 
 
-def _create_scratch_image(*, buildah: str, image: str, body: list[str]) -> None:
+def _create_scratch_image(
+    *,
+    buildah: str,
+    image: str,
+    body: list[str],
+    arch: str | None = None,
+) -> None:
     buildah_command = shlex.quote(buildah)
+    platform_args = ["--platform", _oci_platform(arch)] if arch else []
+    from_command = _shell_command(
+        [buildah, "from", "--quiet", *platform_args, "scratch"]
+    )
     script = "\n".join(
         [
             "set -eu",
@@ -909,7 +993,7 @@ def _create_scratch_image(*, buildah: str, image: str, body: list[str]) -> None:
             '  if [ -n "$cleanup_dirs" ]; then rm -rf $cleanup_dirs; fi',
             "}",
             "trap cleanup EXIT INT TERM",
-            f"container=$({buildah_command} from --quiet scratch)",
+            f"container=$({from_command})",
             f"mount_path=$({buildah_command} mount \"$container\")",
             "mounted=1",
             *body,
