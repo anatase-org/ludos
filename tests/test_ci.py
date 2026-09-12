@@ -25,6 +25,7 @@ from ludos.ci import (
     DEFAULT_PREPARE_WORKERS,
     SeedDiskSpaceError,
     _ci_remote_image_exists,
+    _ci_output_is_current,
     _build_ci_package,
     _build_ci_manifest_image,
     _build_ci_flatpak,
@@ -828,6 +829,31 @@ class CiEnvTests(unittest.TestCase):
 
 
 class PrepareCiTests(unittest.TestCase):
+    def test_failed_previous_output_inspection_rebuilds_image(self) -> None:
+        with (
+            patch("ludos.ci._remote_cache_image_exists", return_value=True),
+            patch(
+                "ludos.ci._inspect_remote_labels",
+                side_effect=ConfigError("failed to inspect remote OCI image"),
+            ),
+            patch("ludos.ci.warning") as warning,
+            patch("ludos.ci.log") as log,
+        ):
+            current = _ci_output_is_current(
+                image="images:anatase-f44-aarch64",
+                podman="podman",
+                ci_registry="i.anatase.org",
+                published_ref="i.anatase.org/anatase:testing",
+            )
+
+        self.assertFalse(current)
+        warning.assert_called_once_with(
+            "Could not inspect previous OCI image "
+            "i.anatase.org/anatase:testing; rebuilding: "
+            "failed to inspect remote OCI image"
+        )
+        log.assert_called_once_with("Creating images:anatase-f44-aarch64 Image")
+
     def test_remote_image_exists_uses_shared_registry_check(self) -> None:
         with patch("ludos.ci._remote_cache_image_exists", return_value=True) as remote:
             exists = _ci_remote_image_exists(

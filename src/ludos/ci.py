@@ -63,7 +63,7 @@ from .flatpaks import (
     _ensure_flatpak_rpm_builds,
     plan_manifest_flatpaks_with_context,
 )
-from .logging import log
+from .logging import log, warning
 from .model import ConfigError, FlatpakImagesConfig, Manifest, _spec_builds_tuple
 from .upload.flatpaks import (
     finish_flatpak_promotions,
@@ -2053,8 +2053,16 @@ def _ci_output_is_current(
     if published_ref:
         exists = _remote_cache_image_exists(published_ref)
         if exists:
-            labels = _inspect_remote_labels(published_ref)
-            exists = labels.get(LUDOS_TAG_LABEL) == _image_tag(image)
+            try:
+                labels = _inspect_remote_labels(published_ref)
+            except ConfigError as exc:
+                warning(
+                    f"Could not inspect previous OCI image {published_ref}; "
+                    f"rebuilding: {exc}"
+                )
+                exists = False
+            else:
+                exists = labels.get(LUDOS_TAG_LABEL) == _image_tag(image)
         action = "Reusing" if exists else "Creating"
         log(f"{action} {image} Image")
         return exists
