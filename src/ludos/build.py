@@ -4926,7 +4926,6 @@ def _specs_build_script(
                 '      cp -f "$topdir/SOURCES/$source_name" "$spec_source_cache/$source_name"',
                 "    elif [ ! -f \"$spec_source_cache/$source_name\" ]; then",
                 "      missing_sources=1",
-                "      break",
                 "    fi",
                 "  done < \"$topdir/sources.list\"",
                 "  if [ \"$missing_sources\" -eq 1 ]; then",

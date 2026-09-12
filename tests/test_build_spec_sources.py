@@ -848,7 +848,7 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         self.assertIn('cp -f -t "$topdir/SOURCES"', script)
         self.assertNotIn('cp -n -t "$topdir/SOURCES"', script)
 
-    def test_vendored_remote_source_seeds_cache_before_download(self) -> None:
+    def test_vendored_source_is_seeded_after_earlier_missing_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace_dir = root / "workspace"
@@ -873,15 +873,21 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
             bin_dir = root / "bin"
             bin_dir.mkdir()
             download_called = root / "spectool-download-called"
+            patch_downloaded = root / "patch-downloaded"
             spectool = bin_dir / "spectool"
             spectool.write_text(
                 "\n".join(
                     (
                         "#!/bin/sh",
                         'if [ "$1" = -l ]; then',
+                        "  echo 'Source0: https://example.invalid/missing.tar.gz'",
                         "  echo 'Patch0: https://example.invalid/170.patch'",
                         "else",
                         '  touch "$SPECTOOL_DOWNLOAD_CALLED"',
+                        '  if [ ! -f "$3/170.patch" ]; then',
+                        '    touch "$PATCH_DOWNLOADED"',
+                        "  fi",
+                        '  printf "downloaded source\\n" > "$3/missing.tar.gz"',
                         "fi",
                         "exit 0",
                         "",
@@ -896,6 +902,7 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
             env = dict(os.environ)
             env["PATH"] = f"{bin_dir}:{env['PATH']}"
             env["SPECTOOL_DOWNLOAD_CALLED"] = str(download_called)
+            env["PATCH_DOWNLOADED"] = str(patch_downloaded)
 
             result = subprocess.run(
                 ["/bin/bash"],
@@ -906,7 +913,8 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 23)
-            self.assertFalse(download_called.exists())
+            self.assertTrue(download_called.exists())
+            self.assertFalse(patch_downloaded.exists())
             self.assertEqual(
                 (source_cache / "plasma_login_manager" / "170.patch").read_text(
                     encoding="utf-8"
