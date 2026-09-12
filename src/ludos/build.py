@@ -3237,6 +3237,16 @@ def _run_cached_transaction_preview(
     repo_images: tuple[str, ...],
     extra_hash_inputs: tuple[tuple[str, str], ...] = tuple(),
 ) -> subprocess.CompletedProcess[str]:
+    def is_cacheable(preview: subprocess.CompletedProcess[str]) -> bool:
+        if preview.returncode == 0:
+            return True
+        output = preview.stdout + "\n" + preview.stderr
+        return (
+            preview.returncode == 1
+            and "Operation aborted by the user." in output
+            and bool(_parse_resolved_package_entries(output, include_dependencies=True))
+        )
+
     repo_shas = tuple(
         _inspect_local_oci_image(cmd[0], image, source=Path(image)).digest
         for image in repo_images
@@ -3246,13 +3256,14 @@ def _run_cached_transaction_preview(
     cache_file = resolve_cache_dir / f"{cache_key}.json"
     if cache_file.exists():
         data = json.loads(cache_file.read_text(encoding="utf-8"))
-        if int(data["returncode"]) == 0:
-            return subprocess.CompletedProcess(
-                args=data.get("args", cmd),
-                returncode=0,
-                stdout=str(data.get("stdout", "")),
-                stderr=str(data.get("stderr", "")),
-            )
+        cached = subprocess.CompletedProcess(
+            args=data.get("args", cmd),
+            returncode=int(data["returncode"]),
+            stdout=str(data.get("stdout", "")),
+            stderr=str(data.get("stderr", "")),
+        )
+        if is_cacheable(cached):
+            return cached
         # Older versions cached failures, including container startup errors.
         cache_file.unlink(missing_ok=True)
 
@@ -3262,7 +3273,7 @@ def _run_cached_transaction_preview(
         text=True,
         capture_output=True,
     )
-    if transaction_preview.returncode != 0:
+    if not is_cacheable(transaction_preview):
         return transaction_preview
     resolve_cache_dir.mkdir(parents=True, exist_ok=True)
     payload = {

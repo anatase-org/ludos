@@ -11,6 +11,57 @@ from ludos.build import _resolve_cache_key, _run_cached_transaction_preview
 
 
 class ResolveCacheTests(unittest.TestCase):
+    def test_valid_aborted_preview_is_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp) / "resolves"
+            cmd = ["podman", "run", "orchestrator", "dnf5"]
+            preview = subprocess.CompletedProcess(
+                cmd,
+                1,
+                """Installing:
+ Package  Arch    Version       Repository  Size
+ bash     x86_64  0:5.3-2.fc44  fedora      1 MiB
+
+Transaction Summary:
+ Installing: 1 package
+""",
+                "Operation aborted by the user.\n",
+            )
+            with patch("ludos.build.subprocess.run", return_value=preview) as run:
+                first = _run_cached_transaction_preview(
+                    cmd,
+                    cache,
+                    (),
+                )
+                second = _run_cached_transaction_preview(
+                    cmd,
+                    cache,
+                    (),
+                )
+            self.assertEqual(first.returncode, 1)
+            self.assertEqual(second.stdout, preview.stdout)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(len(tuple(cache.glob("*.json"))), 1)
+
+    def test_invalid_aborted_preview_is_not_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp) / "resolves"
+            cmd = ["podman", "run", "orchestrator", "dnf5"]
+            failure = subprocess.CompletedProcess(
+                cmd,
+                1,
+                "",
+                "Operation aborted by the user.\n",
+            )
+            with patch("ludos.build.subprocess.run", return_value=failure):
+                result = _run_cached_transaction_preview(
+                    cmd,
+                    cache,
+                    (),
+                )
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(cache.exists())
+
     def test_failed_preview_is_retried_and_success_is_cached(self) -> None:
         for returncode in (1, 125, 126, 127, -15):
             with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as temp:
