@@ -831,6 +831,11 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         self.assertIn('spec_source_cache="$source_cache/scx_tools"', script)
         self.assertIn('spec_source_cache="$source_cache/scx_scheds"', script)
         self.assertIn('[ ! -f "$spec_source_cache/$source_name" ]', script)
+        self.assertIn('[ -f "$topdir/SOURCES/$source_name" ]', script)
+        self.assertIn(
+            'cp -f "$topdir/SOURCES/$source_name" "$spec_source_cache/$source_name"',
+            script,
+        )
         self.assertIn(
             'spectool -g -C "$spec_source_cache" "$topdir/SPECS/scx-tools.spec" '
             '2>&1 | tee "$topdir/spectool-download.log"',
@@ -842,6 +847,72 @@ class SpecBuildRequiresResolutionTests(unittest.TestCase):
         )
         self.assertIn('cp -f -t "$topdir/SOURCES"', script)
         self.assertNotIn('cp -n -t "$topdir/SOURCES"', script)
+
+    def test_vendored_remote_source_seeds_cache_before_download(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace_dir = root / "workspace"
+            workspace_dir.mkdir()
+            spec_path = workspace_dir / "plasma-login-manager.spec"
+            spec_path.write_text("Name: plasma-login-manager\n", encoding="utf-8")
+            vendored_patch = workspace_dir / "170.patch"
+            vendored_patch.write_text("vendored patch\n", encoding="utf-8")
+            staged_specs = (
+                StagedSpec(
+                    spec=SpecBuild(spec=spec_path.name),
+                    spec_path=spec_path,
+                    source_dir=workspace_dir,
+                    packages=("plasma-login-manager",),
+                    targets=("x86_64",),
+                ),
+            )
+            script = _specs_build_script(staged_specs, workspace_dir, "x86_64")
+            script = script.replace("/workspace", str(workspace_dir))
+            source_cache = root / "source-cache"
+            script = script.replace("/cache/artifacts/sources", str(source_cache))
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            download_called = root / "spectool-download-called"
+            spectool = bin_dir / "spectool"
+            spectool.write_text(
+                "\n".join(
+                    (
+                        "#!/bin/sh",
+                        'if [ "$1" = -l ]; then',
+                        "  echo 'Patch0: https://example.invalid/170.patch'",
+                        "else",
+                        '  touch "$SPECTOOL_DOWNLOAD_CALLED"',
+                        "fi",
+                        "exit 0",
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            spectool.chmod(0o755)
+            rpmbuild = bin_dir / "rpmbuild"
+            rpmbuild.write_text("#!/bin/sh\nexit 23\n", encoding="utf-8")
+            rpmbuild.chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["SPECTOOL_DOWNLOAD_CALLED"] = str(download_called)
+
+            result = subprocess.run(
+                ["/bin/bash"],
+                input=script,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 23)
+            self.assertFalse(download_called.exists())
+            self.assertEqual(
+                (source_cache / "plasma_login_manager" / "170.patch").read_text(
+                    encoding="utf-8"
+                ),
+                "vendored patch\n",
+            )
 
     def test_failed_spectool_download_stops_before_rpmbuild(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
