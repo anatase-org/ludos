@@ -428,7 +428,7 @@ def _resolve_flatpak_upload_context(
 ) -> FlatpakUploadContext:
     manifest_path = manifest.expanduser().resolve()
     log(f"Validating manifest: {manifest}")
-    validation = validate_manifest(manifest_path)
+    validation = validate_manifest(manifest_path, arch=arch)
     if validation.missing_bootstrap:
         raise ConfigError(
             f"{manifest}: missing bootstrap card: {validation.missing_bootstrap}"

@@ -235,6 +235,33 @@ class FlatpakParserTests(unittest.TestCase):
 
         self.assertEqual(manifest.flatpaks, ("flatpaks/kate",))
 
+    def test_manifest_parser_filters_flatpaks_by_arch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_path = self._write_manifest(
+                root,
+                flatpaks=("flatpaks/kate",),
+            )
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace(
+                    "  - flatpaks/kate\n",
+                    "  - flatpaks/kate\n"
+                    "  - x86_64:\n"
+                    "      - flatpaks/browser\n"
+                    "      - flatpaks/adblocker\n",
+                ),
+                encoding="utf-8",
+            )
+
+            x86_manifest = Manifest.from_file(manifest_path, arch="x86_64")
+            arm_manifest = Manifest.from_file(manifest_path, arch="aarch64")
+
+        self.assertEqual(
+            x86_manifest.flatpaks,
+            ("flatpaks/kate", "flatpaks/browser", "flatpaks/adblocker"),
+        )
+        self.assertEqual(arm_manifest.flatpaks, ("flatpaks/kate",))
+
     def test_manifest_parser_accepts_runtime_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             manifest_path = self._write_manifest(

@@ -210,13 +210,15 @@ class Manifest:
     source: Path | None = None
 
     @classmethod
-    def from_file(cls, path: Path) -> "Manifest":
+    def from_file(cls, path: Path, *, arch: str | None = None) -> "Manifest":
         data = _load_mapping(path)
-        flatpaks = _string_tuple(data, "flatpaks", path)
+        manifest_env = _env_dict(data, path)
+        selected_arch = arch or str(manifest_env["arch"])
+        flatpaks = _arch_string_tuple(data, "flatpaks", path, selected_arch)
         installer = _installer_config(data, path)
         return cls(
             version=_required_version(data, path),
-            env=_env_dict(data, path),
+            env=manifest_env,
             releasever=_required_string(data, "releasever", path),
             distro=_required_string(data, "distro", path),
             orchestrator=_required_string(data, "orchestrator", path),
@@ -256,9 +258,11 @@ class ManifestValidation:
         )
 
 
-def validate_manifest(manifest_path: Path) -> ManifestValidation:
+def validate_manifest(
+    manifest_path: Path, *, arch: str | None = None
+) -> ManifestValidation:
     manifest_path = manifest_path.resolve()
-    manifest = Manifest.from_file(manifest_path)
+    manifest = Manifest.from_file(manifest_path, arch=arch)
     root_dir = manifest_path.parent
 
     bootstrap_path = _resolve_card_path(manifest.bootstrap, root_dir)
@@ -462,6 +466,15 @@ def _required_string_tuple(
     if not value:
         raise ConfigError(f"{path}: '{key}' must contain at least one item")
     return value
+
+
+def _arch_string_tuple(
+    data: dict[str, Any], key: str, path: Path, arch: str
+) -> tuple[str, ...]:
+    values_by_arch = _packages_dict(data, key, path)
+    values = list(values_by_arch.get("*", tuple()))
+    values.extend(values_by_arch.get(arch, tuple()))
+    return tuple(dict.fromkeys(values))
 
 
 def _installer_config(data: dict[str, Any], path: Path) -> InstallerConfig:

@@ -139,8 +139,14 @@ def resolve_manifest_context(
     apply_repo_priority = apply_repo_priority or _apply_repo_priority
     require_buildah = require_buildah or _require_buildah
 
+    root_dir = manifest_path.resolve().parent
+    local_values = _load_dotenv(root_dir / ".env")
+    selected_arch = arch or local_values.get("arch")
+    if selected_arch is not None:
+        selected_arch = _normalize_arch(selected_arch)
+
     log(f"Validating manifest: {manifest_path}")
-    validation = validate_manifest(manifest_path)
+    validation = validate_manifest(manifest_path, arch=selected_arch)
     if validation.missing_bootstrap:
         raise ConfigError(
             f"{manifest_path}: missing bootstrap card: {validation.missing_bootstrap}"
@@ -152,13 +158,11 @@ def resolve_manifest_context(
         missing = ", ".join(validation.missing_cards)
         raise ConfigError(f"{manifest_path}: missing card definitions: {missing}")
 
-    root_dir = manifest_path.resolve().parent
     project_config = _project_upload_config(root_dir)
     image = _cache_name(manifest_path.resolve().stem, "image")
     manifest_defaults = {
         key: str(value) for key, value in validation.manifest.env.items()
     }
-    local_values = _load_dotenv(root_dir / ".env")
     if arch is not None:
         local_values["arch"] = _normalize_arch(arch)
     local_prefix = local_values.pop("local_prefix", validation.manifest.local_prefix)
