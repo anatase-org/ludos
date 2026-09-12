@@ -902,6 +902,12 @@ class TargetCardBuildTests(unittest.TestCase):
                     "      - example",
                     "      - x86_64:",
                     "        - example.i686",
+                    "oci:",
+                    "  - oci: example-oci",
+                    "    packages:",
+                    "      - oci-common",
+                    "      - x86_64:",
+                    "        - oci-package.i686",
                     "",
                 )
             ),
@@ -919,6 +925,16 @@ class TargetCardBuildTests(unittest.TestCase):
         self.assertEqual(_packages_for_arch(card.packages, "aarch64"), ("bash",))
         self.assertEqual(card.specs[0].packages["*"], ("example",))
         self.assertEqual(card.specs[0].packages["x86_64"], ("example.i686",))
+        self.assertEqual(card.oci[0].packages["*"], ("oci-common",))
+        self.assertEqual(card.oci[0].packages["x86_64"], ("oci-package.i686",))
+        self.assertEqual(
+            _packages_for_arch(card.oci[0].packages, "x86_64"),
+            ("oci-common", "oci-package.i686"),
+        )
+        self.assertEqual(
+            _packages_for_arch(card.oci[0].packages, "aarch64"),
+            ("oci-common",),
+        )
 
     def test_card_rejects_invalid_oci_shape(self) -> None:
         card_path = self.root / "bad-oci-card.yml"
