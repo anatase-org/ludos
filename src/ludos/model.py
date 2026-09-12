@@ -726,9 +726,27 @@ def _packages_dict(
     if value is None:
         return {}
     if isinstance(value, list):
-        if not all(isinstance(package, str) for package in value):
-            raise ConfigError(f"{path}: '{qualified_key}' must be a list of strings")
-        return {"*": tuple(value)}
+        result: dict[str, list[str]] = {}
+        for index, item in enumerate(value):
+            if isinstance(item, str):
+                result.setdefault("*", []).append(item)
+                continue
+            if not isinstance(item, dict):
+                raise ConfigError(
+                    f"{path}: '{qualified_key}[{index}]' must be a string or arch mapping"
+                )
+            for arch, packages in item.items():
+                item_key = f"{qualified_key}[{index}]"
+                if not isinstance(arch, str) or not arch.strip():
+                    raise ConfigError(f"{path}: '{item_key}' arch keys must be strings")
+                if not isinstance(packages, list) or not all(
+                    isinstance(package, str) for package in packages
+                ):
+                    raise ConfigError(
+                        f"{path}: '{item_key}.{arch}' must be a list of strings"
+                    )
+                result.setdefault(arch, []).extend(packages)
+        return {arch: tuple(packages) for arch, packages in result.items()}
     if not isinstance(value, dict):
         raise ConfigError(
             f"{path}: '{qualified_key}' must be a list of strings or an arch mapping"

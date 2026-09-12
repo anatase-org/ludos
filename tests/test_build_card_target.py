@@ -27,6 +27,7 @@ from ludos.build import (
     _ensure_image,
     _resolve_manifest_metadata,
     _resolve_cache_key,
+    _packages_for_arch,
     resolve_build_manifest_context,
 )
 from ludos.model import Card, ConfigError
@@ -884,6 +885,40 @@ class TargetCardBuildTests(unittest.TestCase):
             card.oci[0].env["nvidia"],
             "${label:org.anatase.kernel.nvidia}",
         )
+
+    def test_card_parses_mixed_common_and_arch_packages(self) -> None:
+        card_path = self.root / "mixed-packages-card.yml"
+        card_path.write_text(
+            "\n".join(
+                (
+                    "version: 1",
+                    "packages:",
+                    "  - bash",
+                    "  - x86_64:",
+                    "    - glibc.i686",
+                    "specs:",
+                    "  - spec: example.spec",
+                    "    packages:",
+                    "      - example",
+                    "      - x86_64:",
+                    "        - example.i686",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        card = Card.from_file(card_path)
+
+        self.assertEqual(card.packages["*"], ("bash",))
+        self.assertEqual(card.packages["x86_64"], ("glibc.i686",))
+        self.assertEqual(
+            _packages_for_arch(card.packages, "x86_64"),
+            ("bash", "glibc.i686"),
+        )
+        self.assertEqual(_packages_for_arch(card.packages, "aarch64"), ("bash",))
+        self.assertEqual(card.specs[0].packages["*"], ("example",))
+        self.assertEqual(card.specs[0].packages["x86_64"], ("example.i686",))
 
     def test_card_rejects_invalid_oci_shape(self) -> None:
         card_path = self.root / "bad-oci-card.yml"

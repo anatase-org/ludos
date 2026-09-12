@@ -4508,7 +4508,9 @@ def _packages_for_arch(
     packages_by_arch: dict[str, tuple[str, ...]],
     arch: str,
 ) -> tuple[str, ...]:
-    packages = list(packages_by_arch.get(arch, packages_by_arch.get("*", tuple())))
+    packages = list(packages_by_arch.get("*", tuple()))
+    if arch != "*":
+        packages.extend(packages_by_arch.get(arch, tuple()))
     return tuple(dict.fromkeys(packages))
 
 
