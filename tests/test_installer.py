@@ -41,6 +41,7 @@ from ludos.installer import (
     _kernel_asset_script,
     _mcopy_tree_script,
     _mkfs_erofs_command,
+    _parse_flatpak_uris,
     _resolve_output_dir,
     _run_host,
     _safe_ref_name,
@@ -73,6 +74,7 @@ def _context(
     installer: InstallerConfig = InstallerConfig(),
     orchestrator: str = "orchestrator",
     arch: str | None = None,
+    flatpak_uris: tuple[tuple[str, str], ...] = tuple(),
     scratch: bool = False,
 ) -> InstallerContext:
     return InstallerContext(
@@ -82,6 +84,7 @@ def _context(
         output_dir=tmp / "cache/iso/anatase-installer",
         orchestrator=orchestrator,
         arch=arch,
+        flatpak_uris=flatpak_uris,
         scratch=scratch,
         podman="podman",
     )
@@ -101,6 +104,8 @@ class InstallerParserTests(unittest.TestCase):
                 "cache",
                 "--arch",
                 "amd64",
+                "--flatpak-uri",
+                "anatase=oci+https://flatpaks.anatase.org/testing-f44-aarch64",
                 "--orchestrator",
                 "localhost/tools:latest",
                 "--scratch",
@@ -115,6 +120,10 @@ class InstallerParserTests(unittest.TestCase):
         self.assertEqual(args.output, Path("cache/iso/anatase-installer"))
         self.assertEqual(args.cache_dir, Path("cache"))
         self.assertEqual(args.arch, "amd64")
+        self.assertEqual(
+            args.flatpak_uris,
+            ["anatase=oci+https://flatpaks.anatase.org/testing-f44-aarch64"],
+        )
         self.assertEqual(args.orchestrator, "localhost/tools:latest")
         self.assertTrue(args.scratch)
         self.assertTrue(args.force)
@@ -160,6 +169,8 @@ class InstallerParserTests(unittest.TestCase):
                 "cache",
                 "--arch",
                 "amd64",
+                "--flatpak-uri",
+                "anatase=oci+https://flatpaks.anatase.org/testing-f44-aarch64",
             ]
         )
 
@@ -169,6 +180,10 @@ class InstallerParserTests(unittest.TestCase):
         installer.assert_called_once()
         self.assertEqual(installer.call_args.kwargs["cache_dir"], Path("cache"))
         self.assertEqual(installer.call_args.kwargs["arch"], "amd64")
+        self.assertEqual(
+            installer.call_args.kwargs["flatpak_uris"],
+            ("anatase=oci+https://flatpaks.anatase.org/testing-f44-aarch64",),
+        )
         self.assertNotIn("cache_only", installer.call_args.kwargs)
 
 
@@ -496,6 +511,25 @@ class InstallerHelperTests(unittest.TestCase):
         )
         self.assertEqual(_installer_latest_image_ref(ctx), "installers:anatase")
 
+    def test_flatpak_uri_changes_installer_image_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            default = _context(root)
+            testing = _context(
+                root,
+                flatpak_uris=(
+                    (
+                        "anatase",
+                        "oci+https://flatpaks.anatase.org/testing-f44-x86_64",
+                    ),
+                ),
+            )
+
+        self.assertNotEqual(
+            _installer_image_ref(default),
+            _installer_image_ref(testing),
+        )
+
     def test_installer_containerfile_runs_build_steps_in_image(self) -> None:
         containerfile = _installer_containerfile(
             "sha256:abc",
@@ -731,6 +765,50 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertNotIn("machine-id", script)
         self.assertNotIn("dbus-run-session", script)
         self.assertEqual(script.count("flatpak install"), 2)
+
+    def test_installer_flatpak_script_overrides_remote_before_install(self) -> None:
+        uri = "oci+https://flatpaks.anatase.org/testing-f44-aarch64"
+        script = _installer_flatpak_script(
+            (
+                InstallerFlatpaksConfig(
+                    repo="anatase",
+                    preinstall=("org.anatase.ArchiveManager",),
+                ),
+            ),
+            (("anatase", uri),),
+        )
+
+        override = f"flatpak remote-modify --system --url {uri} anatase"
+        self.assertIn(override, script)
+        self.assertLess(script.index(override), script.index("flatpak install"))
+
+    def test_parse_flatpak_uris_validates_remote_assignments(self) -> None:
+        groups = (
+            InstallerFlatpaksConfig(
+                repo="anatase",
+                preinstall=("org.anatase.ArchiveManager",),
+            ),
+        )
+
+        self.assertEqual(
+            _parse_flatpak_uris(
+                ("anatase=oci+https://example.invalid/testing?key=value",),
+                groups,
+            ),
+            (("anatase", "oci+https://example.invalid/testing?key=value"),),
+        )
+        with self.assertRaisesRegex(ConfigError, "REMOTE=URI"):
+            _parse_flatpak_uris(("anatase",), groups)
+        with self.assertRaisesRegex(ConfigError, "not used by installer.flatpaks"):
+            _parse_flatpak_uris(("flathub=https://example.invalid/repo",), groups)
+        with self.assertRaisesRegex(ConfigError, "duplicate"):
+            _parse_flatpak_uris(
+                (
+                    "anatase=https://example.invalid/one",
+                    "anatase=https://example.invalid/two",
+                ),
+                groups,
+            )
 
     def test_installer_flatpak_script_omits_no_deps_by_default(self) -> None:
         script = _installer_flatpak_script(

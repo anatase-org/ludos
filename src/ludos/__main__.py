@@ -714,6 +714,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target architecture to build. Defaults to the host architecture.",
     )
     installer_parser.add_argument(
+        "--flatpak-uri",
+        action="append",
+        default=[],
+        dest="flatpak_uris",
+        metavar="REMOTE=URI",
+        help=(
+            "Override an installer Flatpak remote URI. "
+            "May be specified more than once."
+        ),
+    )
+    installer_parser.add_argument(
         "--orchestrator",
         default=None,
         help="Container image used to run installer tooling. Defaults to the image ref.",
@@ -1411,6 +1422,7 @@ def bootc_command(args: argparse.Namespace) -> int:
             output=args.output,
             cache_dir=args.cache_dir,
             arch=args.arch,
+            flatpak_uris=tuple(args.flatpak_uris),
             orchestrator=args.orchestrator,
             scratch=args.scratch,
             force=args.force,

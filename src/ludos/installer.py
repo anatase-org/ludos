@@ -110,6 +110,7 @@ class InstallerContext:
     output_dir: Path
     orchestrator: str
     arch: str | None = None
+    flatpak_uris: tuple[tuple[str, str], ...] = tuple()
     scratch: bool = False
     force: bool = False
     podman: str = "podman"
@@ -164,6 +165,7 @@ def bootc_installer(
     output: Path | None = None,
     cache_dir: Path | None = None,
     arch: str | None = None,
+    flatpak_uris: tuple[str, ...] = tuple(),
     orchestrator: str | None = None,
     scratch: bool = False,
     force: bool = False,
@@ -175,6 +177,10 @@ def bootc_installer(
     if selected_arch is not None:
         selected_arch = _normalize_arch(selected_arch)
     manifest = Manifest.from_file(manifest_path, arch=selected_arch)
+    parsed_flatpak_uris = _parse_flatpak_uris(
+        flatpak_uris,
+        manifest.installer.flatpaks,
+    )
     output_dir = _resolve_output_dir(
         manifest_path,
         ref,
@@ -194,6 +200,7 @@ def bootc_installer(
         output_dir=output_dir,
         orchestrator=orchestrator or ref,
         arch=selected_arch,
+        flatpak_uris=parsed_flatpak_uris,
         scratch=scratch,
         force=force,
         podman=podman,
@@ -215,6 +222,7 @@ def bootc_installer(
         output_dir=output_dir,
         orchestrator=orchestrator or installer_image,
         arch=selected_arch,
+        flatpak_uris=parsed_flatpak_uris,
         scratch=scratch,
         force=force,
         podman=podman,
@@ -399,6 +407,7 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
             ctx.manifest.installer.build,
             ostree=ctx.manifest.installer.ostree,
             flatpak_groups=ctx.manifest.installer.flatpaks,
+            flatpak_uris=ctx.flatpak_uris,
         ),
         encoding="utf-8",
     )
@@ -491,6 +500,7 @@ def _installer_hash(ctx: InstallerContext, source_image: str) -> str:
                 )
                 for group in ctx.manifest.installer.flatpaks
             ),
+            **({"flatpak_uris": ctx.flatpak_uris} if ctx.flatpak_uris else {}),
         },
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -543,6 +553,7 @@ def _installer_containerfile(
     *,
     ostree: bool = False,
     flatpak_groups: tuple[InstallerFlatpaksConfig, ...] = tuple(),
+    flatpak_uris: tuple[tuple[str, str], ...] = tuple(),
 ) -> str:
     if "\n" in base_ref:
         raise ConfigError("installer base image ref must not contain newlines")
@@ -559,7 +570,7 @@ def _installer_containerfile(
         )
     if any(group.all for group in flatpak_groups):
         lines.append("")
-        lines.extend(_installer_flatpak_lines(flatpak_groups))
+        lines.extend(_installer_flatpak_lines(flatpak_groups, flatpak_uris))
     if has_files:
         lines.append("COPY files/ /files/")
     lines.extend(
@@ -576,20 +587,23 @@ def _installer_containerfile(
 
 def _installer_flatpak_lines(
     flatpak_groups: tuple[InstallerFlatpaksConfig, ...],
+    flatpak_uris: tuple[tuple[str, str], ...] = tuple(),
 ) -> list[str]:
     return [
         "RUN /bin/sh -ex <<'LUDOS_INSTALL_FLATPAKS'",
-        _installer_flatpak_script(flatpak_groups).rstrip(),
+        _installer_flatpak_script(flatpak_groups, flatpak_uris).rstrip(),
         "LUDOS_INSTALL_FLATPAKS",
     ]
 
 
 def _installer_flatpak_script(
     flatpak_groups: tuple[InstallerFlatpaksConfig, ...],
+    flatpak_uris: tuple[tuple[str, str], ...] = tuple(),
 ) -> str:
     lines = [
         "mkdir -p /var/lib/flatpak",
         "flatpak_arch=$(uname -m)",
+        *_flatpak_uri_override_lines(flatpak_uris),
         *_flatpak_phase_install_lines(flatpak_groups, "preinstall"),
         "flatpak update --system --appstream -y --noninteractive",
         "rm -rf /var/lib/flatpak-installer",
@@ -598,6 +612,38 @@ def _installer_flatpak_script(
         "flatpak update --system --appstream -y --noninteractive",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _parse_flatpak_uris(
+    values: tuple[str, ...],
+    flatpak_groups: tuple[InstallerFlatpaksConfig, ...],
+) -> tuple[tuple[str, str], ...]:
+    configured_remotes = {group.repo for group in flatpak_groups if group.all}
+    overrides: dict[str, str] = {}
+    for value in values:
+        remote, separator, uri = value.partition("=")
+        remote = remote.strip()
+        uri = uri.strip()
+        if not separator or not remote or not uri:
+            raise ConfigError("--flatpak-uri must be REMOTE=URI")
+        if remote not in configured_remotes:
+            raise ConfigError(
+                f"--flatpak-uri remote '{remote}' is not used by installer.flatpaks"
+            )
+        if remote in overrides:
+            raise ConfigError(f"duplicate --flatpak-uri remote: {remote}")
+        overrides[remote] = uri
+    return tuple(sorted(overrides.items()))
+
+
+def _flatpak_uri_override_lines(
+    flatpak_uris: tuple[tuple[str, str], ...],
+) -> list[str]:
+    return [
+        "flatpak remote-modify --system "
+        f"--url {shlex.quote(uri)} {shlex.quote(remote)}"
+        for remote, uri in flatpak_uris
+    ]
 
 
 def _flatpak_phase_install_lines(
