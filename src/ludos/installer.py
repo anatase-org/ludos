@@ -304,19 +304,88 @@ def _prepare_output_dir(output_dir: Path) -> None:
 
 
 def _create_root_erofs(ctx: InstallerContext, source_ref: str, run_ref: str) -> None:
-    container = _container_name(ctx)
     workers = _erofs_worker_count()
     profile = _erofs_profile(ctx.scratch)
     rootfs = Path("/run/ludos-rootfs")
+    separate_orchestrator = ctx.orchestrator != run_ref
+    exclude_paths = (
+        tuple()
+        if separate_orchestrator
+        else (CONTAINER_WORKDIR.removeprefix("/"),)
+    )
     erofs_command = _mkfs_erofs_command(
         ctx.rootfs_label,
         Path(CONTAINER_WORKDIR) / ctx.root_erofs.name,
         rootfs,
         rootfs / "etc/selinux/targeted/contexts/files/file_contexts",
-        exclude_paths=(CONTAINER_WORKDIR.removeprefix("/"),),
+        exclude_paths=exclude_paths,
         profile=profile,
         workers=workers,
     )
+
+    log(f"Creating EROFS image from installer rootfs: {ctx.root_erofs}")
+    log(
+        "Using EROFS compression profile: "
+        f"{profile.name}, compression={profile.compression}, "
+        f"pcluster={profile.pcluster_size or 'default'}, "
+        f"features={profile.features or 'none'}, workers={workers}"
+    )
+    if separate_orchestrator:
+        log(f"Using separate installer tooling image for EROFS: {ctx.orchestrator}")
+        _create_root_erofs_in_orchestrator(
+            ctx,
+            source_ref,
+            run_ref,
+            erofs_command,
+            rootfs,
+        )
+    else:
+        log("No separate installer tooling image; creating EROFS in the payload image")
+        _create_root_erofs_in_payload(ctx, source_ref, run_ref, erofs_command, rootfs)
+
+
+def _create_root_erofs_in_orchestrator(
+    ctx: InstallerContext,
+    source_ref: str,
+    run_ref: str,
+    erofs_command: list[str],
+    rootfs: Path,
+) -> None:
+    container = _container_name(ctx)
+    log(f"Preparing installer rootfs container from {source_ref}")
+    _run_host([ctx.podman, "rm", "-f", container], check=False)
+    result = _run_host(
+        [
+            ctx.podman,
+            "create",
+            "--name",
+            container,
+            "--platform",
+            _oci_platform(ctx.target_arch),
+            run_ref,
+        ],
+        capture=True,
+    )
+    container_id = result.stdout.strip() or container
+    try:
+        _copy_boot_assets(ctx, container_id, run_ref)
+        _run(
+            ctx,
+            erofs_command,
+            image_mounts=((run_ref, rootfs),),
+        )
+    finally:
+        _run_host([ctx.podman, "rm", "-f", container_id], check=False)
+
+
+def _create_root_erofs_in_payload(
+    ctx: InstallerContext,
+    source_ref: str,
+    run_ref: str,
+    erofs_command: list[str],
+    rootfs: Path,
+) -> None:
+    container = _container_name(ctx)
     erofs_script = "\n".join(
         [
             f"mkdir -p {shlex.quote(str(rootfs))}",
@@ -349,13 +418,6 @@ def _create_root_erofs(ctx: InstallerContext, source_ref: str, run_ref: str) -> 
     container_id = result.stdout.strip() or container
     try:
         _copy_boot_assets(ctx, container_id, run_ref)
-        log(f"Creating EROFS image from installer rootfs: {ctx.root_erofs}")
-        log(
-            "Using EROFS compression profile: "
-            f"{profile.name}, compression={profile.compression}, "
-            f"pcluster={profile.pcluster_size or 'default'}, "
-            f"features={profile.features or 'none'}, workers={workers}"
-        )
         _run_host([ctx.podman, "start", "--attach", container_id])
     finally:
         _run_host([ctx.podman, "rm", "-f", container_id], check=False)
@@ -1415,9 +1477,10 @@ def _run(
     *,
     input_text: str | None = None,
     capture: bool = False,
+    image_mounts: tuple[tuple[str, Path], ...] = tuple(),
 ) -> subprocess.CompletedProcess[str]:
     return _run_host(
-        _tool_command(ctx, command),
+        _tool_command(ctx, command, image_mounts=image_mounts),
         input_text=input_text,
         capture=capture,
     )
@@ -1520,6 +1583,7 @@ def _tool_command(
     command: list[str],
     *,
     stdin: bool = False,
+    image_mounts: tuple[tuple[str, Path], ...] = tuple(),
 ) -> list[str]:
     tool = [
         ctx.podman,
@@ -1528,6 +1592,13 @@ def _tool_command(
     ]
     if stdin:
         tool.append("--interactive")
+    for image, destination in image_mounts:
+        tool.extend(
+            [
+                "--mount",
+                f"type=image,source={image},destination={destination}",
+            ]
+        )
     tool.extend(
         [
             "--privileged",

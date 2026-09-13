@@ -21,6 +21,7 @@ from ludos.installer import (
     _copy_installer_files,
     _copy_live_iso_payload,
     _copy_ludos_efi_payload,
+    _create_root_erofs,
     _efi_asset_script,
     _efi_image_size_kib,
     _grub_config,
@@ -1019,6 +1020,125 @@ class InstallerHelperTests(unittest.TestCase):
 
         self.assertIn("--interactive", command)
         self.assertLess(command.index("--interactive"), command.index("localhost/orchestrator:test"))
+
+    def test_tool_command_mounts_target_image_in_native_orchestrator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _context(Path(tmp), orchestrator="localhost/native-tools:test")
+
+            command = _tool_command(
+                ctx,
+                ["mkfs.erofs", "/out", "/run/ludos-rootfs"],
+                image_mounts=(("localhost/installer:arm64", Path("/run/ludos-rootfs")),),
+            )
+
+        mount = command[command.index("--mount") + 1]
+        self.assertEqual(
+            mount,
+            "type=image,source=localhost/installer:arm64,"
+            "destination=/run/ludos-rootfs",
+        )
+        self.assertLess(command.index("--mount"), command.index("localhost/native-tools:test"))
+
+    def test_create_root_erofs_runs_compressor_in_orchestrator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = _context(
+                root,
+                orchestrator="localhost/native-tools:amd64",
+                arch="aarch64",
+            )
+            ctx.output_dir.mkdir(parents=True)
+
+            def run_host(
+                command: list[str],
+                **_kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                output = "container-id\n" if command[1] == "create" else ""
+                return subprocess.CompletedProcess(command, 0, stdout=output)
+
+            with (
+                patch("ludos.installer._run_host", side_effect=run_host) as host_run,
+                patch("ludos.installer._copy_boot_assets") as copy_assets,
+                patch("ludos.installer._run") as tool_run,
+            ):
+                _create_root_erofs(
+                    ctx,
+                    "docker://example.invalid/anatase:testing",
+                    "localhost/installer:arm64",
+                )
+
+        create_command = host_run.call_args_list[1].args[0]
+        self.assertEqual(
+            create_command,
+            [
+                "podman",
+                "create",
+                "--name",
+                _container_name(ctx),
+                "--platform",
+                "linux/arm64",
+                "localhost/installer:arm64",
+            ],
+        )
+        copy_assets.assert_called_once_with(
+            ctx,
+            "container-id",
+            "localhost/installer:arm64",
+        )
+        tool_run.assert_called_once()
+        self.assertEqual(
+            tool_run.call_args.kwargs["image_mounts"],
+            (("localhost/installer:arm64", Path("/run/ludos-rootfs")),),
+        )
+        erofs_command = tool_run.call_args.args[1]
+        self.assertEqual(erofs_command[0], "mkfs.erofs")
+        self.assertIn("/run/ludos-rootfs", erofs_command)
+        self.assertNotIn("--exclude-path=ludos/installer", erofs_command)
+
+    def test_create_root_erofs_falls_back_to_payload_without_orchestrator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = _context(
+                root,
+                orchestrator="localhost/installer:arm64",
+                arch="aarch64",
+            )
+            ctx.output_dir.mkdir(parents=True)
+
+            def run_host(
+                command: list[str],
+                **_kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                output = "container-id\n" if command[1] == "create" else ""
+                return subprocess.CompletedProcess(command, 0, stdout=output)
+
+            with (
+                patch("ludos.installer._run_host", side_effect=run_host) as host_run,
+                patch("ludos.installer._copy_boot_assets") as copy_assets,
+                patch("ludos.installer._run") as tool_run,
+            ):
+                _create_root_erofs(
+                    ctx,
+                    "docker://example.invalid/anatase:testing",
+                    "localhost/installer:arm64",
+                )
+
+        create_command = host_run.call_args_list[1].args[0]
+        self.assertIn("--privileged", create_command)
+        self.assertIn("/bin/sh", create_command)
+        erofs_script = create_command[-1]
+        self.assertIn("mount --bind / /run/ludos-rootfs", erofs_script)
+        self.assertIn("--exclude-path=ludos/installer", erofs_script)
+        self.assertIn(
+            ["podman", "start", "--attach", "container-id"],
+            [call.args[0] for call in host_run.call_args_list],
+        )
+        copy_assets.assert_called_once_with(
+            ctx,
+            "container-id",
+            "localhost/installer:arm64",
+        )
+        tool_run.assert_not_called()
 
     def test_tool_path_maps_output_paths_for_container(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
