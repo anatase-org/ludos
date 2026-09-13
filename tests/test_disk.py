@@ -23,6 +23,7 @@ from ludos.disk import (
     GIB,
     ROOT_GROW_ATTRIBUTE,
     ROOT_HEADROOM,
+    ROOT_NO_AUTO_ATTRIBUTE,
     ROOT_START_SECTOR,
     DiskContext,
     bootc_disk,
@@ -417,7 +418,7 @@ class DiskBuilderTests(unittest.TestCase):
         self.assertIn('"$BOOT_UUID" "$ESP_UUID" >> "$DEPLOY/etc/fstab"', script)
         self.assertIn('"$BOOT_UUID" > "$directory/bootuuid.cfg"', script)
         self.assertIn(
-            f'sfdisk --part-attrs "$DISK_IMAGE" 3 "GUID:{ROOT_GROW_ATTRIBUTE}"',
+            f'3 "GUID:{ROOT_GROW_ATTRIBUTE},GUID:{ROOT_NO_AUTO_ATTRIBUTE}"',
             script,
         )
         self.assertIn(
@@ -509,7 +510,7 @@ start=133120, size=131072, type=bc13c2ff-59e6-4262-a352-b275fd6f7172
 start=264192, size=653278, type=4f68bce3-e8cd-4db1-96e7-fbcaf984b709
 EOF
     sfdisk --part-attrs /work/disk.raw 2 "GUID:62,GUID:63"
-    sfdisk --part-attrs /work/disk.raw 3 "GUID:59"
+    sfdisk --part-attrs /work/disk.raw 3 "GUID:59,GUID:63"
     dd if=/work/esp.vfat of=/work/disk.raw bs=512 seek=2048 conv=notrunc,sparse status=none
     dd if=/work/boot.ext4 of=/work/disk.raw bs=512 seek=133120 conv=notrunc,sparse status=none
     dd if=/work/root.btrfs of=/work/disk.raw bs=512 seek=264192 conv=notrunc,sparse status=none
@@ -526,6 +527,8 @@ EOF
     btrfs inspect-internal dump-tree /work/extracted.btrfs | grep -q "compression 3 (zstd)"
     sfdisk --part-attrs /work/disk.raw 2 | grep -q 62
     sfdisk --part-attrs /work/disk.raw 2 | grep -q 63
+    sfdisk --part-attrs /work/disk.raw 3 | grep -q 59
+    sfdisk --part-attrs /work/disk.raw 3 | grep -q 63
 '
 """,
             ]
