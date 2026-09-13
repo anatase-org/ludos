@@ -9,7 +9,13 @@ from unittest.mock import patch
 
 from ludos.__main__ import build_parser
 from ludos.disk import (
+    BOOT_SECTORS,
+    BOOT_SIZE,
+    BOOT_START_SECTOR,
+    BOOT_TYPE_GUID,
+    BTRFS_COMPRESSION,
     DISK_ARCHITECTURES,
+    ESP_SECTORS,
     ESP_START_SECTOR,
     ESP_SIZE,
     GIB,
@@ -66,6 +72,8 @@ def _context(tmp: Path, installer: InstallerConfig = InstallerConfig()) -> DiskC
         podman="podman",
         tooling_image="sha256:" + "a" * 64,
         tooling_arch="x86_64",
+        esp_uuid="AAAA-BBBB",
+        boot_uuid="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         root_uuid="11111111-2222-4333-8444-555555555555",
     )
 
@@ -153,6 +161,16 @@ class DiskConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(_disk_architecture("arm64").boot_filename, "BOOTAA64.EFI")
         self.assertEqual(_disk_architecture("amd64").boot_filename, "BOOTX64.EFI")
+
+    def test_partition_layout_uses_512_mib_esp_and_1500_mib_boot(self) -> None:
+        self.assertEqual(ESP_SIZE, 512 * 1024**2)
+        self.assertEqual(BOOT_SIZE, 1500 * 1024**2)
+        self.assertEqual(BOOT_START_SECTOR, ESP_START_SECTOR + ESP_SECTORS)
+        self.assertEqual(ROOT_START_SECTOR, BOOT_START_SECTOR + BOOT_SECTORS)
+        self.assertEqual(
+            BOOT_TYPE_GUID,
+            "bc13c2ff-59e6-4262-a352-b275fd6f7172",
+        )
 
     def test_rejects_unknown_architecture(self) -> None:
         with self.assertRaisesRegex(ConfigError, "unsupported disk architecture"):
@@ -355,23 +373,40 @@ class DiskBuilderTests(unittest.TestCase):
         self.assertIn("sha256:" + "b" * 64, command)
         self.assertNotIn("linux/arm64", command)
 
-    def test_script_builds_regular_file_gpt_fat_and_btrfs(self) -> None:
+    def test_script_builds_regular_file_gpt_fat_ext4_and_btrfs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             script = _disk_builder_script(_context(Path(tmp)))
         self.assertIn("fakeroot -s", script)
         self.assertIn("mkfs.btrfs", script)
         self.assertIn("--rootdir", script)
+        self.assertIn(f'--compress "$BTRFS_COMPRESSION"', script)
+        self.assertIn(f"export BTRFS_COMPRESSION={BTRFS_COMPRESSION}", script)
         self.assertIn("mkfs.vfat", script)
+        self.assertIn("mkfs.ext4", script)
+        self.assertIn('-d "$SYSROOT/boot"', script)
+        self.assertIn('grub2-fstest "$BOOT_IMAGE"', script)
         self.assertIn("mcopy -s", script)
         self.assertIn("sfdisk --quiet", script)
         self.assertIn(f'GUID:{ROOT_GROW_ATTRIBUTE}', script)
         self.assertIn(f"truncate -s {ESP_SIZE}", script)
+        self.assertIn(f'truncate -s {BOOT_SIZE} "$BOOT_IMAGE"', script)
         self.assertIn(f"start={ESP_START_SECTOR}", script)
+        self.assertIn(f"start={BOOT_START_SECTOR}", script)
+        self.assertIn(f"size={BOOT_SECTORS}, type={BOOT_TYPE_GUID}", script)
         self.assertIn(f"start={ROOT_START_SECTOR}", script)
         self.assertIn(f"FILESYSTEM_BYTES + {ROOT_HEADROOM}", script)
         self.assertIn("DISK_BYTES=$REQUESTED_SIZE", script)
         self.assertIn('test "$DISK_BYTES" -lt "$MIN_DISK"', script)
         self.assertIn("GrowFileSystem=yes", script)
+        self.assertIn('--karg "rootflags=compress=$BTRFS_COMPRESSION"', script)
+        self.assertIn("UUID=%s /boot ext4", script)
+        self.assertIn("UUID=%s /boot/efi vfat", script)
+        self.assertIn('"$BOOT_UUID" "$ESP_UUID" >> "$DEPLOY/etc/fstab"', script)
+        self.assertIn('"$BOOT_UUID" > "$directory/bootuuid.cfg"', script)
+        self.assertIn(
+            f'sfdisk --part-attrs "$DISK_IMAGE" 3 "GUID:{ROOT_GROW_ATTRIBUTE}"',
+            script,
+        )
         self.assertIn("BOOTX64.EFI", script)
         self.assertIn('$DEPLOY/usr/lib/efi', script)
         self.assertIn('$DEPLOY/usr/lib/bootupd', script)
@@ -429,32 +464,45 @@ class DiskRootlessIntegrationTests(unittest.TestCase):
                 "/bin/sh",
                 "-ceu",
                 """
-mkdir -p /work/root /work/esp/EFI/BOOT
+mkdir -p /work/root /work/boot/loader/entries /work/esp/EFI/BOOT
 printf loader > /work/esp/EFI/BOOT/BOOTX64.EFI
+printf entry > /work/boot/loader/entries/test.conf
 fakeroot -- /bin/sh -ceux '
     touch /work/root/labeled
+    yes anatase | head -c 1048576 > /work/root/compressible
     setfattr -n security.selinux -v system_u:object_r:usr_t:s0 /work/root/labeled
+    setfattr -n security.selinux -v system_u:object_r:boot_t:s0 /work/boot/loader/entries/test.conf
     truncate -s 256M /work/root.btrfs
-    mkfs.btrfs --force --rootdir /work/root /work/root.btrfs >/dev/null
+    mkfs.btrfs --force --compress zstd --rootdir /work/root /work/root.btrfs >/dev/null
+    truncate -s 64M /work/boot.ext4
+    mkfs.ext4 -q -F -m 0 -d /work/boot /work/boot.ext4
     truncate -s 64M /work/esp.vfat
     mkfs.vfat -F 32 /work/esp.vfat >/dev/null
     mcopy -s -i /work/esp.vfat /work/esp/EFI ::/
-    truncate -s 384M /work/disk.raw
+    truncate -s 448M /work/disk.raw
     sfdisk --quiet /work/disk.raw <<EOF
 label: gpt
 unit: sectors
 
 start=2048, size=131072, type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
-start=133120, size=653278, type=4f68bce3-e8cd-4db1-96e7-fbcaf984b709
+start=133120, size=131072, type=bc13c2ff-59e6-4262-a352-b275fd6f7172
+start=264192, size=653278, type=4f68bce3-e8cd-4db1-96e7-fbcaf984b709
 EOF
+    sfdisk --part-attrs /work/disk.raw 3 "GUID:59"
     dd if=/work/esp.vfat of=/work/disk.raw bs=512 seek=2048 conv=notrunc,sparse status=none
-    dd if=/work/root.btrfs of=/work/disk.raw bs=512 seek=133120 conv=notrunc,sparse status=none
+    dd if=/work/boot.ext4 of=/work/disk.raw bs=512 seek=133120 conv=notrunc,sparse status=none
+    dd if=/work/root.btrfs of=/work/disk.raw bs=512 seek=264192 conv=notrunc,sparse status=none
     sfdisk --verify /work/disk.raw
     blkid -p -O 1048576 -S 67108864 /work/disk.raw | grep -q vfat
-    blkid -p -O 68157440 -S 334478336 /work/disk.raw | grep -q btrfs
+    blkid -p -O 68157440 -S 67108864 /work/disk.raw | grep -q ext4
+    blkid -p -O 135266304 -S 334478336 /work/disk.raw | grep -q btrfs
     mdir -i /work/esp.vfat ::/EFI/BOOT/BOOTX64.EFI >/dev/null
-    dd if=/work/disk.raw of=/work/extracted.btrfs bs=512 skip=133120 count=524288 conv=sparse status=none
+    grub2-fstest /work/boot.ext4 cat /loader/entries/test.conf | grep -q entry
+    debugfs -R "ea_list /loader/entries/test.conf" /work/boot.ext4 2>/dev/null | grep -q security.selinux
+    e2fsck -fn /work/boot.ext4
+    dd if=/work/disk.raw of=/work/extracted.btrfs bs=512 skip=264192 count=524288 conv=sparse status=none
     btrfs inspect-internal dump-tree /work/extracted.btrfs | grep -q security.selinux
+    btrfs inspect-internal dump-tree /work/extracted.btrfs | grep -q "compression 3 (zstd)"
 '
 """,
             ]

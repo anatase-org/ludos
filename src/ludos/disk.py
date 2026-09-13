@@ -21,13 +21,18 @@ SECTOR_SIZE = 512
 MIB = 1024**2
 GIB = 1024**3
 ESP_START_SECTOR = MIB // SECTOR_SIZE
-ESP_SIZE = GIB
+ESP_SIZE = 512 * MIB
 ESP_SECTORS = ESP_SIZE // SECTOR_SIZE
-ROOT_START_SECTOR = ESP_START_SECTOR + ESP_SECTORS
+BOOT_START_SECTOR = ESP_START_SECTOR + ESP_SECTORS
+BOOT_SIZE = 1500 * MIB
+BOOT_SECTORS = BOOT_SIZE // SECTOR_SIZE
+ROOT_START_SECTOR = BOOT_START_SECTOR + BOOT_SECTORS
 GPT_TRAILING_SECTORS = 34
 ROOT_HEADROOM = 2 * GIB
 ROOT_GROW_ATTRIBUTE = 59
 ESP_TYPE_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+BOOT_TYPE_GUID = "bc13c2ff-59e6-4262-a352-b275fd6f7172"
+BTRFS_COMPRESSION = "zstd"
 CONTAINER_WORKDIR = Path("/ludos/disk")
 CONTAINER_SOURCE = Path("/ludos/source")
 
@@ -81,6 +86,8 @@ class DiskContext:
     podman: str
     tooling_image: str
     tooling_arch: str
+    esp_uuid: str
+    boot_uuid: str
     root_uuid: str
 
     @property
@@ -206,6 +213,7 @@ def bootc_disk(
             log(f"Using separate native disk tooling image: {tooling_image}")
         else:
             log("Using the disk payload image for disk tooling")
+        esp_volume_id = uuid.uuid4().hex[:8].upper()
         ctx = DiskContext(
             manifest=manifest,
             manifest_path=manifest_path,
@@ -221,6 +229,8 @@ def bootc_disk(
             podman=podman,
             tooling_image=tooling_image,
             tooling_arch=tooling_arch,
+            esp_uuid=f"{esp_volume_id[:4]}-{esp_volume_id[4:]}",
+            boot_uuid=str(uuid.uuid4()),
             root_uuid=str(uuid.uuid4()),
         )
         log(f"Probing {tooling_arch} disk tooling execution")
@@ -531,9 +541,13 @@ def _disk_builder_script(ctx: DiskContext) -> str:
         "SOURCE_REF": ctx.source_ref,
         "TARGET_REF": ctx.target_ref,
         "STATEROOT": ctx.stateroot,
+        "ESP_UUID": ctx.esp_uuid,
+        "ESP_VOLUME_ID": ctx.esp_uuid.replace("-", ""),
+        "BOOT_UUID": ctx.boot_uuid,
         "ROOT_UUID": ctx.root_uuid,
         "ROOT_LABEL": ctx.root_label,
         "ROOT_TYPE_GUID": arch.root_type_guid,
+        "BTRFS_COMPRESSION": BTRFS_COMPRESSION,
         "BOOT_FILENAME": arch.boot_filename,
         "GRUB_FILENAME": arch.grub_filename,
         "MOK_FILENAME": arch.mok_filename,
@@ -556,11 +570,12 @@ disk_status() {{ printf '==> %s\n' "$1"; }}
 SYSROOT={CONTAINER_WORKDIR}/root-tree
 ESP_TREE={CONTAINER_WORKDIR}/esp-tree
 ESP_IMAGE={CONTAINER_WORKDIR}/esp.img
+BOOT_IMAGE={CONTAINER_WORKDIR}/boot.ext4
 ROOT_IMAGE={CONTAINER_WORKDIR}/root.btrfs
 DISK_IMAGE={CONTAINER_WORKDIR}/disk.raw
 
 rm -rf "$SYSROOT" "$ESP_TREE"
-rm -f "$ESP_IMAGE" "$ROOT_IMAGE" "$DISK_IMAGE"
+rm -f "$ESP_IMAGE" "$BOOT_IMAGE" "$ROOT_IMAGE" "$DISK_IMAGE"
 mkdir -p "$SYSROOT" "$ESP_TREE/EFI/BOOT"
 
 disk_status "Initializing OSTree sysroot"
@@ -583,6 +598,7 @@ ostree admin deploy \
     --no-merge \
     --origin-file "{CONTAINER_WORKDIR}/origin" \
     --karg "root=UUID=$ROOT_UUID" \
+    --karg "rootflags=compress=$BTRFS_COMPRESSION" \
     --karg rw \
     "$COMMIT"
 rm -f "{CONTAINER_WORKDIR}/commit" "{CONTAINER_WORKDIR}/origin"
@@ -599,6 +615,9 @@ cat > "$DEPLOY/etc/repart.d/50-ludos-root.conf" <<'EOF_REPART'
 Type=root
 GrowFileSystem=yes
 EOF_REPART
+mkdir -p "$SYSROOT/boot/efi"
+printf '\nUUID=%s /boot ext4 defaults 0 2\nUUID=%s /boot/efi vfat umask=0077,shortname=winnt 0 2\n' \
+    "$BOOT_UUID" "$ESP_UUID" >> "$DEPLOY/etc/fstab"
 
 disk_status "Preinstalling Flatpaks"
 {flatpaks}
@@ -630,7 +649,7 @@ test -z "$FALLBACK_SOURCE" || cp "$FALLBACK_SOURCE" "$ESP_TREE/EFI/$VENDOR/$FALL
 
 for directory in "$ESP_TREE/EFI/BOOT" "$ESP_TREE/EFI/$VENDOR"; do
     cp "$DEPLOY/usr/lib/bootupd/grub2-static/grub-static-efi.cfg" "$directory/grub.cfg"
-    printf 'set BOOT_UUID=%s\n' "$ROOT_UUID" > "$directory/bootuuid.cfg"
+    printf 'set BOOT_UUID=%s\n' "$BOOT_UUID" > "$directory/bootuuid.cfg"
 done
 
 disk_status "Applying target SELinux policy"
@@ -639,14 +658,24 @@ test -f "$POLICY"
 setfiles -F -q -r "$SYSROOT" "$POLICY" \
     "$SYSROOT/boot" \
     "$SYSROOT/ostree/deploy/$STATEROOT/var" \
+    "$DEPLOY/etc/fstab" \
     "$DEPLOY/etc/repart.d"
+
+disk_status "Creating ext4 /boot filesystem"
+truncate -s {BOOT_SIZE} "$BOOT_IMAGE"
+mkfs.ext4 -q -F -m 0 -L boot -U "$BOOT_UUID" -d "$SYSROOT/boot" "$BOOT_IMAGE"
+grub2-fstest "$BOOT_IMAGE" ls /loader/entries | grep -q .
+rm -rf "$SYSROOT/boot"
+mkdir -p "$SYSROOT/boot"
+setfiles -F -q -r "$SYSROOT" "$POLICY" "$SYSROOT/boot"
 
 disk_status "Creating Btrfs root filesystem"
 USED=$(du -sx -B1 "$SYSROOT" | cut -f1)
 SEED_ROOT=$((USED + USED / 4 + {GIB}))
 SEED_ROOT=$(((SEED_ROOT + {GIB} - 1) / {GIB} * {GIB}))
 truncate -s "$SEED_ROOT" "$ROOT_IMAGE"
-mkfs.btrfs --force --shrink --label "$ROOT_LABEL" --uuid "$ROOT_UUID" \
+mkfs.btrfs --force --shrink --compress "$BTRFS_COMPRESSION" \
+    --label "$ROOT_LABEL" --uuid "$ROOT_UUID" \
     --rootdir "$SYSROOT" "$ROOT_IMAGE"
 FILESYSTEM_BYTES=$(stat -c %s "$ROOT_IMAGE")
 MIN_ROOT=$((FILESYSTEM_BYTES + {ROOT_HEADROOM}))
@@ -673,7 +702,7 @@ truncate -s "$ROOT_BYTES" "$ROOT_IMAGE"
 
 disk_status "Creating FAT32 EFI system partition"
 truncate -s {ESP_SIZE} "$ESP_IMAGE"
-mkfs.vfat -F 32 -n EFI "$ESP_IMAGE"
+mkfs.vfat -F 32 -n EFI -i "$ESP_VOLUME_ID" "$ESP_IMAGE"
 mcopy -s -i "$ESP_IMAGE" "$ESP_TREE/EFI" ::/
 
 disk_status "Assembling sparse GPT disk image"
@@ -683,22 +712,26 @@ label: gpt
 unit: sectors
 
 start={ESP_START_SECTOR}, size={ESP_SECTORS}, type={ESP_TYPE_GUID}, name="EFI System Partition"
+start={BOOT_START_SECTOR}, size={BOOT_SECTORS}, type={BOOT_TYPE_GUID}, name="Linux extended boot"
 start={ROOT_START_SECTOR}, size=$ROOT_SECTORS, type=$ROOT_TYPE_GUID, name="Linux root filesystem"
 EOF_SFDISK
-sfdisk --part-attrs "$DISK_IMAGE" 2 "GUID:{ROOT_GROW_ATTRIBUTE}"
+sfdisk --part-attrs "$DISK_IMAGE" 3 "GUID:{ROOT_GROW_ATTRIBUTE}"
 dd if="$ESP_IMAGE" of="$DISK_IMAGE" bs={SECTOR_SIZE} seek={ESP_START_SECTOR} conv=notrunc,sparse status=none
+dd if="$BOOT_IMAGE" of="$DISK_IMAGE" bs={SECTOR_SIZE} seek={BOOT_START_SECTOR} conv=notrunc,sparse status=none
 dd if="$ROOT_IMAGE" of="$DISK_IMAGE" bs={SECTOR_SIZE} seek={ROOT_START_SECTOR} conv=notrunc,sparse status=none
 sync "$DISK_IMAGE"
 
 disk_status "Validating disk image"
 sfdisk --verify "$DISK_IMAGE"
 blkid -p -O $(({ESP_START_SECTOR} * {SECTOR_SIZE})) -S {ESP_SIZE} "$DISK_IMAGE" | grep -q 'TYPE="vfat"'
+blkid -p -O $(({BOOT_START_SECTOR} * {SECTOR_SIZE})) -S {BOOT_SIZE} "$DISK_IMAGE" | grep -q 'TYPE="ext4"'
 blkid -p -O $(({ROOT_START_SECTOR} * {SECTOR_SIZE})) -S "$ROOT_BYTES" "$DISK_IMAGE" | grep -q 'TYPE="btrfs"'
 mdir -i "$ESP_IMAGE" "::/EFI/BOOT/$BOOT_FILENAME" >/dev/null
+e2fsck -fn "$BOOT_IMAGE"
 btrfs inspect-internal dump-super "$ROOT_IMAGE" >/dev/null
 
 rm -rf "$SYSROOT" "$ESP_TREE"
-rm -f "$ESP_IMAGE" "$ROOT_IMAGE"
+rm -f "$ESP_IMAGE" "$BOOT_IMAGE" "$ROOT_IMAGE"
 
 {compression}
 """
@@ -708,13 +741,16 @@ rm -f "$ESP_IMAGE" "$ROOT_IMAGE"
         "flatpak",
         "setfiles",
         "grub2-editenv",
+        "grub2-fstest",
         "mkfs.btrfs",
+        "mkfs.ext4",
         "mkfs.vfat",
         "mcopy",
         "mdir",
         "sfdisk",
         "blkid",
         "btrfs",
+        "e2fsck",
     )
     if ctx.compress:
         required_tools = (*required_tools, "gzip")
