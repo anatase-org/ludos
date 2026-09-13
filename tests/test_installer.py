@@ -317,6 +317,50 @@ class InstallerManifestTests(unittest.TestCase):
 
         self.assertEqual(parsed.installer.flatpaks[0].installer, ("org.anatase.Browser",))
 
+    def test_manifest_installer_filters_preinstall_flatpaks_by_arch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "anatase.yml"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "name: Test OS",
+                        "releasever: '44'",
+                        "distro: f44-$arch",
+                        "orchestrator: quay.io/fedora/fedora:44",
+                        "bootstrap: cards/bootstrap.yml",
+                        "repos: []",
+                        "cards:",
+                        "  - cards/base/kernel",
+                        "installer:",
+                        "  flatpaks:",
+                        "    - repo: anatase",
+                        "      preinstall:",
+                        "        - org.anatase.ArchiveManager",
+                        "        - x86_64:",
+                        "          - org.anatase.Browser",
+                        "          - org.anatase.Browser.Adblocker",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            x86_manifest = Manifest.from_file(manifest, arch="x86_64")
+            arm_manifest = Manifest.from_file(manifest, arch="aarch64")
+
+        self.assertEqual(
+            x86_manifest.installer.flatpaks[0].preinstall,
+            (
+                "org.anatase.ArchiveManager",
+                "org.anatase.Browser",
+                "org.anatase.Browser.Adblocker",
+            ),
+        )
+        self.assertEqual(
+            arm_manifest.installer.flatpaks[0].preinstall,
+            ("org.anatase.ArchiveManager",),
+        )
+
     def test_manifest_installer_rejects_non_boolean_ostree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manifest = Path(tmp) / "anatase.yml"

@@ -215,7 +215,7 @@ class Manifest:
         manifest_env = _env_dict(data, path)
         selected_arch = arch or str(manifest_env["arch"])
         flatpaks = _arch_string_tuple(data, "flatpaks", path, selected_arch)
-        installer = _installer_config(data, path)
+        installer = _installer_config(data, path, selected_arch)
         return cls(
             version=_required_version(data, path),
             env=manifest_env,
@@ -469,15 +469,21 @@ def _required_string_tuple(
 
 
 def _arch_string_tuple(
-    data: dict[str, Any], key: str, path: Path, arch: str
+    data: dict[str, Any],
+    key: str,
+    path: Path,
+    arch: str,
+    label: str = "",
 ) -> tuple[str, ...]:
-    values_by_arch = _packages_dict(data, key, path)
+    values_by_arch = _packages_dict(data, key, path, label)
     values = list(values_by_arch.get("*", tuple()))
     values.extend(values_by_arch.get(arch, tuple()))
     return tuple(dict.fromkeys(values))
 
 
-def _installer_config(data: dict[str, Any], path: Path) -> InstallerConfig:
+def _installer_config(
+    data: dict[str, Any], path: Path, arch: str
+) -> InstallerConfig:
     value = data.get("installer")
     if value is None:
         return InstallerConfig()
@@ -492,13 +498,14 @@ def _installer_config(data: dict[str, Any], path: Path) -> InstallerConfig:
         files=_string_tuple(value, "files", path),
         build=_optional_string(value, "build", path),
         ostree=_optional_bool(value, "ostree", path, "installer"),
-        flatpaks=_installer_flatpaks_config(value, path),
+        flatpaks=_installer_flatpaks_config(value, path, arch),
     )
 
 
 def _installer_flatpaks_config(
     data: dict[str, Any],
     path: Path,
+    arch: str,
 ) -> tuple[InstallerFlatpaksConfig, ...]:
     value = data.get("flatpaks")
     if value is None:
@@ -517,11 +524,18 @@ def _installer_flatpaks_config(
                 raise ConfigError(
                     f"{path}: 'installer.flatpaks[{index}].{key}' is not supported"
                 )
+        label = f"installer.flatpaks[{index}]"
         configs.append(
             InstallerFlatpaksConfig(
                 repo=_required_string(item, "repo", path),
-                nodeps=_optional_bool(item, "nodeps", path, f"installer.flatpaks[{index}]"),
-                preinstall=_string_tuple(item, "preinstall", path),
+                nodeps=_optional_bool(item, "nodeps", path, label),
+                preinstall=_arch_string_tuple(
+                    item,
+                    "preinstall",
+                    path,
+                    arch,
+                    label,
+                ),
                 installer=_string_tuple(item, "installer", path),
             )
         )
