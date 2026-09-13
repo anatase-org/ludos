@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from base64 import b64encode
 import os
 import platform
 import re
@@ -58,6 +59,10 @@ class DiskArchitecture:
     def fallback_filename(self) -> str:
         return f"fb{self.suffix}.efi"
 
+    @property
+    def boot_csv_filename(self) -> str:
+        return f"BOOT{self.suffix.upper()}.CSV"
+
 
 DISK_ARCHITECTURES = {
     "aarch64": DiskArchitecture(
@@ -104,8 +109,7 @@ class DiskContext:
 
     @property
     def root_label(self) -> str:
-        value = re.sub(r"[^A-Za-z0-9_.-]+", "-", self.manifest.name).strip("-.")
-        return (value or "ludos")[:255]
+        return self._auxiliary_label("disk", limit=255).upper()
 
     @property
     def esp_label(self) -> str:
@@ -552,6 +556,7 @@ def _disk_builder_command(ctx: DiskContext) -> list[str]:
 
 def _disk_builder_script(ctx: DiskContext) -> str:
     arch = ctx.architecture
+    boot_csv = b64encode(_shim_boot_csv(ctx)).decode("ascii")
     flatpaks = _flatpak_script(
         ctx.manifest.installer.flatpaks,
         ctx.flatpak_uris,
@@ -575,6 +580,8 @@ def _disk_builder_script(ctx: DiskContext) -> str:
         "GRUB_FILENAME": arch.grub_filename,
         "MOK_FILENAME": arch.mok_filename,
         "FALLBACK_FILENAME": arch.fallback_filename,
+        "BOOT_CSV_FILENAME": arch.boot_csv_filename,
+        "BOOT_CSV_BASE64": boot_csv,
         "TARGET_ARCH": ctx.target_arch,
         "REQUESTED_SIZE": str(ctx.requested_size or ""),
     }
@@ -670,6 +677,7 @@ cp "$GRUB_SOURCE" "$ESP_TREE/EFI/$VENDOR/$GRUB_FILENAME"
 cp "$MOK_SOURCE" "$ESP_TREE/EFI/$VENDOR/$MOK_FILENAME"
 cp "$SHIM_SOURCE" "$ESP_TREE/EFI/$VENDOR/shim{arch.suffix}.efi"
 test -z "$FALLBACK_SOURCE" || cp "$FALLBACK_SOURCE" "$ESP_TREE/EFI/$VENDOR/$FALLBACK_FILENAME"
+printf '%s' "$BOOT_CSV_BASE64" | base64 --decode > "$ESP_TREE/EFI/$VENDOR/$BOOT_CSV_FILENAME"
 
 for directory in "$ESP_TREE/EFI/BOOT" "$ESP_TREE/EFI/$VENDOR"; do
     cp "$DEPLOY/usr/lib/bootupd/grub2-static/grub-static-efi.cfg" "$directory/grub.cfg"
@@ -752,6 +760,7 @@ blkid -p -O $(({ESP_START_SECTOR} * {SECTOR_SIZE})) -S {ESP_SIZE} "$DISK_IMAGE" 
 blkid -p -O $(({BOOT_START_SECTOR} * {SECTOR_SIZE})) -S {BOOT_SIZE} "$DISK_IMAGE" | grep -q 'TYPE="ext4"'
 blkid -p -O $(({ROOT_START_SECTOR} * {SECTOR_SIZE})) -S "$ROOT_BYTES" "$DISK_IMAGE" | grep -q 'TYPE="btrfs"'
 mdir -i "$ESP_IMAGE" "::/EFI/BOOT/$BOOT_FILENAME" >/dev/null
+mdir -i "$ESP_IMAGE" "::/EFI/$VENDOR/$BOOT_CSV_FILENAME" >/dev/null
 e2fsck -fn "$BOOT_IMAGE"
 btrfs inspect-internal dump-super "$ROOT_IMAGE" >/dev/null
 
@@ -776,6 +785,7 @@ rm -f "$ESP_IMAGE" "$BOOT_IMAGE" "$ROOT_IMAGE"
         "blkid",
         "btrfs",
         "e2fsck",
+        "base64",
     )
     if ctx.compress:
         required_tools = (*required_tools, "gzip")
@@ -788,6 +798,16 @@ done
 fakeroot -s {CONTAINER_WORKDIR}/fakeroot.db -- /bin/sh -ceu {shlex.quote(inner)}
 rm -f {CONTAINER_WORKDIR}/fakeroot.db
 """
+
+
+def _shim_boot_csv(ctx: DiskContext) -> bytes:
+    """Return shim fallback metadata in its required UTF-16LE representation."""
+    label = re.sub(r"[,\r\n]+", " ", ctx.manifest.name).strip() or ctx.stateroot
+    record = (
+        f"shim{ctx.architecture.suffix}.efi,{label},,"
+        f"This is the boot entry for {label}\n"
+    )
+    return b"\xff\xfe" + record.encode("utf-16-le")
 
 
 def _flatpak_script(

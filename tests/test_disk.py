@@ -40,6 +40,7 @@ from ludos.disk import (
     _prepare_output_target,
     _probe_execution,
     _require_rootless_podman,
+    _shim_boot_csv,
 )
 from ludos.model import ConfigError, InstallerConfig, InstallerFlatpaksConfig, Manifest
 
@@ -164,6 +165,8 @@ class DiskConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(_disk_architecture("arm64").boot_filename, "BOOTAA64.EFI")
         self.assertEqual(_disk_architecture("amd64").boot_filename, "BOOTX64.EFI")
+        self.assertEqual(_disk_architecture("arm64").boot_csv_filename, "BOOTAA64.CSV")
+        self.assertEqual(_disk_architecture("amd64").boot_csv_filename, "BOOTX64.CSV")
 
     def test_partition_layout_uses_512_mib_esp_and_1500_mib_boot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -173,7 +176,7 @@ class DiskConfigurationTests(unittest.TestCase):
         self.assertEqual(ctx.esp_label, "ANATASE_EFI")
         self.assertEqual(ctx.esp_filesystem_label, "ANATASE_EFI")
         self.assertEqual(ctx.boot_label, "ANATASE_BOOT")
-        self.assertEqual(ctx.root_label, "Anatase")
+        self.assertEqual(ctx.root_label, "ANATASE_DISK")
         self.assertEqual(BOOT_START_SECTOR, ESP_START_SECTOR + ESP_SECTORS)
         self.assertEqual(ROOT_START_SECTOR, BOOT_START_SECTOR + BOOT_SECTORS)
         self.assertEqual(
@@ -184,6 +187,18 @@ class DiskConfigurationTests(unittest.TestCase):
     def test_rejects_unknown_architecture(self) -> None:
         with self.assertRaisesRegex(ConfigError, "unsupported disk architecture"):
             _disk_architecture("riscv64")
+
+    def test_shim_boot_csv_is_utf16le_and_references_vendor_shim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _context(Path(tmp))
+
+        contents = _shim_boot_csv(ctx)
+
+        self.assertEqual(contents[:2], b"\xff\xfe")
+        self.assertEqual(
+            contents[2:].decode("utf-16-le"),
+            "shimx64.efi,Anatase,,This is the boot entry for Anatase\n",
+        )
 
     def test_size_parser(self) -> None:
         self.assertEqual(_parse_size("16G"), 16 * GIB)
@@ -417,6 +432,9 @@ class DiskBuilderTests(unittest.TestCase):
         self.assertIn("UUID=%s /boot/efi vfat", script)
         self.assertIn('"$BOOT_UUID" "$ESP_UUID" >> "$DEPLOY/etc/fstab"', script)
         self.assertIn('"$BOOT_UUID" > "$directory/bootuuid.cfg"', script)
+        self.assertIn("export BOOT_CSV_FILENAME=BOOTX64.CSV", script)
+        self.assertIn('base64 --decode > "$ESP_TREE/EFI/$VENDOR/$BOOT_CSV_FILENAME"', script)
+        self.assertIn('"::/EFI/$VENDOR/$BOOT_CSV_FILENAME"', script)
         self.assertIn(
             f'3 "GUID:{ROOT_GROW_ATTRIBUTE},GUID:{ROOT_NO_AUTO_ATTRIBUTE}"',
             script,
