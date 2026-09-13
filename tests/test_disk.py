@@ -62,6 +62,7 @@ def _context(tmp: Path, installer: InstallerConfig = InstallerConfig()) -> DiskC
         target_arch="x86_64",
         flatpak_uris=tuple(),
         requested_size=None,
+        compress=False,
         podman="podman",
         tooling_image="sha256:" + "a" * 64,
         tooling_arch="x86_64",
@@ -89,6 +90,7 @@ class DiskParserTests(unittest.TestCase):
                 "i.anatase.org/anatase:stable",
                 "--size",
                 "16G",
+                "--compress",
                 "--flatpak-uri",
                 "anatase=oci+https://flatpaks.example/arm",
                 "--force",
@@ -103,6 +105,7 @@ class DiskParserTests(unittest.TestCase):
         self.assertEqual(args.arch, "arm64")
         self.assertEqual(args.orchestrator, "i.anatase.org/anatase:stable")
         self.assertEqual(args.size, "16G")
+        self.assertTrue(args.compress)
         self.assertTrue(args.force)
 
     def test_disk_dispatch(self) -> None:
@@ -132,6 +135,7 @@ class DiskParserTests(unittest.TestCase):
             arch=None,
             orchestrator=None,
             size="8G",
+            compress=False,
             flatpak_uris=tuple(),
             force=False,
         )
@@ -221,6 +225,20 @@ class DiskConfigurationTests(unittest.TestCase):
             self.assertTrue((ctx.output_dir / "disk.raw").is_file())
             self.assertFalse((ctx.output_dir / "old").exists())
             self.assertFalse(ctx.source_mount.exists())
+
+    def test_force_publishes_compressed_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _context(Path(tmp))
+            object.__setattr__(ctx, "compress", True)
+            ctx.output_dir.mkdir(parents=True)
+            ctx.source_mount.mkdir(parents=True)
+            ctx.disk.touch()
+            ctx.artifact.touch()
+
+            _publish_output(ctx, force=True)
+
+            self.assertTrue((ctx.output_dir / "disk.raw.gz").is_file())
+            self.assertTrue((ctx.output_dir / "disk.raw").is_file())
 
     def test_rootless_guard(self) -> None:
         rootless = subprocess.CompletedProcess([], 0, stdout="true\n", stderr="")
@@ -376,6 +394,16 @@ class DiskBuilderTests(unittest.TestCase):
             script = _disk_builder_script(_context(Path(tmp), installer))
         self.assertIn("org.anatase.TextEditor", script)
         self.assertNotIn("org.fedoraproject.AnacondaInstaller", script)
+
+    def test_compression_uses_balanced_gzip_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _context(Path(tmp))
+            object.__setattr__(ctx, "compress", True)
+            script = _disk_builder_script(ctx)
+
+        self.assertIn('gzip -6 --force --keep "$DISK_IMAGE"', script)
+        self.assertIn("gzip", script.split("for tool in ", 1)[1].split("; do", 1)[0])
+        self.assertEqual(ctx.artifact.name, "disk.raw.gz")
 
 
 class DiskRootlessIntegrationTests(unittest.TestCase):

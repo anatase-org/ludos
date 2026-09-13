@@ -792,6 +792,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exact raw disk size, such as 16G. Defaults to content size plus headroom.",
     )
     disk_parser.add_argument(
+        "--compress",
+        action="store_true",
+        help=(
+            "Also create disk.raw.gz using gzip level 6 while preserving disk.raw."
+        ),
+    )
+    disk_parser.add_argument(
         "--flatpak-uri",
         action="append",
         default=[],
@@ -1511,6 +1518,7 @@ def bootc_command(args: argparse.Namespace) -> int:
             arch=args.arch,
             orchestrator=args.orchestrator,
             size=args.size,
+            compress=args.compress,
             flatpak_uris=tuple(args.flatpak_uris),
             force=args.force,
         )

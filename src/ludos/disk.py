@@ -77,6 +77,7 @@ class DiskContext:
     target_arch: str
     flatpak_uris: tuple[tuple[str, str], ...]
     requested_size: int | None
+    compress: bool
     podman: str
     tooling_image: str
     tooling_arch: str
@@ -100,6 +101,14 @@ class DiskContext:
     def disk(self) -> Path:
         return self.work_dir / "disk.raw"
 
+    @property
+    def artifact_name(self) -> str:
+        return "disk.raw.gz" if self.compress else "disk.raw"
+
+    @property
+    def artifact(self) -> Path:
+        return self.work_dir / self.artifact_name
+
 
 def bootc_disk(
     manifest_path: Path,
@@ -111,6 +120,7 @@ def bootc_disk(
     arch: str | None = None,
     orchestrator: str | None = None,
     size: str | None = None,
+    compress: bool = False,
     flatpak_uris: tuple[str, ...] = tuple(),
     force: bool = False,
 ) -> int:
@@ -207,6 +217,7 @@ def bootc_disk(
             target_arch=selected_arch,
             flatpak_uris=parsed_flatpak_uris,
             requested_size=parsed_size,
+            compress=compress,
             podman=podman,
             tooling_image=tooling_image,
             tooling_arch=tooling_arch,
@@ -222,6 +233,8 @@ def bootc_disk(
         raise
 
     log(f"Created raw disk image: {output_dir / 'disk.raw'}")
+    if compress:
+        log(f"Created compressed disk image: {output_dir / 'disk.raw.gz'}")
     return 0
 
 
@@ -531,6 +544,12 @@ def _disk_builder_script(ctx: DiskContext) -> str:
     assignments = "\n".join(
         f"export {key}={shlex.quote(value)}" for key, value in variables.items()
     )
+    compression = ""
+    if ctx.compress:
+        compression = """
+disk_status "Compressing disk image with gzip level 6"
+gzip -6 --force --keep "$DISK_IMAGE"
+"""
     inner = f"""
 umask 022
 disk_status() {{ printf '==> %s\n' "$1"; }}
@@ -680,23 +699,26 @@ btrfs inspect-internal dump-super "$ROOT_IMAGE" >/dev/null
 
 rm -rf "$SYSROOT" "$ESP_TREE"
 rm -f "$ESP_IMAGE" "$ROOT_IMAGE"
+
+{compression}
 """
-    required = " ".join(
-        (
-            "fakeroot",
-            "ostree",
-            "flatpak",
-            "setfiles",
-            "grub2-editenv",
-            "mkfs.btrfs",
-            "mkfs.vfat",
-            "mcopy",
-            "mdir",
-            "sfdisk",
-            "blkid",
-            "btrfs",
-        )
+    required_tools = (
+        "fakeroot",
+        "ostree",
+        "flatpak",
+        "setfiles",
+        "grub2-editenv",
+        "mkfs.btrfs",
+        "mkfs.vfat",
+        "mcopy",
+        "mdir",
+        "sfdisk",
+        "blkid",
+        "btrfs",
     )
+    if ctx.compress:
+        required_tools = (*required_tools, "gzip")
+    required = " ".join(required_tools)
     return f"""{assignments}
 printf '==> Validating disk tooling\n'
 for tool in {required}; do
@@ -743,8 +765,8 @@ def _flatpak_script(
 
 
 def _publish_output(ctx: DiskContext, *, force: bool = False) -> None:
-    if not ctx.disk.is_file():
-        raise ConfigError("disk builder did not create disk.raw")
+    if not ctx.artifact.is_file():
+        raise ConfigError(f"disk builder did not create {ctx.artifact_name}")
     try:
         ctx.source_mount.relative_to(ctx.work_dir)
     except ValueError:
