@@ -23,6 +23,7 @@ from .ci import (
     upload_ci,
     write_ci_env,
 )
+from .disk import bootc_disk
 from .flatpaks import build_flatpak, build_flatpaks
 from .installer import bootc_installer
 from .logging import LOGO_STR, configure_logging, configure_tracebacks, error, log
@@ -741,6 +742,70 @@ def build_parser() -> argparse.ArgumentParser:
     )
     installer_parser.set_defaults(func=bootc_command)
 
+    disk_parser = bootc_subcommands.add_parser(
+        "disk",
+        help="Create a rootless UEFI raw disk image from a bootc image ref.",
+    )
+    disk_parser.add_argument(
+        "manifest",
+        type=Path,
+        help="Path to a Ludos YAML manifest.",
+    )
+    disk_parser.add_argument(
+        "ref",
+        help="Bootc source image ref or local OCI layout.",
+    )
+    disk_parser.add_argument(
+        "--target-ref",
+        default=None,
+        help="Persistent registry image ref used for bootc updates.",
+    )
+    disk_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Artifact directory to create. Defaults to ./cache/disk/<manifest-artifact>.",
+    )
+    disk_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory used only for the default output location.",
+    )
+    disk_parser.add_argument(
+        "--arch",
+        default=None,
+        help="Target architecture. Defaults to .env or the host architecture.",
+    )
+    disk_parser.add_argument(
+        "--orchestrator",
+        default=None,
+        help=(
+            "Container image used to run disk tooling. Defaults to the target "
+            "image; use a native image to avoid QEMU for cross-architecture builds."
+        ),
+    )
+    disk_parser.add_argument(
+        "--size",
+        default=None,
+        metavar="SIZE",
+        help="Exact raw disk size, such as 16G. Defaults to content size plus headroom.",
+    )
+    disk_parser.add_argument(
+        "--flatpak-uri",
+        action="append",
+        default=[],
+        dest="flatpak_uris",
+        metavar="REMOTE=URI",
+        help="Override an installer Flatpak remote URI. May be specified more than once.",
+    )
+    disk_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing disk artifact directory.",
+    )
+    disk_parser.set_defaults(func=bootc_command)
+
     ci = subcommands.add_parser(
         "ci",
         help="Create and consume CI fan-out manifests.",
@@ -1433,6 +1498,20 @@ def bootc_command(args: argparse.Namespace) -> int:
             flatpak_uris=tuple(args.flatpak_uris),
             orchestrator=args.orchestrator,
             scratch=args.scratch,
+            force=args.force,
+        )
+    if args.bootc_action == "disk":
+        show_logo(args)
+        return bootc_disk(
+            args.manifest,
+            args.ref,
+            target_ref=args.target_ref,
+            output=args.output,
+            cache_dir=args.cache_dir,
+            arch=args.arch,
+            orchestrator=args.orchestrator,
+            size=args.size,
+            flatpak_uris=tuple(args.flatpak_uris),
             force=args.force,
         )
     raise ConfigError(f"unknown bootc action: {args.bootc_action}")
