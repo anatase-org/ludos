@@ -1091,9 +1091,12 @@ class InstallerHelperTests(unittest.TestCase):
             (("localhost/installer:arm64", Path("/run/ludos-rootfs")),),
         )
         erofs_command = tool_run.call_args.args[1]
-        self.assertEqual(erofs_command[0], "mkfs.erofs")
-        self.assertIn("/run/ludos-rootfs", erofs_command)
-        self.assertNotIn("--exclude-path=ludos/installer", erofs_command)
+        self.assertEqual(erofs_command[:2], ["/bin/sh", "-ceu"])
+        erofs_script = erofs_command[2]
+        self.assertIn("exec mkfs.erofs", erofs_script)
+        self.assertIn("/run/ludos-rootfs", erofs_script)
+        self.assertIn("> /dev/null", erofs_script)
+        self.assertNotIn("--exclude-path=ludos/installer", erofs_script)
 
     def test_create_root_erofs_falls_back_to_payload_without_orchestrator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

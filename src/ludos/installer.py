@@ -369,9 +369,10 @@ def _create_root_erofs_in_orchestrator(
     container_id = result.stdout.strip() or container
     try:
         _copy_boot_assets(ctx, container_id, run_ref)
+        erofs_script = f"exec {shlex.join(erofs_command)} > /dev/null"
         _run(
             ctx,
-            erofs_command,
+            ["/bin/sh", "-ceu", erofs_script],
             image_mounts=((run_ref, rootfs),),
         )
     finally:
