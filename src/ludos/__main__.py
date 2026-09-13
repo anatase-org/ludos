@@ -795,7 +795,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--compress",
         action="store_true",
         help=(
-            "Also create disk.raw.gz using gzip level 6 while preserving disk.raw."
+            "Also create KDE ISO Image Writer-compatible disk.img.gz using gzip "
+            "level 6 while preserving disk.raw."
         ),
     )
     disk_parser.add_argument(

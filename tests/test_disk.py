@@ -263,7 +263,7 @@ class DiskConfigurationTests(unittest.TestCase):
 
             _publish_output(ctx, force=True)
 
-            self.assertTrue((ctx.output_dir / "disk.raw.gz").is_file())
+            self.assertTrue((ctx.output_dir / "disk.img.gz").is_file())
             self.assertTrue((ctx.output_dir / "disk.raw").is_file())
 
     def test_rootless_guard(self) -> None:
@@ -453,9 +453,12 @@ class DiskBuilderTests(unittest.TestCase):
             object.__setattr__(ctx, "compress", True)
             script = _disk_builder_script(ctx)
 
-        self.assertIn('gzip -6 --force --keep "$DISK_IMAGE"', script)
+        self.assertIn(
+            'gzip -6 --stdout "$DISK_IMAGE" > "$COMPRESSED_IMAGE"',
+            script,
+        )
         self.assertIn("gzip", script.split("for tool in ", 1)[1].split("; do", 1)[0])
-        self.assertEqual(ctx.artifact.name, "disk.raw.gz")
+        self.assertEqual(ctx.artifact.name, "disk.img.gz")
 
 
 class DiskRootlessIntegrationTests(unittest.TestCase):

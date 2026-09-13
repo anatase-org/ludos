@@ -129,7 +129,7 @@ class DiskContext:
 
     @property
     def artifact_name(self) -> str:
-        return "disk.raw.gz" if self.compress else "disk.raw"
+        return "disk.img.gz" if self.compress else "disk.raw"
 
     @property
     def artifact(self) -> Path:
@@ -263,7 +263,7 @@ def bootc_disk(
 
     log(f"Created raw disk image: {output_dir / 'disk.raw'}")
     if compress:
-        log(f"Created compressed disk image: {output_dir / 'disk.raw.gz'}")
+        log(f"Created compressed disk image: {output_dir / 'disk.img.gz'}")
     return 0
 
 
@@ -584,7 +584,7 @@ def _disk_builder_script(ctx: DiskContext) -> str:
     if ctx.compress:
         compression = """
 disk_status "Compressing disk image with gzip level 6"
-gzip -6 --force --keep "$DISK_IMAGE"
+gzip -6 --stdout "$DISK_IMAGE" > "$COMPRESSED_IMAGE"
 """
     inner = f"""
 umask 022
@@ -595,9 +595,10 @@ ESP_IMAGE={CONTAINER_WORKDIR}/esp.img
 BOOT_IMAGE={CONTAINER_WORKDIR}/boot.ext4
 ROOT_IMAGE={CONTAINER_WORKDIR}/root.btrfs
 DISK_IMAGE={CONTAINER_WORKDIR}/disk.raw
+COMPRESSED_IMAGE={CONTAINER_WORKDIR}/disk.img.gz
 
 rm -rf "$SYSROOT" "$ESP_TREE"
-rm -f "$ESP_IMAGE" "$BOOT_IMAGE" "$ROOT_IMAGE" "$DISK_IMAGE"
+rm -f "$ESP_IMAGE" "$BOOT_IMAGE" "$ROOT_IMAGE" "$DISK_IMAGE" "$COMPRESSED_IMAGE"
 mkdir -p "$SYSROOT" "$ESP_TREE/EFI/BOOT"
 
 disk_status "Initializing OSTree sysroot"
