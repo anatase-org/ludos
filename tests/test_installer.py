@@ -72,6 +72,7 @@ def _context(
     *,
     installer: InstallerConfig = InstallerConfig(),
     orchestrator: str = "orchestrator",
+    arch: str | None = None,
     scratch: bool = False,
 ) -> InstallerContext:
     return InstallerContext(
@@ -80,6 +81,7 @@ def _context(
         ref=str(tmp / "cache/oci/anatase-f44-x86_64"),
         output_dir=tmp / "cache/iso/anatase-installer",
         orchestrator=orchestrator,
+        arch=arch,
         scratch=scratch,
         podman="podman",
     )
@@ -97,6 +99,8 @@ class InstallerParserTests(unittest.TestCase):
                 "cache/iso/anatase-installer",
                 "--cache-dir",
                 "cache",
+                "--arch",
+                "amd64",
                 "--orchestrator",
                 "localhost/tools:latest",
                 "--scratch",
@@ -110,6 +114,7 @@ class InstallerParserTests(unittest.TestCase):
         self.assertEqual(args.ref, "cache/oci/anatase-f44-x86_64")
         self.assertEqual(args.output, Path("cache/iso/anatase-installer"))
         self.assertEqual(args.cache_dir, Path("cache"))
+        self.assertEqual(args.arch, "amd64")
         self.assertEqual(args.orchestrator, "localhost/tools:latest")
         self.assertTrue(args.scratch)
         self.assertTrue(args.force)
@@ -129,6 +134,7 @@ class InstallerParserTests(unittest.TestCase):
         )
 
         self.assertIsNone(args.orchestrator)
+        self.assertIsNone(args.arch)
         self.assertFalse(args.scratch)
 
     def test_parser_rejects_installer_cache_flag(self) -> None:
@@ -152,6 +158,8 @@ class InstallerParserTests(unittest.TestCase):
                 "oci:./cache/oci/anatase-f44-x86_64",
                 "--cache-dir",
                 "cache",
+                "--arch",
+                "amd64",
             ]
         )
 
@@ -160,6 +168,7 @@ class InstallerParserTests(unittest.TestCase):
 
         installer.assert_called_once()
         self.assertEqual(installer.call_args.kwargs["cache_dir"], Path("cache"))
+        self.assertEqual(installer.call_args.kwargs["arch"], "amd64")
         self.assertNotIn("cache_only", installer.call_args.kwargs)
 
 
@@ -366,6 +375,37 @@ class InstallerHelperTests(unittest.TestCase):
                 root / "cache/iso/anatase-f44-x86_64",
             )
 
+    def test_output_arch_overrides_dotenv_arch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "anatase.yml"
+            (root / ".env").write_text("arch=aarch64\n", encoding="utf-8")
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "version: 1",
+                        "releasever: '44'",
+                        "distro: f44-$arch",
+                        "orchestrator: quay.io/fedora/fedora:44",
+                        "bootstrap: cards/bootstrap.yml",
+                        "repos: []",
+                        "cards:",
+                        "  - cards/base/kernel",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            output = _resolve_output_dir(
+                manifest,
+                "docker://example.invalid/anatase:latest",
+                None,
+                None,
+                arch="amd64",
+            )
+
+        self.assertEqual(output, root / "cache/iso/anatase-f44-x86_64")
+
     def test_source_image_ref_accepts_oci_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             oci_dir = Path(tmp) / "cache/oci/anatase-f44-x86_64"
@@ -513,7 +553,17 @@ class InstallerHelperTests(unittest.TestCase):
                 image_id = _pull_source_image(ctx, "oci:/cache/image:latest")
 
         self.assertEqual(image_id, "sha256:" + "b" * 64)
-        self.assertEqual(run_mock.call_args_list[0].args[0], ["podman", "pull", "--quiet", "oci:/cache/image:latest"])
+        self.assertEqual(
+            run_mock.call_args_list[0].args[0],
+            [
+                "podman",
+                "pull",
+                "--quiet",
+                "--platform",
+                "linux/amd64",
+                "oci:/cache/image:latest",
+            ],
+        )
 
     def test_build_installer_image_builds_containerfile_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -534,6 +584,8 @@ class InstallerHelperTests(unittest.TestCase):
             [
                 "podman",
                 "build",
+                "--platform",
+                "linux/amd64",
                 "--tag",
                 image,
                 "--tag",
@@ -810,7 +862,22 @@ class InstallerHelperTests(unittest.TestCase):
 
         self.assertIn("localhost/orchestrator:test", command)
         self.assertNotIn("cache/oci/anatase-f44-x86_64", command)
+        self.assertNotIn("--platform", command)
         self.assertEqual(command[-2:], ["mkfs.erofs", "--help"])
+
+    def test_native_orchestrator_is_not_pinned_to_target_arch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _context(
+                Path(tmp),
+                orchestrator="localhost/native-tools:test",
+                arch="arm64",
+            )
+
+            command = _tool_command(ctx, ["xorriso", "-version"])
+
+        self.assertEqual(ctx.target_arch, "aarch64")
+        self.assertIn("localhost/native-tools:test", command)
+        self.assertNotIn("--platform", command)
 
     def test_tool_command_can_keep_stdin_open(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

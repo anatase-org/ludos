@@ -22,7 +22,7 @@ from .build import (
     build_package_card_images,
     resolve_build_manifests,
 )
-from .common import _default_cache_version
+from .common import _default_cache_version, _normalize_arch
 from .logging import log, piter, pstream, warning
 from .model import ConfigError, Manifest
 
@@ -369,11 +369,13 @@ def _manifest_artifact_path(
     *,
     manifest: Manifest | None = None,
     cache_version: str | None = None,
+    arch: str | None = None,
 ) -> Path:
     return parent / _manifest_artifact_name(
         manifest_path,
         manifest=manifest,
         cache_version=cache_version,
+        arch=arch,
     )
 
 
@@ -382,10 +384,16 @@ def _manifest_artifact_name(
     *,
     manifest: Manifest | None = None,
     cache_version: str | None = None,
+    arch: str | None = None,
 ) -> str:
     manifest_path = manifest_path.expanduser().resolve()
-    manifest = manifest or Manifest.from_file(manifest_path)
-    env = _manifest_artifact_env(manifest_path, manifest, cache_version)
+    manifest = manifest or Manifest.from_file(manifest_path, arch=arch)
+    env = _manifest_artifact_env(
+        manifest_path,
+        manifest,
+        cache_version,
+        arch=arch,
+    )
     image = _cache_name(manifest_path.stem, "image")
     distro = _cache_name(_substitute_variables(manifest.distro, env), "distro")
     return _bootc_artifact_name(image, distro)
@@ -395,12 +403,16 @@ def _manifest_artifact_env(
     manifest_path: Path,
     manifest: Manifest,
     cache_version: str | None,
+    *,
+    arch: str | None = None,
 ) -> dict[str, str]:
     root_dir = manifest_path.resolve().parent
     env = {key: str(value) for key, value in manifest.env.items()}
     local_values = _load_dotenv(root_dir / ".env")
     local_prefix = local_values.pop("local_prefix", manifest.local_prefix)
     _local_prefix(local_prefix)
+    if arch is not None:
+        local_values["arch"] = _normalize_arch(arch)
     env.update(local_values)
     if cache_version is None:
         cache_version = _default_cache_version()

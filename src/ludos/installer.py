@@ -17,12 +17,14 @@ from .build import (
     FileRef,
     _cache_name,
     _image_exists,
+    _load_dotenv,
     _local_image,
     _parse_file_ref,
     _substitute_variables,
     _tag_image,
     _validate_relative_file_path,
 )
+from .common import _normalize_arch, _oci_platform
 from .logging import log, stream
 from .model import ConfigError, InstallerConfig, InstallerFlatpaksConfig, Manifest
 
@@ -107,9 +109,15 @@ class InstallerContext:
     ref: str
     output_dir: Path
     orchestrator: str
+    arch: str | None = None
     scratch: bool = False
     force: bool = False
     podman: str = "podman"
+
+    @property
+    def target_arch(self) -> str:
+        arch = self.arch if self.arch is not None else str(self.manifest.env["arch"])
+        return _normalize_arch(arch)
 
     @property
     def boot_assets(self) -> Path:
@@ -155,18 +163,25 @@ def bootc_installer(
     *,
     output: Path | None = None,
     cache_dir: Path | None = None,
+    arch: str | None = None,
     orchestrator: str | None = None,
     scratch: bool = False,
     force: bool = False,
 ) -> int:
     manifest_path = manifest_path.expanduser().resolve()
-    manifest = Manifest.from_file(manifest_path)
+    selected_arch = arch
+    if selected_arch is None:
+        selected_arch = _load_dotenv(manifest_path.parent / ".env").get("arch")
+    if selected_arch is not None:
+        selected_arch = _normalize_arch(selected_arch)
+    manifest = Manifest.from_file(manifest_path, arch=selected_arch)
     output_dir = _resolve_output_dir(
         manifest_path,
         ref,
         output,
         cache_dir,
         manifest=manifest,
+        arch=selected_arch,
     )
     podman = shutil.which("podman")
     if podman is None:
@@ -178,6 +193,7 @@ def bootc_installer(
         ref=ref,
         output_dir=output_dir,
         orchestrator=orchestrator or ref,
+        arch=selected_arch,
         scratch=scratch,
         force=force,
         podman=podman,
@@ -198,6 +214,7 @@ def bootc_installer(
         ref=ref,
         output_dir=output_dir,
         orchestrator=orchestrator or installer_image,
+        arch=selected_arch,
         scratch=scratch,
         force=force,
         podman=podman,
@@ -220,6 +237,7 @@ def _resolve_output_dir(
     cache_dir: Path | None,
     *,
     manifest: Manifest | None = None,
+    arch: str | None = None,
 ) -> Path:
     if output is not None:
         return output.expanduser().resolve()
@@ -228,7 +246,12 @@ def _resolve_output_dir(
         if cache_dir is not None
         else (manifest_path.resolve().parent / DEFAULT_CACHE_DIR).resolve()
     )
-    return _manifest_artifact_path(manifest_path, cache_root / "iso", manifest=manifest)
+    return _manifest_artifact_path(
+        manifest_path,
+        cache_root / "iso",
+        manifest=manifest,
+        arch=arch,
+    )
 
 
 def _safe_ref_name(ref: str) -> str:
@@ -316,7 +339,14 @@ def _source_image_ref(ref: str) -> str:
 
 def _pull_source_image(ctx: InstallerContext, source_ref: str) -> str:
     result = _run_host(
-        [ctx.podman, "pull", "--quiet", source_ref],
+        [
+            ctx.podman,
+            "pull",
+            "--quiet",
+            "--platform",
+            _oci_platform(ctx.target_arch),
+            source_ref,
+        ],
         capture=True,
     )
     image_ref = _pulled_image_ref(result.stdout, source_ref)
@@ -388,6 +418,8 @@ def _build_installer_image(ctx: InstallerContext, base_ref: str) -> str:
         [
             ctx.podman,
             "build",
+            "--platform",
+            _oci_platform(ctx.target_arch),
             *build_options,
             "--tag",
             image,
@@ -416,6 +448,7 @@ def _installer_latest_image_ref(ctx: InstallerContext | None = None) -> str:
 
 def _installer_manifest_identity(ctx: InstallerContext) -> tuple[str, str, str]:
     manifest_env = {key: str(value) for key, value in ctx.manifest.env.items()}
+    manifest_env["arch"] = ctx.target_arch
     manifest_env["releasever"] = _cache_name(
         _substitute_variables(ctx.manifest.releasever, manifest_env),
         "releasever",

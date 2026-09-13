@@ -709,6 +709,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cache directory used only for the default output location.",
     )
     installer_parser.add_argument(
+        "--arch",
+        default=None,
+        help="Target architecture to build. Defaults to the host architecture.",
+    )
+    installer_parser.add_argument(
         "--orchestrator",
         default=None,
         help="Container image used to run installer tooling. Defaults to the image ref.",
@@ -1405,6 +1410,7 @@ def bootc_command(args: argparse.Namespace) -> int:
             args.ref,
             output=args.output,
             cache_dir=args.cache_dir,
+            arch=args.arch,
             orchestrator=args.orchestrator,
             scratch=args.scratch,
             force=args.force,
