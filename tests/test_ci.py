@@ -65,6 +65,7 @@ class CiParserTests(unittest.TestCase):
         self.assertEqual(args.ref, "ghcr.io/test/anatase:latest")
         self.assertEqual(args.label, "org.opencontainers.image.version")
         self.assertIsNone(args.arch)
+        self.assertIsNone(args.prefix)
 
     def test_parser_accepts_custom_env_label(self) -> None:
         args = build_parser().parse_args(
@@ -93,6 +94,20 @@ class CiParserTests(unittest.TestCase):
         )
 
         self.assertEqual(args.arch, "amd64")
+
+    def test_parser_accepts_env_prefix(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "ci",
+                "env",
+                "anatase.yml",
+                "i.anatase.org/anatase:testing",
+                "--prefix",
+                "testing-",
+            ]
+        )
+
+        self.assertEqual(args.prefix, "testing-")
 
     def test_parser_accepts_init_ci_options(self) -> None:
         parser = build_parser()
@@ -389,6 +404,7 @@ class CiParserTests(unittest.TestCase):
             "ghcr.io/test/anatase:latest",
             label="org.opencontainers.image.version",
             arch=None,
+            prefix=None,
         )
 
     def test_ci_command_calls_init_ci(self) -> None:
@@ -614,6 +630,60 @@ class CiEnvTests(unittest.TestCase):
             tag = _manifest_tag(Path("anatase.yml"))
 
         self.assertEqual(tag, "20260713")
+
+    def test_manifest_tag_uses_prefix_override(self) -> None:
+        manifest = SimpleNamespace(
+            env={
+                "releasever": 44,
+                "dist": "",
+                "prefix": "",
+                "tag": "$prefix$version$dist",
+            },
+            releasever="$releasever",
+            tag="$tag",
+        )
+        with (
+            patch("ludos.model.Manifest.from_file", return_value=manifest),
+            patch("ludos.ci._default_cache_version", return_value="20260713"),
+        ):
+            tag = _manifest_tag(Path("anatase.yml"), prefix="testing-")
+
+        self.assertEqual(tag, "testing-20260713")
+
+    def test_increments_prefixed_version_and_writes_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "anatase.yml"
+            with (
+                patch(
+                    "ludos.ci._manifest_tag",
+                    return_value="testing-20260713",
+                ) as manifest_tag,
+                patch(
+                    "ludos.ci._default_cache_version", return_value="20260713"
+                ),
+                patch(
+                    "ludos.ci._inspect_remote_labels",
+                    return_value={
+                        "org.opencontainers.image.version": "testing-20260713"
+                    },
+                ),
+            ):
+                write_ci_env(
+                    manifest,
+                    "i.anatase.org/anatase:testing",
+                    prefix="testing-",
+                )
+
+            manifest_tag.assert_called_once_with(
+                manifest.resolve(),
+                version="20260713",
+                prefix="testing-",
+            )
+            self.assertEqual(
+                (root / ".env").read_text(encoding="utf-8"),
+                "version=20260713\ndist=.1\nprefix=testing-\n",
+            )
 
     def test_writes_first_dist_from_scratch_when_label_equals_tag(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -127,10 +127,11 @@ def write_ci_env(
     *,
     label: str = DEFAULT_VERSION_LABEL,
     arch: str | None = None,
+    prefix: str | None = None,
 ) -> Path:
     manifest_path = manifest_path.expanduser().resolve()
     cache_version = _default_cache_version()
-    tag = _manifest_tag(manifest_path, version=cache_version)
+    tag = _manifest_tag(manifest_path, version=cache_version, prefix=prefix)
     missing_remote = False
     try:
         labels = _inspect_remote_labels(ref, arch=arch)
@@ -164,18 +165,26 @@ def write_ci_env(
 
     output = manifest_path.parent / ".env"
     text = f"version={cache_version}\ndist={dist}\n"
+    if prefix is not None:
+        text += f"prefix={prefix}\n"
     output.write_text(text, encoding="utf-8")
     log(f"Wrote CI environment: {output}\n{text}")
     return output
 
 
-def _manifest_tag(manifest_path: Path, version: str | None = None) -> str:
+def _manifest_tag(
+    manifest_path: Path,
+    version: str | None = None,
+    prefix: str | None = None,
+) -> str:
     manifest = Manifest.from_file(manifest_path)
     if not manifest.tag:
         raise ConfigError(f"{manifest_path}: missing 'tag'")
     version = version or _default_cache_version()
 
     env = {key: str(value) for key, value in manifest.env.items()}
+    if prefix is not None:
+        env["prefix"] = prefix
     env["version"] = version
     env["releasever"] = _substitute_variables(manifest.releasever, env)
     env = {

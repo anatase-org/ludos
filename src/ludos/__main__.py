@@ -769,6 +769,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="OCI architecture to inspect. Defaults to the current architecture.",
     )
+    env_parser.add_argument(
+        "--prefix",
+        default=None,
+        help=(
+            "Override the manifest prefix while deriving the version and write "
+            "it to .env."
+        ),
+    )
     env_parser.set_defaults(func=ci_command)
     init_parser = ci_subcommands.add_parser(
         "init",
@@ -1432,7 +1440,13 @@ def bootc_command(args: argparse.Namespace) -> int:
 
 def ci_command(args: argparse.Namespace) -> int:
     if args.ci_action == "env":
-        write_ci_env(args.manifest, args.ref, label=args.label, arch=args.arch)
+        write_ci_env(
+            args.manifest,
+            args.ref,
+            label=args.label,
+            arch=args.arch,
+            prefix=args.prefix,
+        )
         return 0
     if args.ci_action == "init":
         init_ci(
