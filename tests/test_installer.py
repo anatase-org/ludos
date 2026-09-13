@@ -923,6 +923,16 @@ class InstallerHelperTests(unittest.TestCase):
         self.assertIn('grubx64.efi', script)
         self.assertIn('printf "%s\\n%s\\n%s\\n" "$shim" "$mok_manager" "$grub"', script)
 
+    def test_efi_asset_script_selects_aarch64_bootloaders(self) -> None:
+        script = _efi_asset_script("aarch64")
+
+        self.assertIn('shimaa64*.efi', script)
+        self.assertIn('BOOTAA64.EFI', script)
+        self.assertIn("install shim-aa64", script)
+        self.assertIn('mmaa64*.efi', script)
+        self.assertIn('grubaa64.efi', script)
+        self.assertNotIn('x64', script)
+
     def test_container_ludos_efi_asset_dir_checks_standard_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _context(Path(tmp))
@@ -1049,10 +1059,19 @@ class InstallerHelperTests(unittest.TestCase):
 
     def test_grub_config_supports_platform_specific_boot_commands(self) -> None:
         efi_config = _grub_config("ANATASE_ISO", platform="efi")
+        arm_efi_config = _grub_config(
+            "ANATASE_ISO",
+            platform="efi",
+            arch="aarch64",
+        )
         bios_config = _grub_config("ANATASE_ISO", platform="bios")
 
         self.assertIn("linuxefi /vmlinuz", efi_config)
         self.assertNotIn("linux /vmlinuz", efi_config)
+        self.assertIn("linux /vmlinuz", arm_efi_config)
+        self.assertNotIn("linuxefi /vmlinuz", arm_efi_config)
+        self.assertIn("initrd /initramfs.img", arm_efi_config)
+        self.assertNotIn("initrdefi /initramfs.img", arm_efi_config)
         self.assertIn("linux /vmlinuz", bios_config)
         self.assertNotIn("linuxefi /vmlinuz", bios_config)
 
@@ -1197,6 +1216,36 @@ class InstallerHelperTests(unittest.TestCase):
                 (efi_tree / "EFI/BOOT/grub.cfg").read_text(encoding="utf-8"),
             )
 
+    def test_aarch64_efi_image_uses_aa64_bootloader_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = _context(root, arch="aarch64")
+            ctx.output_dir.mkdir(parents=True)
+            ctx.boot_assets.mkdir()
+            (ctx.boot_assets / "shimaa64.efi").write_text("shim", encoding="utf-8")
+            (ctx.boot_assets / "mmaa64.efi").write_text("mok", encoding="utf-8")
+            (ctx.boot_assets / "grubaa64.efi").write_text("grub", encoding="utf-8")
+
+            with patch("ludos.installer._run"):
+                _create_efi_image(ctx)
+
+            efi_tree = ctx.output_dir / "efi-tree/EFI/BOOT"
+            self.assertEqual(
+                (efi_tree / "BOOTAA64.EFI").read_text(encoding="utf-8"),
+                "shim",
+            )
+            self.assertEqual(
+                (efi_tree / "mmaa64.efi").read_text(encoding="utf-8"),
+                "mok",
+            )
+            self.assertEqual(
+                (efi_tree / "grubaa64.efi").read_text(encoding="utf-8"),
+                "grub",
+            )
+            config = (efi_tree / "grub.cfg").read_text(encoding="utf-8")
+            self.assertIn("linux /vmlinuz", config)
+            self.assertNotIn("linuxefi /vmlinuz", config)
+
     def test_copy_live_iso_payload_places_erofs_and_visible_efi_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1204,6 +1253,8 @@ class InstallerHelperTests(unittest.TestCase):
             ctx.output_dir.mkdir(parents=True)
             ctx.root_erofs.write_text("erofs", encoding="utf-8")
             ctx.boot_assets.mkdir()
+            (ctx.boot_assets / "vmlinuz").write_text("kernel", encoding="utf-8")
+            (ctx.boot_assets / "initramfs.img").write_text("initramfs", encoding="utf-8")
             (ctx.boot_assets / "shimx64.efi").write_text("shim", encoding="utf-8")
             (ctx.boot_assets / "mmx64.efi").write_text("mok", encoding="utf-8")
             (ctx.boot_assets / "grubx64.efi").write_text("grub", encoding="utf-8")
@@ -1223,6 +1274,11 @@ class InstallerHelperTests(unittest.TestCase):
             _copy_live_iso_payload(ctx, iso_tree)
 
             self.assertEqual((iso_tree / LIVE_ROOT_IMAGE).read_text(encoding="utf-8"), "erofs")
+            self.assertEqual((iso_tree / "vmlinuz").read_text(encoding="utf-8"), "kernel")
+            self.assertEqual(
+                (iso_tree / "initramfs.img").read_text(encoding="utf-8"),
+                "initramfs",
+            )
             self.assertFalse((iso_tree / "images/efiboot.img").exists())
             self.assertEqual((iso_tree / "EFI/BOOT/BOOTX64.EFI").read_text(encoding="utf-8"), "shim")
             self.assertEqual((iso_tree / "EFI/BOOT/mmx64.efi").read_text(encoding="utf-8"), "mok")
@@ -1270,6 +1326,23 @@ class InstallerHelperTests(unittest.TestCase):
         )
         self.assertIn("-isohybrid-gpt-basdat", command)
         self.assertNotIn("-boot_image", command)
+
+    def test_xorriso_command_supports_uefi_only_iso(self) -> None:
+        command = _xorriso_command(
+            Path("installer.iso"),
+            Path("."),
+            bios_mbr=None,
+            bios_boot_image=None,
+            efi_partition_image=Path("efi.img"),
+        )
+
+        self.assertIn("-append_partition", command)
+        self.assertIn("-appended_part_as_gpt", command)
+        self.assertIn("-e", command)
+        self.assertNotIn("-b", command)
+        self.assertNotIn("--grub2-mbr", command)
+        self.assertNotIn("--grub2-boot-info", command)
+        self.assertNotIn("-isohybrid-gpt-basdat", command)
 
     def test_grub_mkimage_command_builds_i386_pc_core(self) -> None:
         command = _grub_mkimage_command(Path("core.img"))

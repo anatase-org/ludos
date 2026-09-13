@@ -90,6 +90,31 @@ class ErofsProfile:
     features: str | None = None
 
 
+@dataclass(frozen=True)
+class EfiArchitecture:
+    suffix: str
+    boot_filename: str
+    shim_package: str
+
+    @property
+    def shim_filename(self) -> str:
+        return f"shim{self.suffix}.efi"
+
+    @property
+    def mok_filename(self) -> str:
+        return f"mm{self.suffix}.efi"
+
+    @property
+    def grub_filename(self) -> str:
+        return f"grub{self.suffix}.efi"
+
+
+EFI_ARCHITECTURES = {
+    "aarch64": EfiArchitecture("aa64", "BOOTAA64.EFI", "shim-aa64"),
+    "x86_64": EfiArchitecture("x64", "BOOTX64.EFI", "shim-x64"),
+}
+
+
 EROFS_DEFAULT_PROFILE = ErofsProfile(
     name="default",
     compression=EROFS_COMPRESSION,
@@ -779,17 +804,32 @@ def _copy_boot_assets(ctx: InstallerContext, container_id: str, run_ref: str) ->
             str(ctx.boot_assets / "initramfs.img"),
         ]
     )
+    efi = _efi_architecture(ctx.target_arch)
     shim, mok_manager, grub = _container_efi_assets(ctx, run_ref)
-    _run_host([ctx.podman, "cp", f"{container_id}:{shim}", str(ctx.boot_assets / "shimx64.efi")])
+    _run_host(
+        [
+            ctx.podman,
+            "cp",
+            f"{container_id}:{shim}",
+            str(ctx.boot_assets / efi.shim_filename),
+        ]
+    )
     _run_host(
         [
             ctx.podman,
             "cp",
             f"{container_id}:{mok_manager}",
-            str(ctx.boot_assets / "mmx64.efi"),
+            str(ctx.boot_assets / efi.mok_filename),
         ]
     )
-    _run_host([ctx.podman, "cp", f"{container_id}:{grub}", str(ctx.boot_assets / "grubx64.efi")])
+    _run_host(
+        [
+            ctx.podman,
+            "cp",
+            f"{container_id}:{grub}",
+            str(ctx.boot_assets / efi.grub_filename),
+        ]
+    )
     _copy_container_ludos_efi_assets(ctx, container_id, run_ref)
 
 
@@ -880,7 +920,7 @@ def _container_efi_assets(ctx: InstallerContext, run_ref: str) -> tuple[str, str
             "/bin/sh",
             run_ref,
             "-ceu",
-            _efi_asset_script(),
+            _efi_asset_script(ctx.target_arch),
         ],
         capture=True,
     )
@@ -890,26 +930,39 @@ def _container_efi_assets(ctx: InstallerContext, run_ref: str) -> tuple[str, str
     return lines[0], lines[1], lines[2]
 
 
-def _efi_asset_script() -> str:
+def _efi_architecture(arch: str) -> EfiArchitecture:
+    normalized = _normalize_arch(arch)
+    try:
+        return EFI_ARCHITECTURES[normalized]
+    except KeyError as exc:
+        supported = ", ".join(sorted(EFI_ARCHITECTURES))
+        raise ConfigError(
+            f"installer ISO architecture '{normalized}' is unsupported; "
+            f"expected one of: {supported}"
+        ) from exc
+
+
+def _efi_asset_script(arch: str = "x86_64") -> str:
+    efi = _efi_architecture(arch)
     return "\n".join(
         [
             "search_roots=",
             'for root in /usr/lib/efi /usr/lib/ostree-boot /boot /usr/share /usr/lib; do',
             '  if [ -d "$root" ]; then search_roots="$search_roots $root"; fi',
             "done",
-            'shim=$(find $search_roots -type f \\( -iname "shimx64*.efi" -o -iname "shim.efi" \\) 2>/dev/null | sort | tail -n 1)',
+            f'shim=$(find $search_roots -type f \\( -iname "shim{efi.suffix}*.efi" -o -iname "{efi.boot_filename}" -o -iname "shim.efi" \\) 2>/dev/null | sort | tail -n 1)',
             'if [ -z "$shim" ]; then',
-            '  echo "installer image is missing shim EFI file; install shim-x64" >&2',
+            f'  echo "installer image is missing shim EFI file; install {efi.shim_package}" >&2',
             "  exit 1",
             "fi",
-            'mok_manager=$(find $search_roots -type f -iname "mmx64*.efi" 2>/dev/null | sort | tail -n 1)',
+            f'mok_manager=$(find $search_roots -type f -iname "mm{efi.suffix}*.efi" 2>/dev/null | sort | tail -n 1)',
             'if [ -z "$mok_manager" ]; then',
-            '  echo "installer image is missing MokManager EFI file; install shim-x64" >&2',
+            f'  echo "installer image is missing MokManager EFI file; install {efi.shim_package}" >&2',
             "  exit 1",
             "fi",
-            'grub=$(find $search_roots -type f -iname "grubx64.efi" 2>/dev/null | sort | tail -n 1)',
+            f'grub=$(find $search_roots -type f -iname "grub{efi.suffix}.efi" 2>/dev/null | sort | tail -n 1)',
             'if [ -z "$grub" ]; then',
-            '  echo "installer image is missing grubx64.efi" >&2',
+            f'  echo "installer image is missing grub{efi.suffix}.efi" >&2',
             "  exit 1",
             "fi",
             'printf "%s\\n%s\\n%s\\n" "$shim" "$mok_manager" "$grub"',
@@ -987,13 +1040,7 @@ def _create_efi_image(ctx: InstallerContext) -> None:
 
     log("Adding UEFI bootloader payload")
     _copy_ludos_efi_payload(ctx.boot_assets, efi_tree)
-    shutil.copy2(ctx.boot_assets / "shimx64.efi", efi_tree / "EFI/BOOT/BOOTX64.EFI")
-    shutil.copy2(ctx.boot_assets / "mmx64.efi", efi_tree / "EFI/BOOT/mmx64.efi")
-    shutil.copy2(ctx.boot_assets / "grubx64.efi", efi_tree / "EFI/BOOT/grubx64.efi")
-    (efi_tree / "EFI/BOOT/grub.cfg").write_text(
-        _grub_config(ctx.iso_label, ctx.menuentry, platform="efi"),
-        encoding="utf-8",
-    )
+    _copy_efi_bootloaders(ctx, efi_tree)
 
     size_kib = _efi_image_size_kib(efi_tree)
     log(f"Formatting EFI system partition image: {ctx.efi_img}")
@@ -1052,16 +1099,23 @@ def _grub_config(
     menuentry: str = "Installer",
     *,
     platform: str = "auto",
+    arch: str = "x86_64",
 ) -> str:
     kernel_args = (
         f"root=live:CDLABEL={iso_label} "
         "rd.live.image rd.live.overlay.overlayfs=1 quiet rhgb"
     )
     if platform == "efi":
-        boot_lines = [
-            f"    linuxefi /vmlinuz {kernel_args}",
-            "    initrdefi /initramfs.img",
-        ]
+        if _normalize_arch(arch) == "x86_64":
+            boot_lines = [
+                f"    linuxefi /vmlinuz {kernel_args}",
+                "    initrdefi /initramfs.img",
+            ]
+        else:
+            boot_lines = [
+                f"    linux /vmlinuz {kernel_args}",
+                "    initrd /initramfs.img",
+            ]
     elif platform == "bios":
         boot_lines = [
             f"    linux /vmlinuz {kernel_args}",
@@ -1183,16 +1237,23 @@ def _create_iso(ctx: InstallerContext) -> None:
     iso_tree.mkdir()
     log("Adding live root image to ISO tree")
     _copy_live_iso_payload(ctx, iso_tree)
-    log("Creating BIOS El Torito boot image")
-    bios_mbr = _create_bios_boot_image(ctx, iso_tree)
-    log(f"Running xorriso for hybrid ISO: {ctx.installer_iso}")
+    bios_mbr = None
+    bios_boot_image = None
+    if ctx.target_arch == "x86_64":
+        log("Creating BIOS El Torito boot image")
+        bios_mbr = _create_bios_boot_image(ctx, iso_tree)
+        bios_boot_image = BIOS_ELTORITO_IMAGE
+        log(f"Running xorriso for hybrid BIOS/UEFI ISO: {ctx.installer_iso}")
+    else:
+        log(f"Running xorriso for UEFI ISO: {ctx.installer_iso}")
     _run(
         ctx,
         _xorriso_command(
             _tool_path(ctx, ctx.installer_iso),
             _tool_path(ctx, iso_tree),
             iso_label=ctx.iso_label,
-            bios_mbr=_tool_path(ctx, bios_mbr),
+            bios_mbr=_tool_path(ctx, bios_mbr) if bios_mbr is not None else None,
+            bios_boot_image=bios_boot_image,
             efi_partition_image=_tool_path(ctx, ctx.efi_img),
         ),
     )
@@ -1201,17 +1262,31 @@ def _create_iso(ctx: InstallerContext) -> None:
 def _copy_live_iso_payload(ctx: InstallerContext, iso_tree: Path) -> None:
     _copy_ludos_efi_payload(ctx.boot_assets, iso_tree)
 
+    kernel, initramfs = _kernel_and_initramfs(ctx.boot_assets)
+    shutil.copy2(kernel, iso_tree / "vmlinuz")
+    shutil.copy2(initramfs, iso_tree / "initramfs.img")
+
     live_root = iso_tree / LIVE_ROOT_IMAGE
     live_root.parent.mkdir(parents=True)
     shutil.copy2(ctx.root_erofs, live_root)
 
-    visible_efi = iso_tree / "EFI/BOOT"
-    visible_efi.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ctx.boot_assets / "shimx64.efi", visible_efi / "BOOTX64.EFI")
-    shutil.copy2(ctx.boot_assets / "mmx64.efi", visible_efi / "mmx64.efi")
-    shutil.copy2(ctx.boot_assets / "grubx64.efi", visible_efi / "grubx64.efi")
-    (visible_efi / "grub.cfg").write_text(
-        _grub_config(ctx.iso_label, ctx.menuentry, platform="efi"),
+    _copy_efi_bootloaders(ctx, iso_tree)
+
+
+def _copy_efi_bootloaders(ctx: InstallerContext, efi_root: Path) -> None:
+    efi = _efi_architecture(ctx.target_arch)
+    boot_dir = efi_root / "EFI/BOOT"
+    boot_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ctx.boot_assets / efi.shim_filename, boot_dir / efi.boot_filename)
+    shutil.copy2(ctx.boot_assets / efi.mok_filename, boot_dir / efi.mok_filename)
+    shutil.copy2(ctx.boot_assets / efi.grub_filename, boot_dir / efi.grub_filename)
+    (boot_dir / "grub.cfg").write_text(
+        _grub_config(
+            ctx.iso_label,
+            ctx.menuentry,
+            platform="efi",
+            arch=ctx.target_arch,
+        ),
         encoding="utf-8",
     )
 
@@ -1225,9 +1300,6 @@ def _copy_ludos_efi_payload(boot_assets: Path, efi_root: Path) -> None:
 def _create_bios_boot_image(ctx: InstallerContext, iso_tree: Path) -> Path:
     grub_dir = iso_tree / BIOS_GRUB_DIR
     grub_dir.mkdir(parents=True)
-    kernel, initramfs = _kernel_and_initramfs(ctx.boot_assets)
-    shutil.copy2(kernel, iso_tree / "vmlinuz")
-    shutil.copy2(initramfs, iso_tree / "initramfs.img")
     (iso_tree / "boot/grub/grub.cfg").write_text(
         _grub_config(ctx.iso_label, ctx.menuentry, platform="bios"),
         encoding="utf-8",
@@ -1276,7 +1348,7 @@ def _xorriso_command(
     *,
     iso_label: str = "ANATASE_ISO",
     bios_mbr: Path | None = None,
-    bios_boot_image: Path = BIOS_ELTORITO_IMAGE,
+    bios_boot_image: Path | None = BIOS_ELTORITO_IMAGE,
     efi_partition_image: Path = Path("efi.img"),
 ) -> list[str]:
     command = [
@@ -1309,6 +1381,11 @@ def _xorriso_command(
             "0xef",
             str(efi_partition_image),
             "-appended_part_as_gpt",
+        ]
+    )
+    if bios_boot_image is not None:
+        command.extend(
+            [
             "-b",
             str(bios_boot_image),
             "-no-emul-boot",
@@ -1317,13 +1394,18 @@ def _xorriso_command(
             "-boot-info-table",
             "--grub2-boot-info",
             "-eltorito-alt-boot",
+            ]
+        )
+    command.extend(
+        [
             "-e",
             "--interval:appended_partition_2:all::",
             "-no-emul-boot",
-            "-isohybrid-gpt-basdat",
-            str(iso_tree),
         ]
     )
+    if bios_boot_image is not None:
+        command.append("-isohybrid-gpt-basdat")
+    command.append(str(iso_tree))
     return command
 
 
