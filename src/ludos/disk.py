@@ -30,6 +30,8 @@ ROOT_START_SECTOR = BOOT_START_SECTOR + BOOT_SECTORS
 GPT_TRAILING_SECTORS = 34
 ROOT_HEADROOM = 2 * GIB
 ROOT_GROW_ATTRIBUTE = 59
+BOOT_HIDDEN_ATTRIBUTE = 62
+BOOT_NO_AUTO_ATTRIBUTE = 63
 ESP_TYPE_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 BOOT_TYPE_GUID = "bc13c2ff-59e6-4262-a352-b275fd6f7172"
 BTRFS_COMPRESSION = "zstd"
@@ -103,6 +105,23 @@ class DiskContext:
     def root_label(self) -> str:
         value = re.sub(r"[^A-Za-z0-9_.-]+", "-", self.manifest.name).strip("-.")
         return (value or "ludos")[:255]
+
+    @property
+    def esp_label(self) -> str:
+        return self._auxiliary_label("efi", limit=11).upper()
+
+    @property
+    def esp_filesystem_label(self) -> str:
+        return self.esp_label.upper()
+
+    @property
+    def boot_label(self) -> str:
+        return self._auxiliary_label("boot", limit=16).upper()
+
+    def _auxiliary_label(self, suffix: str, *, limit: int) -> str:
+        value = re.sub(r"[^a-z0-9]+", "_", self.manifest.name.lower()).strip("_")
+        prefix = (value or "ludos")[: limit - len(suffix) - 1]
+        return f"{prefix}_{suffix}"
 
     @property
     def disk(self) -> Path:
@@ -543,7 +562,10 @@ def _disk_builder_script(ctx: DiskContext) -> str:
         "STATEROOT": ctx.stateroot,
         "ESP_UUID": ctx.esp_uuid,
         "ESP_VOLUME_ID": ctx.esp_uuid.replace("-", ""),
+        "ESP_LABEL": ctx.esp_label,
+        "ESP_FILESYSTEM_LABEL": ctx.esp_filesystem_label,
         "BOOT_UUID": ctx.boot_uuid,
+        "BOOT_LABEL": ctx.boot_label,
         "ROOT_UUID": ctx.root_uuid,
         "ROOT_LABEL": ctx.root_label,
         "ROOT_TYPE_GUID": arch.root_type_guid,
@@ -663,7 +685,7 @@ setfiles -F -q -r "$SYSROOT" "$POLICY" \
 
 disk_status "Creating ext4 /boot filesystem"
 truncate -s {BOOT_SIZE} "$BOOT_IMAGE"
-mkfs.ext4 -q -F -m 0 -L boot -U "$BOOT_UUID" -d "$SYSROOT/boot" "$BOOT_IMAGE"
+mkfs.ext4 -q -F -m 0 -L "$BOOT_LABEL" -U "$BOOT_UUID" -d "$SYSROOT/boot" "$BOOT_IMAGE"
 grub2-fstest "$BOOT_IMAGE" ls /loader/entries | grep -q .
 rm -rf "$SYSROOT/boot"
 mkdir -p "$SYSROOT/boot"
@@ -702,7 +724,7 @@ truncate -s "$ROOT_BYTES" "$ROOT_IMAGE"
 
 disk_status "Creating FAT32 EFI system partition"
 truncate -s {ESP_SIZE} "$ESP_IMAGE"
-mkfs.vfat -F 32 -n EFI -i "$ESP_VOLUME_ID" "$ESP_IMAGE"
+mkfs.vfat -F 32 -n "$ESP_FILESYSTEM_LABEL" -i "$ESP_VOLUME_ID" "$ESP_IMAGE"
 mcopy -s -i "$ESP_IMAGE" "$ESP_TREE/EFI" ::/
 
 disk_status "Assembling sparse GPT disk image"
@@ -711,10 +733,11 @@ sfdisk --quiet "$DISK_IMAGE" <<EOF_SFDISK
 label: gpt
 unit: sectors
 
-start={ESP_START_SECTOR}, size={ESP_SECTORS}, type={ESP_TYPE_GUID}, name="EFI System Partition"
-start={BOOT_START_SECTOR}, size={BOOT_SECTORS}, type={BOOT_TYPE_GUID}, name="Linux extended boot"
-start={ROOT_START_SECTOR}, size=$ROOT_SECTORS, type=$ROOT_TYPE_GUID, name="Linux root filesystem"
+start={ESP_START_SECTOR}, size={ESP_SECTORS}, type={ESP_TYPE_GUID}, name="$ESP_LABEL"
+start={BOOT_START_SECTOR}, size={BOOT_SECTORS}, type={BOOT_TYPE_GUID}, name="$BOOT_LABEL"
+start={ROOT_START_SECTOR}, size=$ROOT_SECTORS, type=$ROOT_TYPE_GUID, name="$ROOT_LABEL"
 EOF_SFDISK
+sfdisk --part-attrs "$DISK_IMAGE" 2 "GUID:{BOOT_HIDDEN_ATTRIBUTE},GUID:{BOOT_NO_AUTO_ATTRIBUTE}"
 sfdisk --part-attrs "$DISK_IMAGE" 3 "GUID:{ROOT_GROW_ATTRIBUTE}"
 dd if="$ESP_IMAGE" of="$DISK_IMAGE" bs={SECTOR_SIZE} seek={ESP_START_SECTOR} conv=notrunc,sparse status=none
 dd if="$BOOT_IMAGE" of="$DISK_IMAGE" bs={SECTOR_SIZE} seek={BOOT_START_SECTOR} conv=notrunc,sparse status=none

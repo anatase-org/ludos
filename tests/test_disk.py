@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 from ludos.__main__ import build_parser
 from ludos.disk import (
+    BOOT_HIDDEN_ATTRIBUTE,
+    BOOT_NO_AUTO_ATTRIBUTE,
     BOOT_SECTORS,
     BOOT_SIZE,
     BOOT_START_SECTOR,
@@ -163,8 +165,14 @@ class DiskConfigurationTests(unittest.TestCase):
         self.assertEqual(_disk_architecture("amd64").boot_filename, "BOOTX64.EFI")
 
     def test_partition_layout_uses_512_mib_esp_and_1500_mib_boot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _context(Path(tmp))
         self.assertEqual(ESP_SIZE, 512 * 1024**2)
         self.assertEqual(BOOT_SIZE, 1500 * 1024**2)
+        self.assertEqual(ctx.esp_label, "ANATASE_EFI")
+        self.assertEqual(ctx.esp_filesystem_label, "ANATASE_EFI")
+        self.assertEqual(ctx.boot_label, "ANATASE_BOOT")
+        self.assertEqual(ctx.root_label, "Anatase")
         self.assertEqual(BOOT_START_SECTOR, ESP_START_SECTOR + ESP_SECTORS)
         self.assertEqual(ROOT_START_SECTOR, BOOT_START_SECTOR + BOOT_SECTORS)
         self.assertEqual(
@@ -393,6 +401,11 @@ class DiskBuilderTests(unittest.TestCase):
         self.assertIn(f"start={ESP_START_SECTOR}", script)
         self.assertIn(f"start={BOOT_START_SECTOR}", script)
         self.assertIn(f"size={BOOT_SECTORS}, type={BOOT_TYPE_GUID}", script)
+        self.assertIn('name="$ESP_LABEL"', script)
+        self.assertIn('name="$BOOT_LABEL"', script)
+        self.assertIn('name="$ROOT_LABEL"', script)
+        self.assertIn('-n "$ESP_FILESYSTEM_LABEL"', script)
+        self.assertIn('-L "$BOOT_LABEL"', script)
         self.assertIn(f"start={ROOT_START_SECTOR}", script)
         self.assertIn(f"FILESYSTEM_BYTES + {ROOT_HEADROOM}", script)
         self.assertIn("DISK_BYTES=$REQUESTED_SIZE", script)
@@ -405,6 +418,10 @@ class DiskBuilderTests(unittest.TestCase):
         self.assertIn('"$BOOT_UUID" > "$directory/bootuuid.cfg"', script)
         self.assertIn(
             f'sfdisk --part-attrs "$DISK_IMAGE" 3 "GUID:{ROOT_GROW_ATTRIBUTE}"',
+            script,
+        )
+        self.assertIn(
+            f'2 "GUID:{BOOT_HIDDEN_ATTRIBUTE},GUID:{BOOT_NO_AUTO_ATTRIBUTE}"',
             script,
         )
         self.assertIn("BOOTX64.EFI", script)
@@ -475,9 +492,9 @@ fakeroot -- /bin/sh -ceux '
     truncate -s 256M /work/root.btrfs
     mkfs.btrfs --force --compress zstd --rootdir /work/root /work/root.btrfs >/dev/null
     truncate -s 64M /work/boot.ext4
-    mkfs.ext4 -q -F -m 0 -d /work/boot /work/boot.ext4
+    mkfs.ext4 -q -F -m 0 -L ANATASE_BOOT -d /work/boot /work/boot.ext4
     truncate -s 64M /work/esp.vfat
-    mkfs.vfat -F 32 /work/esp.vfat >/dev/null
+    mkfs.vfat -F 32 -n ANATASE_EFI /work/esp.vfat >/dev/null
     mcopy -s -i /work/esp.vfat /work/esp/EFI ::/
     truncate -s 448M /work/disk.raw
     sfdisk --quiet /work/disk.raw <<EOF
@@ -488,13 +505,14 @@ start=2048, size=131072, type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
 start=133120, size=131072, type=bc13c2ff-59e6-4262-a352-b275fd6f7172
 start=264192, size=653278, type=4f68bce3-e8cd-4db1-96e7-fbcaf984b709
 EOF
+    sfdisk --part-attrs /work/disk.raw 2 "GUID:62,GUID:63"
     sfdisk --part-attrs /work/disk.raw 3 "GUID:59"
     dd if=/work/esp.vfat of=/work/disk.raw bs=512 seek=2048 conv=notrunc,sparse status=none
     dd if=/work/boot.ext4 of=/work/disk.raw bs=512 seek=133120 conv=notrunc,sparse status=none
     dd if=/work/root.btrfs of=/work/disk.raw bs=512 seek=264192 conv=notrunc,sparse status=none
     sfdisk --verify /work/disk.raw
-    blkid -p -O 1048576 -S 67108864 /work/disk.raw | grep -q vfat
-    blkid -p -O 68157440 -S 67108864 /work/disk.raw | grep -q ext4
+    blkid -p -O 1048576 -S 67108864 /work/disk.raw | grep -q ANATASE_EFI
+    blkid -p -O 68157440 -S 67108864 /work/disk.raw | grep -q ANATASE_BOOT
     blkid -p -O 135266304 -S 334478336 /work/disk.raw | grep -q btrfs
     mdir -i /work/esp.vfat ::/EFI/BOOT/BOOTX64.EFI >/dev/null
     grub2-fstest /work/boot.ext4 cat /loader/entries/test.conf | grep -q entry
@@ -503,6 +521,8 @@ EOF
     dd if=/work/disk.raw of=/work/extracted.btrfs bs=512 skip=264192 count=524288 conv=sparse status=none
     btrfs inspect-internal dump-tree /work/extracted.btrfs | grep -q security.selinux
     btrfs inspect-internal dump-tree /work/extracted.btrfs | grep -q "compression 3 (zstd)"
+    sfdisk --part-attrs /work/disk.raw 2 | grep -q 62
+    sfdisk --part-attrs /work/disk.raw 2 | grep -q 63
 '
 """,
             ]
