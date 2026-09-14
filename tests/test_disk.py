@@ -176,7 +176,7 @@ class DiskConfigurationTests(unittest.TestCase):
         self.assertEqual(ctx.esp_label, "ANATASE_EFI")
         self.assertEqual(ctx.esp_filesystem_label, "ANATASE_EFI")
         self.assertEqual(ctx.boot_label, "ANATASE_BOOT")
-        self.assertEqual(ctx.root_label, "ANATASE_DISK")
+        self.assertEqual(ctx.root_label, "Anatase")
         self.assertEqual(BOOT_START_SECTOR, ESP_START_SECTOR + ESP_SECTORS)
         self.assertEqual(ROOT_START_SECTOR, BOOT_START_SECTOR + BOOT_SECTORS)
         self.assertEqual(

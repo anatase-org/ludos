@@ -109,7 +109,8 @@ class DiskContext:
 
     @property
     def root_label(self) -> str:
-        return self._auxiliary_label("disk", limit=255).upper()
+        value = re.sub(r"[^a-z0-9]+", "_", self.manifest.name.lower()).strip("_")
+        return (value or "ludos")[:255].capitalize()
 
     @property
     def esp_label(self) -> str:
