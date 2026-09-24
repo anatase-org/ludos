@@ -16,10 +16,10 @@ from ludos.upload.common import (
     _s3_config_from_env,
 )
 from ludos.upload.file import (
+    copy_file,
     delete_file,
     upload_file,
 )
-
 
 ENV = {
     "LUDOS_S3_API": "https://s3.example.com/anatase-artifacts",
@@ -44,6 +44,7 @@ class FakeS3Client:
         self.objects = {} if objects is None else dict(objects)
         self.cache_controls = {} if cache_controls is None else dict(cache_controls)
         self.uploads: list[dict[str, object]] = []
+        self.copies: list[dict[str, object]] = []
         self.puts: list[dict[str, object]] = []
         self.deletes: list[dict[str, object]] = []
         self.gets: list[dict[str, object]] = []
@@ -93,11 +94,36 @@ class FakeS3Client:
             body = self.objects[(Bucket, Key)]
         except KeyError as exc:
             raise FakeClientError("NoSuchKey") from exc
-        response: dict[str, object] = {"ContentLength": len(body)}
+        response: dict[str, object] = {
+            "ContentLength": len(body),
+            "ContentType": "application/octet-stream",
+        }
         cache_control = self.cache_controls.get((Bucket, Key))
         if cache_control is not None:
             response["CacheControl"] = cache_control
         return response
+
+    def copy(
+        self,
+        copy_source: dict[str, str],
+        bucket: str,
+        key: str,
+        *,
+        ExtraArgs: dict[str, object],
+    ) -> None:
+        self.copies.append(
+            {
+                "CopySource": copy_source,
+                "Bucket": bucket,
+                "Key": key,
+                "ExtraArgs": ExtraArgs,
+            }
+        )
+        self.calls.append(("copy", key))
+        self.objects[(bucket, key)] = self.objects[
+            (copy_source["Bucket"], copy_source["Key"])
+        ]
+        self.cache_controls[(bucket, key)] = str(ExtraArgs["CacheControl"])
 
     def put_object(
         self,
@@ -222,6 +248,164 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(args.registry_file_action, "delete")
         self.assertEqual(args.output_path, "isos/anatase.iso")
 
+    def test_copy_file_parser_and_dispatch(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "registry",
+                "file",
+                "copy",
+                "iso/anatase-rolling.iso",
+                "iso/anatase.iso",
+                "anatase-44.20260924.iso",
+                "--with-signature",
+            ]
+        )
+
+        self.assertEqual(args.registry_file_action, "copy")
+        with patch("ludos.__main__.copy_file", return_value=0) as copy:
+            self.assertEqual(args.func(args), 0)
+        copy.assert_called_once_with(
+            "iso/anatase-rolling.iso",
+            "iso/anatase.iso",
+            "anatase-44.20260924.iso",
+            with_signature=True,
+        )
+
+    def test_copy_file_preserves_rolling_file_and_updates_checksum(self) -> None:
+        digest = hashlib.sha256(b"rolling installer").hexdigest()
+        checksum_key = ("anatase-artifacts", "iso/SHA256SUMS")
+        client = FakeS3Client(
+            {
+                ("anatase-artifacts", "iso/anatase-rolling.iso"): b"rolling installer",
+                ("anatase-artifacts", "iso/anatase-rolling.iso.sig"): b"signature",
+                checksum_key: (
+                    f"{digest} anatase-rolling-44.20260924.iso\n"
+                    f"{digest} anatase-rolling.iso\n"
+                    "old111 anatase-44.20260924.iso\n"
+                    "old222 anatase-arm-44.20260924.iso\n"
+                ).encode(),
+            }
+        )
+
+        self.assertEqual(
+            copy_file(
+                "iso/anatase-rolling.iso",
+                "iso/anatase.iso",
+                "anatase-44.20260924.iso",
+                with_signature=True,
+                environ=ENV,
+                client=client,
+            ),
+            0,
+        )
+
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "iso/anatase.iso")],
+            b"rolling installer",
+        )
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "iso/anatase.iso.sig")],
+            b"signature",
+        )
+        self.assertEqual(
+            client.objects[("anatase-artifacts", "iso/anatase-44.20260924.iso.sig")],
+            b"signature",
+        )
+        self.assertIn(("anatase-artifacts", "iso/anatase-rolling.iso"), client.objects)
+        self.assertEqual(
+            client.objects[checksum_key].decode(),
+            f"{digest} anatase-44.20260924.iso\n"
+            f"{digest} anatase.iso\n"
+            f"{digest} anatase-rolling-44.20260924.iso\n"
+            f"{digest} anatase-rolling.iso\n"
+            "old222 anatase-arm-44.20260924.iso\n",
+        )
+        self.assertEqual(
+            [copy["ExtraArgs"]["ContentDisposition"] for copy in client.copies],
+            [
+                'attachment; filename="anatase-44.20260924.iso"',
+                'attachment; filename="anatase-44.20260924.iso.sig"',
+                'attachment; filename="anatase-44.20260924.iso.sig"',
+            ],
+        )
+        self.assertTrue(
+            all(
+                copy["ExtraArgs"]["MetadataDirective"] == "REPLACE"
+                for copy in client.copies
+            )
+        )
+        self.assertTrue(
+            all(
+                copy["ExtraArgs"]["CacheControl"] == REGISTRY_SHORT_CACHE_CONTROL
+                for copy in client.copies
+            )
+        )
+
+    def test_copy_uses_object_name_written_by_versioned_upload(self) -> None:
+        client = FakeS3Client()
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "installer.iso"
+            source.write_bytes(b"rolling installer")
+            with (
+                patch("ludos.upload.file.gpg_config_from_env", return_value=object()),
+                patch(
+                    "ludos.upload.file.sign_detached_digest",
+                    return_value=b"signature",
+                ),
+            ):
+                upload_file(
+                    source,
+                    "iso/anatase-rolling.iso",
+                    "anatase-rolling-44.20260924.iso",
+                    sign=True,
+                    environ=ENV,
+                    client=client,
+                )
+
+        copy_file(
+            "iso/anatase-rolling.iso",
+            "iso/anatase.iso",
+            "anatase-44.20260924.iso",
+            with_signature=True,
+            environ=ENV,
+            client=client,
+        )
+
+        names = [
+            line.split(maxsplit=1)[1]
+            for line in client.objects[("anatase-artifacts", "iso/SHA256SUMS")]
+            .decode()
+            .splitlines()
+        ]
+        self.assertEqual(
+            names,
+            [
+                "anatase-44.20260924.iso",
+                "anatase.iso",
+                "anatase-rolling-44.20260924.iso",
+                "anatase-rolling.iso",
+            ],
+        )
+        self.assertEqual(
+            client.copies[0]["ExtraArgs"]["ContentDisposition"],
+            'attachment; filename="anatase-44.20260924.iso"',
+        )
+
+    def test_copy_file_requires_source_checksum_entry(self) -> None:
+        client = FakeS3Client(
+            {
+                ("anatase-artifacts", "iso/anatase-rolling.iso"): b"installer",
+            }
+        )
+        with self.assertRaisesRegex(ConfigError, "has no entry"):
+            copy_file(
+                "iso/anatase-rolling.iso",
+                "iso/anatase.iso",
+                environ=ENV,
+                client=client,
+            )
+        self.assertEqual(client.copies, [])
+
     def test_upload_file_command_dispatches_upload(self) -> None:
         args = build_parser().parse_args(
             [
@@ -336,7 +520,7 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(client.gets[0]["Key"], "isos/SHA256SUMS")
         self.assertEqual(
             client.objects[("anatase-artifacts", "isos/SHA256SUMS")].decode("utf-8"),
-            f"{digest} anatase-44.20260627.iso\n",
+            f"{digest} anatase-44.20260627.iso\n" f"{digest} anatase.iso\n",
         )
 
     def test_upload_without_download_name_omits_content_disposition_and_uses_filename(
@@ -397,6 +581,7 @@ class UploadFileTests(unittest.TestCase):
             client.objects[checksum_key].decode("utf-8"),
             (
                 f"{digest} anatase-44.20260627.iso\n"
+                f"{digest} anatase.iso\n"
                 "old111 other.iso\n"
                 "old333 older.iso\n"
             ),
@@ -422,7 +607,8 @@ class UploadFileTests(unittest.TestCase):
         lines = client.objects[checksum_key].decode("utf-8").splitlines()
         self.assertEqual(len(lines), 20)
         self.assertEqual(lines[0], f"{digest} anatase-44.20260627.iso")
-        self.assertEqual(lines[-1], f"{18:064x} old-18.iso")
+        self.assertEqual(lines[1], f"{digest} anatase.iso")
+        self.assertEqual(lines[-1], f"{17:064x} old-17.iso")
 
     def test_upload_sign_uploads_detached_signatures_and_reuses_digest(self) -> None:
         client = FakeS3Client()
@@ -500,11 +686,7 @@ class UploadFileTests(unittest.TestCase):
                 )
 
         self.assertEqual(
-            [
-                put["Key"]
-                for put in client.puts
-                if str(put["Key"]).endswith(".sig")
-            ],
+            [put["Key"] for put in client.puts if str(put["Key"]).endswith(".sig")],
             ["isos/anatase.iso.sig"],
         )
 

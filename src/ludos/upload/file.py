@@ -17,7 +17,6 @@ from .common import (
 )
 from .gpg import config_from_env as gpg_config_from_env, sign_detached_digest
 
-
 SHA256SUMS = "SHA256SUMS"
 SHA256SUMS_LIMIT = 20
 HASH_CHUNK_SIZE = 1024 * 1024
@@ -99,10 +98,96 @@ def upload_file(
         )
 
     entries = _read_sha256sums(s3, target)
-    updated = _update_sha256sums(entries, digest, checksum_name)
+    updated = _update_sha256sums_for_file(
+        entries, digest, Path(target.key).name, checksum_name
+    )
     _write_sha256sums(s3, target, updated)
     log(f"Uploaded {target.key} and updated {target.checksum_key}")
     return 0
+
+
+def copy_file(
+    source_path: str,
+    output_path: str,
+    download_name: str | None = None,
+    *,
+    with_signature: bool = False,
+    environ: Mapping[str, str] | None = None,
+    client: Any | None = None,
+) -> int:
+    source = _s3_object(source_path, environ=environ)
+    target = _s3_object(output_path, environ=environ)
+    if source.key == target.key:
+        raise ConfigError("source and destination file paths must differ")
+    if download_name is not None:
+        _validate_download_name(download_name)
+    checksum_name = download_name or Path(target.key).name
+    s3 = client if client is not None else _create_s3_client(source.config, environ)
+
+    source_name = Path(source.key).name
+    entries = _read_sha256sums(s3, source)
+    digest = next((value for value, name in entries if name == source_name), None)
+    if digest is None:
+        raise ConfigError(f"{source.checksum_key} has no entry for {source_name}")
+
+    _copy_object(s3, source, target, checksum_name)
+    if with_signature:
+        source_signature = S3Object(source.config, f"{source.key}.sig")
+        target_signature = S3Object(target.config, f"{target.key}.sig")
+        _copy_object(s3, source_signature, target_signature, f"{checksum_name}.sig")
+        if checksum_name != Path(target.key).name:
+            alias = S3Object(
+                target.config,
+                (
+                    f"{target.key.rsplit('/', 1)[0]}/{checksum_name}.sig"
+                    if "/" in target.key
+                    else f"{checksum_name}.sig"
+                ),
+            )
+            _copy_object(s3, source_signature, alias, f"{checksum_name}.sig")
+
+    target_entries = (
+        entries
+        if source.checksum_key == target.checksum_key
+        else _read_sha256sums(s3, target)
+    )
+    _write_sha256sums(
+        s3,
+        target,
+        _update_sha256sums_for_file(
+            target_entries, digest, Path(target.key).name, checksum_name
+        ),
+    )
+    log(f"Copied {source.key} to {target.key} and updated {target.checksum_key}")
+    return 0
+
+
+def _copy_object(
+    client: Any,
+    source: S3Object,
+    target: S3Object,
+    download_name: str,
+) -> None:
+    try:
+        metadata = client.head_object(Bucket=source.config.bucket, Key=source.key)
+        extra_args: dict[str, Any] = {
+            "MetadataDirective": "REPLACE",
+            "ContentType": metadata.get("ContentType") or "application/octet-stream",
+            "CacheControl": REGISTRY_SHORT_CACHE_CONTROL,
+            "ContentDisposition": _content_disposition(download_name),
+        }
+        if metadata.get("Metadata"):
+            extra_args["Metadata"] = metadata["Metadata"]
+        client.copy(
+            {"Bucket": source.config.bucket, "Key": source.key},
+            target.config.bucket,
+            target.key,
+            ExtraArgs=extra_args,
+        )
+    except Exception as exc:
+        raise ConfigError(
+            f"S3 copy failed for {source.key} -> {target.key}: {exc}"
+        ) from exc
 
 
 def delete_file(
@@ -193,7 +278,9 @@ def _read_sha256sums(client: Any, target: S3Object) -> list[tuple[str, str]]:
     except Exception as exc:
         if _client_error_code(exc) in ("404", "NoSuchKey", "NotFound"):
             return []
-        raise ConfigError(f"S3 download failed for {target.checksum_key}: {exc}") from exc
+        raise ConfigError(
+            f"S3 download failed for {target.checksum_key}: {exc}"
+        ) from exc
     body = response.get("Body")
     if body is None:
         return []
@@ -243,3 +330,15 @@ def _update_sha256sums(
 ) -> list[tuple[str, str]]:
     preserved = [entry for entry in entries if entry[1] != download_name]
     return [(digest, download_name), *preserved][:SHA256SUMS_LIMIT]
+
+
+def _update_sha256sums_for_file(
+    entries: list[tuple[str, str]],
+    digest: str,
+    object_name: str,
+    download_name: str,
+) -> list[tuple[str, str]]:
+    updated = _update_sha256sums(entries, digest, object_name)
+    if download_name != object_name:
+        updated = _update_sha256sums(updated, digest, download_name)
+    return updated

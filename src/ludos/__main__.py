@@ -31,7 +31,7 @@ from .model import ConfigError, Project, validate_manifest
 from .contrib.package import package_target
 from .contrib.patchwork import patch_target
 from .contrib.update import update_targets
-from .upload.file import delete_file, upload_file
+from .upload.file import copy_file, delete_file, upload_file
 from .upload.flatpaks import (
     tree_shake_flatpaks,
     update_flatpak_index,
@@ -301,6 +301,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upload detached OpenPGP .sig files next to the uploaded file.",
     )
     registry_file_upload.set_defaults(func=registry_command)
+
+    registry_file_copy = registry_file_subcommands.add_parser(
+        "copy",
+        help="Copy an S3 file and update SHA256SUMS without removing the source.",
+    )
+    registry_file_copy.add_argument(
+        "source_path",
+        help="S3 object path to copy from.",
+    )
+    registry_file_copy.add_argument(
+        "output_path",
+        help="S3 object path to copy to.",
+    )
+    registry_file_copy.add_argument(
+        "download_name",
+        nargs="?",
+        help="Destination filename for SHA256SUMS and Content-Disposition.",
+    )
+    registry_file_copy.add_argument(
+        "--with-signature",
+        action="store_true",
+        help="Copy the detached .sig file alongside the object.",
+    )
+    registry_file_copy.set_defaults(func=registry_command)
 
     registry_file_delete = registry_file_subcommands.add_parser(
         "delete",
@@ -1390,6 +1414,13 @@ def registry_command(args: argparse.Namespace) -> int:
                 args.output_path,
                 args.download_name,
                 sign=args.sign,
+            )
+        if args.registry_file_action == "copy":
+            return copy_file(
+                args.source_path,
+                args.output_path,
+                args.download_name,
+                with_signature=args.with_signature,
             )
         if args.registry_file_action == "delete":
             return delete_file(args.output_path)
