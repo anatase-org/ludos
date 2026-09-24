@@ -97,11 +97,9 @@ def upload_file(
             download_name=download_name,
         )
 
-    entries = _read_sha256sums(s3, target)
-    updated = _update_sha256sums_for_file(
-        entries, digest, Path(target.key).name, checksum_name
+    _update_sha256sums_with_retry(
+        s3, target, digest, Path(target.key).name, checksum_name
     )
-    _write_sha256sums(s3, target, updated)
     log(f"Uploaded {target.key} and updated {target.checksum_key}")
     return 0
 
@@ -125,7 +123,7 @@ def copy_file(
     s3 = client if client is not None else _create_s3_client(source.config, environ)
 
     source_name = Path(source.key).name
-    entries = _read_sha256sums(s3, source)
+    entries, _etag = _read_sha256sums(s3, source)
     digest = next((value for value, name in entries if name == source_name), None)
     if digest is None:
         raise ConfigError(f"{source.checksum_key} has no entry for {source_name}")
@@ -146,17 +144,8 @@ def copy_file(
             )
             _copy_object(s3, source_signature, alias, f"{checksum_name}.sig")
 
-    target_entries = (
-        entries
-        if source.checksum_key == target.checksum_key
-        else _read_sha256sums(s3, target)
-    )
-    _write_sha256sums(
-        s3,
-        target,
-        _update_sha256sums_for_file(
-            target_entries, digest, Path(target.key).name, checksum_name
-        ),
+    _update_sha256sums_with_retry(
+        s3, target, digest, Path(target.key).name, checksum_name
     )
     log(f"Copied {source.key} to {target.key} and updated {target.checksum_key}")
     return 0
@@ -269,7 +258,9 @@ def _upload_detached_signatures(
             raise ConfigError(f"S3 upload failed for {key}: {exc}") from exc
 
 
-def _read_sha256sums(client: Any, target: S3Object) -> list[tuple[str, str]]:
+def _read_sha256sums(
+    client: Any, target: S3Object
+) -> tuple[list[tuple[str, str]], str | None]:
     try:
         response = client.get_object(
             Bucket=target.config.bucket,
@@ -277,27 +268,52 @@ def _read_sha256sums(client: Any, target: S3Object) -> list[tuple[str, str]]:
         )
     except Exception as exc:
         if _client_error_code(exc) in ("404", "NoSuchKey", "NotFound"):
-            return []
+            return [], None
         raise ConfigError(
             f"S3 download failed for {target.checksum_key}: {exc}"
         ) from exc
     body = response.get("Body")
     if body is None:
-        return []
+        raise ConfigError(f"S3 download has no body for {target.checksum_key}")
+    etag = response.get("ETag")
+    if not isinstance(etag, str) or not etag:
+        raise ConfigError(f"S3 download has no ETag for {target.checksum_key}")
     data = body.read()
     if isinstance(data, str):
         text = data
     else:
         text = data.decode("utf-8")
-    return _parse_sha256sums(text)
+    return _parse_sha256sums(text), etag
+
+
+def _update_sha256sums_with_retry(
+    client: Any,
+    target: S3Object,
+    digest: str,
+    object_name: str,
+    download_name: str,
+) -> None:
+    for _attempt in range(10):
+        entries, etag = _read_sha256sums(client, target)
+        updated = _update_sha256sums_for_file(
+            entries, digest, object_name, download_name
+        )
+        if _write_sha256sums(client, target, updated, etag=etag):
+            return
+    raise ConfigError(
+        f"S3 checksum update conflicted repeatedly for {target.checksum_key}"
+    )
 
 
 def _write_sha256sums(
     client: Any,
     target: S3Object,
     entries: list[tuple[str, str]],
-) -> None:
+    *,
+    etag: str | None,
+) -> bool:
     text = "".join(f"{digest} {name}\n" for digest, name in entries)
+    condition = {"IfMatch": etag} if etag is not None else {"IfNoneMatch": "*"}
     try:
         client.put_object(
             Bucket=target.config.bucket,
@@ -305,9 +321,18 @@ def _write_sha256sums(
             Body=text.encode("utf-8"),
             ContentType="text/plain; charset=utf-8",
             CacheControl=REGISTRY_SHORT_CACHE_CONTROL,
+            **condition,
         )
     except Exception as exc:
+        if _client_error_code(exc) in (
+            "PreconditionFailed",
+            "ConditionalRequestConflict",
+            "409",
+            "412",
+        ):
+            return False
         raise ConfigError(f"S3 upload failed for {target.checksum_key}: {exc}") from exc
+    return True
 
 
 def _parse_sha256sums(text: str) -> list[tuple[str, str]]:

@@ -78,14 +78,17 @@ class FakeS3Client:
         self.objects[(bucket, key)] = data
         self.cache_controls[(bucket, key)] = ExtraArgs.get("CacheControl")
 
-    def get_object(self, *, Bucket: str, Key: str) -> dict[str, BytesIO]:
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
         self.gets.append({"Bucket": Bucket, "Key": Key})
         self.calls.append(("get_object", Key))
         try:
             body = self.objects[(Bucket, Key)]
         except KeyError as exc:
             raise FakeClientError("NoSuchKey") from exc
-        return {"Body": BytesIO(body)}
+        return {
+            "Body": BytesIO(body),
+            "ETag": f'"{hashlib.sha256(body).hexdigest()}"',
+        }
 
     def head_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
         self.heads.append({"Bucket": Bucket, "Key": Key})
@@ -134,7 +137,17 @@ class FakeS3Client:
         ContentType: str,
         CacheControl: str | None = None,
         ContentDisposition: str | None = None,
+        IfMatch: str | None = None,
+        IfNoneMatch: str | None = None,
     ) -> None:
+        existing = self.objects.get((Bucket, Key))
+        if IfMatch is not None and (
+            existing is None
+            or IfMatch != f'"{hashlib.sha256(existing).hexdigest()}"'
+        ):
+            raise FakeClientError("PreconditionFailed")
+        if IfNoneMatch == "*" and existing is not None:
+            raise FakeClientError("PreconditionFailed")
         put: dict[str, object] = {
             "Bucket": Bucket,
             "Key": Key,
@@ -145,6 +158,10 @@ class FakeS3Client:
             put["CacheControl"] = CacheControl
         if ContentDisposition is not None:
             put["ContentDisposition"] = ContentDisposition
+        if IfMatch is not None:
+            put["IfMatch"] = IfMatch
+        if IfNoneMatch is not None:
+            put["IfNoneMatch"] = IfNoneMatch
         self.puts.append(put)
         self.calls.append(("put_object", Key))
         self.objects[(Bucket, Key)] = Body
@@ -389,6 +406,45 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(
             client.copies[0]["ExtraArgs"]["ContentDisposition"],
             'attachment; filename="anatase-44.20260924.iso"',
+        )
+
+    def test_upload_retries_concurrent_checksum_update(self) -> None:
+        client = FakeS3Client()
+        checksum_key = ("anatase-artifacts", "iso/SHA256SUMS")
+        other_digest = hashlib.sha256(b"installer").hexdigest()
+        original_put = client.put_object
+        checksum_attempts = 0
+
+        def concurrent_put(**kwargs: object) -> None:
+            nonlocal checksum_attempts
+            if kwargs["Key"] == "iso/SHA256SUMS":
+                checksum_attempts += 1
+                if checksum_attempts == 1:
+                    client.objects[checksum_key] = (
+                        f"{other_digest} anatase-rolling.iso\n"
+                    ).encode()
+            original_put(**kwargs)  # type: ignore[arg-type]
+
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "disk.img.gz"
+            source.write_bytes(b"disk image")
+            with patch.object(client, "put_object", side_effect=concurrent_put):
+                upload_file(
+                    source,
+                    "iso/anatase-rolling-arm.img.gz",
+                    "anatase-arm-rolling-44.20260924.img.gz",
+                    environ=ENV,
+                    client=client,
+                )
+
+        self.assertEqual(checksum_attempts, 2)
+        entries = client.objects[checksum_key].decode()
+        self.assertIn(f"{other_digest} anatase-rolling.iso\n", entries)
+        disk_digest = hashlib.sha256(b"disk image").hexdigest()
+        self.assertIn(f"{disk_digest} anatase-rolling-arm.img.gz\n", entries)
+        self.assertIn(
+            f"{disk_digest} anatase-arm-rolling-44.20260924.img.gz\n",
+            entries,
         )
 
     def test_copy_file_requires_source_checksum_entry(self) -> None:
