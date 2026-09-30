@@ -35,7 +35,7 @@ from ludos.upload.flatpaks import (
     _upload_targets,
 )
 from ludos.upload.registry import PromotedOciTag
-from .test_upload_file import ENV, FakeS3Client
+from .test_upload_file import ENV, FakeClientError, FakeS3Client
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -495,6 +495,7 @@ class UploadFlatpaksTests(unittest.TestCase):
             ["registry", "flatpak", "init-dummy-runtime", "anatase.yml"]
         )
         self.assertIsNone(default_args.arch)
+        self.assertFalse(default_args.if_needed)
 
     def test_registry_flatpak_init_dummy_runtime_command_dispatches(self) -> None:
         args = build_parser().parse_args(
@@ -507,6 +508,7 @@ class UploadFlatpaksTests(unittest.TestCase):
                 "rolling-",
                 "--arch",
                 "aarch64",
+                "--if-needed",
             ]
         )
 
@@ -514,7 +516,7 @@ class UploadFlatpaksTests(unittest.TestCase):
             self.assertEqual(args.func(args), 0)
 
         upload.assert_called_once_with(
-            Path("anatase.yml"), prefix="rolling-", arch="aarch64"
+            Path("anatase.yml"), prefix="rolling-", arch="aarch64", if_needed=True
         )
 
     def test_registry_flatpak_rejects_old_update_spellings(self) -> None:
@@ -1330,6 +1332,94 @@ class UploadFlatpaksTests(unittest.TestCase):
             )
 
         self.assertEqual(client.deletes, [])
+
+    def test_upload_dummy_runtime_if_needed_checks_remote_digest_signature(self) -> None:
+        manifest_bytes = b'{"runtime": "manifest"}'
+        digest = hashlib.sha256(manifest_bytes).hexdigest()
+        bucket = "anatase-artifacts"
+        tag_key = "v2/flatpaks/runtime/manifests/testing-f44-aarch64"
+        signature_prefix = f"gpg/flatpaks/runtime@sha256={digest}/"
+        cases = (
+            ("missing", {}, False),
+            ("unsigned", {tag_key: manifest_bytes}, False),
+            (
+                "other tag",
+                {"v2/flatpaks/runtime/manifests/f44-aarch64": manifest_bytes},
+                False,
+            ),
+            (
+                "stale signature",
+                {
+                    tag_key: manifest_bytes,
+                    f"gpg/flatpaks/runtime@sha256={'a' * 64}/signature-1": b"sig",
+                },
+                False,
+            ),
+            (
+                "invalid signature slot",
+                {tag_key: manifest_bytes, f"{signature_prefix}signature-0": b"sig"},
+                False,
+            ),
+            (
+                "signed",
+                {tag_key: manifest_bytes, f"{signature_prefix}signature-2": b"sig"},
+                True,
+            ),
+        )
+        for name, objects, signed in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                manifest = _write_manifest(root, tuple())
+                _write_project_gpg(root)
+                client = FakeS3Client(
+                    {(bucket, key): value for key, value in objects.items()}
+                )
+                with (
+                    patch.dict("os.environ", ENV),
+                    patch(
+                        "ludos.upload.flatpaks._create_s3_client", return_value=client
+                    ),
+                    patch("ludos.upload.flatpaks.upload_oci", return_value=0) as upload,
+                    patch(
+                        "ludos.upload.flatpaks._sign_and_upload_flatpak_signature"
+                    ) as sign,
+                    patch(
+                        "ludos.upload.flatpaks.update_flatpak_static_index", return_value=0
+                    ) as refresh,
+                ):
+                    self.assertEqual(
+                        upload_dummy_runtime(
+                            manifest, prefix="testing-", arch="aarch64", if_needed=True
+                        ),
+                        0,
+                    )
+                if signed:
+                    upload.assert_not_called()
+                    sign.assert_not_called()
+                    refresh.assert_not_called()
+                    self.assertFalse((root / "cache" / "flatpaks").exists())
+                else:
+                    self.assertEqual(
+                        upload.call_args.args[1:],
+                        ("flatpaks/runtime", ("testing-f44-aarch64",)),
+                    )
+                    sign.assert_called_once()
+                    refresh.assert_called_once_with("testing-f44-aarch64")
+
+    def test_upload_dummy_runtime_if_needed_propagates_s3_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, tuple())
+            _write_project_gpg(root)
+            with (
+                patch.dict("os.environ", ENV),
+                patch("ludos.upload.flatpaks._create_s3_client") as create,
+                patch("ludos.upload.flatpaks.upload_oci") as upload,
+            ):
+                create.return_value.get_object.side_effect = FakeClientError("AccessDenied")
+                with self.assertRaisesRegex(ConfigError, "AccessDenied"):
+                    upload_dummy_runtime(manifest, if_needed=True)
+                upload.assert_not_called()
 
     def test_upload_dummy_runtime_writes_runtime_oci_and_updates_index(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

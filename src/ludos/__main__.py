@@ -480,6 +480,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Target architecture for the dummy runtime. Defaults to the manifest architecture.",
     )
+    registry_flatpak_dummy_runtime.add_argument(
+        "--if-needed",
+        action="store_true",
+        help="Skip initialization if the runtime tag exists and has a GPG lookaside signature.",
+    )
     registry_flatpak_dummy_runtime.set_defaults(func=registry_command)
 
     registry_oci = registry_subcommands.add_parser(
@@ -1469,7 +1474,12 @@ def registry_command(args: argparse.Namespace) -> int:
         if args.registry_flatpak_action == "refresh":
             return update_flatpak_index(args.manifest)
         if args.registry_flatpak_action == "init-dummy-runtime":
-            return upload_dummy_runtime(args.manifest, prefix=args.prefix, arch=args.arch)
+            return upload_dummy_runtime(
+                args.manifest,
+                prefix=args.prefix,
+                arch=args.arch,
+                if_needed=args.if_needed,
+            )
         raise ConfigError(
             f"unknown registry flatpak action: {args.registry_flatpak_action}"
         )

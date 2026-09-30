@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import struct
@@ -53,6 +54,7 @@ from ..model import (
 from .common import (
     REGISTRY_IMMUTABLE_CACHE_CONTROL,
     REGISTRY_SHORT_CACHE_CONTROL,
+    _client_error_code,
     _create_s3_client,
     _s3_config_from_env,
 )
@@ -385,6 +387,7 @@ def upload_dummy_runtime(
     *,
     prefix: str = "",
     arch: str | None = None,
+    if_needed: bool = False,
 ) -> int:
     context = _resolve_flatpak_upload_context(
         manifest,
@@ -397,6 +400,10 @@ def upload_dummy_runtime(
     flatpak_arch = _flatpak_arch(context.arch)
     runtime_ref = f"runtime/{runtime.id}/{flatpak_arch}/{runtime.branch}"
     tag = f"{prefix}{context.distro}"
+    repo = f"flatpaks/{runtime.repo}"
+    if if_needed and _flatpak_runtime_is_signed(context, repo=repo, tag=tag):
+        log(f"Skipping signed flatpak runtime: {repo}:{tag}")
+        return 0
     layout_dir = flatpak_oci_layout_path(
         context.cache_dir,
         runtime.repo,
@@ -410,7 +417,6 @@ def upload_dummy_runtime(
         oci_arch=_oci_arch(context.arch),
         author=_dummy_runtime_author(runtime),
     )
-    repo = f"flatpaks/{runtime.repo}"
     upload_oci(
         layout_dir,
         repo,
@@ -429,6 +435,35 @@ def upload_dummy_runtime(
             client=None,
         )
     return update_flatpak_static_index(tag)
+
+
+def _flatpak_runtime_is_signed(
+    context: FlatpakUploadContext,
+    *,
+    repo: str,
+    tag: str,
+) -> bool:
+    config = _s3_config_from_env()
+    client = _create_s3_client(config)
+    key = f"v2/{repo}/manifests/{tag}"
+    try:
+        response = client.get_object(Bucket=config.bucket, Key=key)
+    except Exception as exc:
+        if _client_error_code(exc) in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise ConfigError(f"S3 download failed for {key}: {exc}") from exc
+    if not context.flatpak_gpg.lookaside:
+        return False
+    with response["Body"] as body:
+        digest = hashlib.sha256(body.read()).hexdigest()
+    signature_prefix = _join_s3_key(
+        context.flatpak_gpg.lookaside,
+        f"{repo}@sha256={digest}",
+    )
+    return any(
+        re.fullmatch(r"signature-[1-9][0-9]*", key.removeprefix(f"{signature_prefix}/"))
+        for key in _list_object_keys(client, config.bucket, f"{signature_prefix}/")
+    )
 
 
 def _resolve_flatpak_upload_context(
