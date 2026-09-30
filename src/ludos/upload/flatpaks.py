@@ -384,12 +384,14 @@ def upload_dummy_runtime(
     cache_dir: Path | None = None,
     *,
     prefix: str = "",
+    arch: str | None = None,
 ) -> int:
     context = _resolve_flatpak_upload_context(
         manifest,
         cache_dir=cache_dir,
         require_podman=False,
         require_flatpaks=False,
+        arch=arch,
     )
     runtime = _require_runtime_config(context.validation.manifest.runtime, manifest)
     flatpak_arch = _flatpak_arch(context.arch)
@@ -408,13 +410,24 @@ def upload_dummy_runtime(
         oci_arch=_oci_arch(context.arch),
         author=_dummy_runtime_author(runtime),
     )
+    repo = f"flatpaks/{runtime.repo}"
     upload_oci(
         layout_dir,
-        f"flatpaks/{runtime.repo}",
+        repo,
         (tag,),
         project_root=context.root_dir,
         cosign_config=OciCosignConfig(),
     )
+    if _flatpak_gpg_enabled(context.flatpak_gpg):
+        _sign_and_upload_flatpak_signature(
+            context,
+            repo=repo,
+            tag=tag,
+            manifest_digest=_exported_flatpak_manifest_digest(layout_dir),
+            signing_config=None,
+            environ=None,
+            client=None,
+        )
     return update_flatpak_static_index(tag)
 
 

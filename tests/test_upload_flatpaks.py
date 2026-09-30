@@ -481,6 +481,8 @@ class UploadFlatpaksTests(unittest.TestCase):
                 "anatase.yml",
                 "--prefix",
                 "rolling-",
+                "--arch",
+                "aarch64",
             ]
         )
 
@@ -488,6 +490,11 @@ class UploadFlatpaksTests(unittest.TestCase):
         self.assertEqual(args.registry_flatpak_action, "init-dummy-runtime")
         self.assertEqual(args.manifest, Path("anatase.yml"))
         self.assertEqual(args.prefix, "rolling-")
+        self.assertEqual(args.arch, "aarch64")
+        default_args = build_parser().parse_args(
+            ["registry", "flatpak", "init-dummy-runtime", "anatase.yml"]
+        )
+        self.assertIsNone(default_args.arch)
 
     def test_registry_flatpak_init_dummy_runtime_command_dispatches(self) -> None:
         args = build_parser().parse_args(
@@ -498,13 +505,17 @@ class UploadFlatpaksTests(unittest.TestCase):
                 "anatase.yml",
                 "--prefix",
                 "rolling-",
+                "--arch",
+                "aarch64",
             ]
         )
 
         with patch("ludos.__main__.upload_dummy_runtime", return_value=0) as upload:
             self.assertEqual(args.func(args), 0)
 
-        upload.assert_called_once_with(Path("anatase.yml"), prefix="rolling-")
+        upload.assert_called_once_with(
+            Path("anatase.yml"), prefix="rolling-", arch="aarch64"
+        )
 
     def test_registry_flatpak_rejects_old_update_spellings(self) -> None:
         parser = build_parser()
@@ -1471,6 +1482,120 @@ class UploadFlatpaksTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len(set(manifest_digests)), 1)
+
+    def test_upload_dummy_runtime_uses_selected_architecture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, tuple())
+
+            def upload(
+                path: Path,
+                ref: str,
+                tags: tuple[str, ...],
+                **_kwargs: object,
+            ) -> int:
+                self.assertEqual(ref, "flatpaks/runtime")
+                self.assertEqual(tags, ("f44-aarch64",))
+                index = json.loads((path / "index.json").read_text(encoding="utf-8"))
+                descriptor = index["manifests"][0]
+                runtime_ref = "runtime/org.anatase.Platform/aarch64/stable"
+                self.assertEqual(
+                    descriptor["annotations"]["org.opencontainers.image.ref.name"],
+                    runtime_ref,
+                )
+                manifest_blob = json.loads(
+                    (
+                        path
+                        / "blobs"
+                        / "sha256"
+                        / descriptor["digest"].removeprefix("sha256:")
+                    ).read_text(encoding="utf-8")
+                )
+                config = json.loads(
+                    (
+                        path
+                        / "blobs"
+                        / "sha256"
+                        / manifest_blob["config"]["digest"].removeprefix("sha256:")
+                    ).read_text(encoding="utf-8")
+                )
+                self.assertEqual(config["architecture"], "arm64")
+                labels = config["config"]["Labels"]
+                self.assertEqual(labels["org.flatpak.ref"], runtime_ref)
+                self.assertIn(
+                    "sdk=org.anatase.ludos.Sdk/aarch64/stable",
+                    labels["org.flatpak.metadata"],
+                )
+                return 0
+
+            with (
+                patch("ludos.upload.flatpaks.upload_oci", side_effect=upload),
+                patch(
+                    "ludos.upload.flatpaks.update_flatpak_static_index",
+                    return_value=0,
+                ) as update,
+            ):
+                self.assertEqual(
+                    upload_dummy_runtime(
+                        manifest,
+                        cache_dir=root / "cache",
+                        arch="aarch64",
+                    ),
+                    0,
+                )
+
+            update.assert_called_once_with("f44-aarch64")
+
+    def test_upload_dummy_runtime_signs_after_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = _write_manifest(root, tuple())
+            _write_project_gpg(root)
+            events = []
+            manifest_digests = []
+
+            def upload(
+                path: Path,
+                ref: str,
+                tags: tuple[str, ...],
+                **_kwargs: object,
+            ) -> int:
+                self.assertEqual(ref, "flatpaks/runtime")
+                self.assertEqual(tags, ("rolling-f44-aarch64",))
+                index = json.loads((path / "index.json").read_text(encoding="utf-8"))
+                manifest_digests.append(index["manifests"][0]["digest"])
+                events.append("upload")
+                return 0
+
+            def sign(_context: object, **kwargs: object) -> None:
+                self.assertEqual(kwargs["repo"], "flatpaks/runtime")
+                self.assertEqual(kwargs["tag"], "rolling-f44-aarch64")
+                self.assertEqual(kwargs["manifest_digest"], manifest_digests[0])
+                events.append("sign")
+
+            with (
+                patch("ludos.upload.flatpaks.upload_oci", side_effect=upload),
+                patch(
+                    "ludos.upload.flatpaks._sign_and_upload_flatpak_signature",
+                    side_effect=sign,
+                ),
+                patch(
+                    "ludos.upload.flatpaks.update_flatpak_static_index",
+                    side_effect=lambda _tag: events.append("refresh") or 0,
+                ) as update,
+            ):
+                self.assertEqual(
+                    upload_dummy_runtime(
+                        manifest,
+                        cache_dir=root / "cache",
+                        prefix="rolling-",
+                        arch="aarch64",
+                    ),
+                    0,
+                )
+
+            self.assertEqual(events, ["upload", "sign", "refresh"])
+            update.assert_called_once_with("rolling-f44-aarch64")
 
     def test_upload_dummy_runtime_omits_optional_display_labels(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
