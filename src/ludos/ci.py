@@ -474,6 +474,7 @@ def build_ci(
     cache: bool = False,
     autoremove: bool = False,
     ccache: bool = False,
+    force: bool = False,
 ) -> None:
     if not build_ids and not (builds or images or flatpaks):
         raise ConfigError("at least one CI build ID or section flag is required")
@@ -501,6 +502,7 @@ def build_ci(
                     upload=upload,
                     autoremove=autoremove,
                     ccache=ccache,
+                    force=force,
                 )
             elif section == "images":
                 _build_ci_manifest_image(
@@ -514,6 +516,7 @@ def build_ci(
                     cache=cache,
                     autoremove=autoremove,
                     ccache=ccache,
+                    force=force,
                 )
             else:
                 _build_ci_flatpak(
@@ -525,6 +528,7 @@ def build_ci(
                     upload=upload,
                     autoremove=autoremove,
                     ccache=ccache,
+                    force=force,
                 )
     if autoremove:
         _remove_ci_dependency_images(cleanup_images)
@@ -938,6 +942,7 @@ def _build_ci_package(
     upload: bool = False,
     autoremove: bool,
     ccache: bool = False,
+    force: bool = False,
 ) -> None:
     if not isinstance(entry, dict):
         raise ConfigError(f"{build_manifest}: invalid builds entry '{build_id}'")
@@ -964,7 +969,7 @@ def _build_ci_package(
             raise ConfigError(
                 f"flatpak builder image is missing: {plan.builder_image}"
             )
-        _ensure_flatpak_rpm_builds(context, (plan,), cache_only=False)
+        _ensure_flatpak_rpm_builds(context, (plan,), cache_only=False, force=force)
         image = plan.build_image
     else:
         image = str(entry.get("image", ""))
@@ -974,6 +979,7 @@ def _build_ci_package(
             (metadata,),
             targets=(image,),
             cache_only=False,
+            force=force,
         )
     if upload:
         _upload_ci_output(
@@ -996,6 +1002,7 @@ def _build_ci_manifest_image(
     cache: bool = False,
     autoremove: bool,
     ccache: bool = False,
+    force: bool = False,
 ) -> None:
     entry = _rebase_ci_entry(build_manifest, entry, metadata_key="build")
     metadata = _metadata_from_seed_entry(
@@ -1023,6 +1030,7 @@ def _build_ci_manifest_image(
         build_outputs=build_outputs,
         mode=mode,
         cache_only=False,
+        force=force,
         build_cache=(
             f"{_require_ci_registry(metadata.ci_registry)}/cache"
             if cache
@@ -1054,6 +1062,7 @@ def _build_ci_flatpak(
     upload: bool = False,
     autoremove: bool,
     ccache: bool = False,
+    force: bool = False,
 ) -> None:
     if not isinstance(entry, dict):
         raise ConfigError(f"{build_manifest}: invalid flatpaks entry '{build_id}'")
@@ -1067,16 +1076,22 @@ def _build_ci_flatpak(
     _restore_ci_build_context(metadata, restored_contexts)
     context = _prepared_flatpak_context(metadata, entry)
     plan = _prepared_flatpak_plan(build_manifest, build_id, entry, metadata)
+    if force and not _ensure_image(
+        context.podman, plan.builder_image, context.ci_registry
+    ):
+        raise ConfigError(f"flatpak builder image is missing: {plan.builder_image}")
     cleanup_images.add((metadata.podman, plan.build_image, metadata.ci_registry))
     plan = _ensure_flatpak_rpm_builds(
         context,
         (plan,),
-        cache_only=True,
+        cache_only=not force,
+        force=force,
     )[0]
     result = _ensure_flatpak_images(
         context,
         (plan,),
         cache_only=False,
+        force=force,
     )[0]
     if upload:
         _upload_ci_output(

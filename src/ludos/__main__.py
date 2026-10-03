@@ -1061,6 +1061,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Mount and enable shared ccache/sccache directories for builder runs.",
     )
+    ci_build_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild selected outputs even when their hash-addressed images exist.",
+    )
     ci_build_parser.set_defaults(func=ci_command)
     ci_upload_parser = ci_subcommands.add_parser(
         "upload",
@@ -1623,6 +1628,7 @@ def ci_command(args: argparse.Namespace) -> int:
             cache=args.cache,
             autoremove=args.autoremove,
             ccache=args.ccache,
+            force=args.force,
         )
         return 0
     if args.ci_action == "upload":

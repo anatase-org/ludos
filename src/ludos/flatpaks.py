@@ -590,11 +590,12 @@ def _ensure_flatpak_rpm_builds(
     plans: tuple[FlatpakBuildPlan, ...],
     *,
     cache_only: bool,
+    force: bool = False,
 ) -> tuple[FlatpakBuildPlan, ...]:
     results = []
     ci_registry = getattr(context, "ci_registry", "")
     for plan in plans:
-        if _ensure_image(context.podman, plan.build_image, ci_registry):
+        if not force and _ensure_image(context.podman, plan.build_image, ci_registry):
             log(f"Reusing flatpak build output image: {plan.build_image}")
             rpm_files, _has_files = _output_metadata_in_image(
                 context.podman,

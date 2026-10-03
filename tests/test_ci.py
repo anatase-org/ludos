@@ -496,6 +496,7 @@ class CiParserTests(unittest.TestCase):
                 "--cache",
                 "--autoremove",
                 "--ccache",
+                "--force",
             ]
         )
 
@@ -513,6 +514,7 @@ class CiParserTests(unittest.TestCase):
             cache=True,
             autoremove=True,
             ccache=True,
+            force=True,
         )
 
     def test_ci_command_calls_upload_ci(self) -> None:
@@ -2416,6 +2418,57 @@ class BuildCiTests(unittest.TestCase):
         )
         upload.assert_not_called()
 
+    def test_force_flatpak_build_rebuilds_rpms_and_final_image(self) -> None:
+        metadata = SimpleNamespace(
+            podman="podman",
+            ci_registry="registry.example",
+        )
+        context = SimpleNamespace(podman="podman", ci_registry="registry.example")
+        plan = SimpleNamespace(
+            build_image="builds:f44-flatpak-kate", builder_image="builders:flatpak-kate"
+        )
+        result = SimpleNamespace(
+            image="flatpaks:f44-kate-output",
+            latest_image="flatpaks:kate",
+        )
+        cleanup_images = set()
+        with (
+            patch("ludos.ci._ensure_image", return_value=True) as ensure,
+            patch("ludos.ci._metadata_from_mapping", return_value=metadata),
+            patch("ludos.ci._restore_ci_build_context"),
+            patch("ludos.ci._prepared_flatpak_context", return_value=context),
+            patch("ludos.ci._prepared_flatpak_plan", return_value=plan),
+            patch(
+                "ludos.ci._ensure_flatpak_rpm_builds",
+                return_value=(plan,),
+            ) as rpm_build,
+            patch(
+                "ludos.ci._ensure_flatpak_images",
+                return_value=(result,),
+            ) as final_build,
+            patch("ludos.ci._upload_ci_output") as upload,
+        ):
+            _build_ci_flatpak(
+                Path("cache/ci/build.yml"),
+                "kate",
+                {"build": {}},
+                restored_contexts=set(),
+                cleanup_images=cleanup_images,
+                autoremove=False,
+                force=True,
+            )
+
+        self.assertEqual(
+            cleanup_images,
+            {("podman", "builds:f44-flatpak-kate", "registry.example")},
+        )
+        upload.assert_not_called()
+
+        rpm_build.assert_called_once_with(context, (plan,), cache_only=False, force=True)
+        final_build.assert_called_once_with(context, (plan,), cache_only=False, force=True)
+
+        ensure.assert_called_once_with("podman", "builders:flatpak-kate", "registry.example")
+
     def test_upload_ci_output_removes_aliases_only_after_upload(self) -> None:
         with (
             patch("ludos.ci._push_ci_image") as push,
@@ -2490,7 +2543,7 @@ class BuildCiTests(unittest.TestCase):
             "builders:flatpak",
             "registry.example",
         )
-        build.assert_called_once_with(context, (plan,), cache_only=False)
+        build.assert_called_once_with(context, (plan,), cache_only=False, force=False)
         upload.assert_called_once_with(
             "podman",
             "builds:flatpak",
@@ -2519,6 +2572,7 @@ class BuildCiTests(unittest.TestCase):
             (metadata,),
             targets=("builds:package",),
             cache_only=False,
+            force=False,
         )
         upload.assert_not_called()
 

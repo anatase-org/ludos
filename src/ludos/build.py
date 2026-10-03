@@ -1401,6 +1401,7 @@ def build_build_images(
     *,
     targets: tuple[str, ...] = tuple(),
     cache_only: bool = False,
+    force: bool = False,
     create_builders: bool = False,
 ) -> BuildImageOutputs:
     target_set = set(targets)
@@ -1426,7 +1427,7 @@ def build_build_images(
             if target_set and plan.block not in target_set and plan.image not in target_set:
                 continue
 
-            if _ensure_image(manifest.podman, plan.image, manifest.ci_registry):
+            if not force and _ensure_image(manifest.podman, plan.image, manifest.ci_registry):
                 log(f"Reusing build output image: {plan.image}")
                 images_by_block[plan.block] = plan.image
                 rpm_files, has_files = _output_metadata_in_image(
