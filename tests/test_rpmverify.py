@@ -35,6 +35,25 @@ class RepositoryQueryTests(unittest.TestCase):
     def test_maps_exact_nevra_repository_and_location(self) -> None:
         self.assertEqual(self.query(f"{PACKAGE}\tfedora\thttps://mirror.test/{FILENAME}\n"), (RECORD,))
 
+    def test_batch_query_separates_records_in_dnf_format(self) -> None:
+        other = RepositoryRpm("other-0:2-1.fc45.i686", "fedora", "other-2-1.fc45.i686.rpm")
+
+        def dnf_query(command, **kwargs):
+            # DNF repeats the format verbatim and adds no record separator.
+            queryformat = next(arg.removeprefix("--queryformat=") for arg in command
+                               if arg.startswith("--queryformat="))
+            output = "".join(
+                queryformat.replace("%{full_nevra}", record.nevra)
+                .replace("%{repoid}", record.repository)
+                .replace("%{location}", f"https://mirror.test/{record.filename}")
+                for record in (RECORD, other)
+            )
+            return completed(output)
+
+        with patch("ludos.rpmverify.subprocess.run", side_effect=dnf_query):
+            records = repository_rpms(["podman", "run", "image", "dnf5"], (PACKAGE, other.nevra))
+        self.assertEqual(records, (RECORD, other))
+
     def test_missing_or_ambiguous_repository_fails(self) -> None:
         for output in ("", f"{PACKAGE}\tfedora\t/{FILENAME}\n{PACKAGE}\tother\t/{FILENAME}\n"):
             with self.subTest(output=output), self.assertRaises(ConfigError):

@@ -47,7 +47,7 @@ def repository_rpms(dnf_base: list[str], packages: tuple[str, ...]) -> tuple[Rep
         return ()
     result = subprocess.run(
         [*dnf_base, *DNF_REPO_OPTIONS, "repoquery", "--available",
-         "--queryformat=%{full_nevra}\t%{repoid}\t%{location}", *packages],
+         "--queryformat=%{full_nevra}\t%{repoid}\t%{location}\n", *packages],
         check=True, text=True, capture_output=True,
     )
     candidates: dict[str, set[RepositoryRpm]] = {}
