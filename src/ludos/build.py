@@ -5062,9 +5062,10 @@ def _i686_target_environment_lines() -> list[str]:
         "    fi",
         "    export LDFLAGS=\"${LDFLAGS:+$LDFLAGS }-Wl,--no-warn-rwx-segments\"",
         "    export LUDOS_MESON_CROSS_FILE=\"$topdir/ludos-meson-i686-cross.ini\"",
-        "    if [ -x /usr/lib/llvm22/bin/llvm-config ]; then",
-        "      export LLVM_CONFIG=/usr/lib/llvm22/bin/llvm-config",
-        "      export PATH=/usr/lib/llvm22/bin:$PATH",
+        "    llvm_config=$(find /usr/lib -mindepth 3 -maxdepth 3 -path '/usr/lib/llvm*/bin/llvm-config' -executable -print | sort -V | tail -n 1)",
+        "    if [ -n \"$llvm_config\" ]; then",
+        "      export LLVM_CONFIG=\"$llvm_config\"",
+        "      export PATH=\"${llvm_config%/*}:$PATH\"",
         "    fi",
         "  fi",
     ]
