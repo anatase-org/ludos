@@ -1474,7 +1474,7 @@ postprocess: |
         self.assertIn("COPY --from=rpms /rpms /rpms", containerfile)
         self.assertIn("COPY files/ /flatpak/", containerfile)
         self.assertIn(
-            "rpm --root /flatpak --define '_install_langs all' -Uvh --allfiles --nodeps --noscripts --notriggers /rpms/*.rpm",
+            "rpm --root /flatpak --define '_install_langs all' -Uvh --nosignature --allfiles --nodeps --noscripts --notriggers /rpms/*.rpm",
             containerfile,
         )
         self.assertIn("warning: removing /usr entries from flatpak payload", containerfile)
