@@ -2983,6 +2983,7 @@ class SeedCiTests(unittest.TestCase):
             (package_dir / "bash-1-1.fc44.x86_64.rpm").touch()
             with (
                 patch("ludos.ci._download_exact_packages") as download,
+                patch("ludos.ci._verify_repository_rpms") as verify,
             ):
                 rpm_files = _prepare_seed_rpms(entries)
 
@@ -2995,6 +2996,43 @@ class SeedCiTests(unittest.TestCase):
                 "/ludos/packages",
             )
             self.assertEqual(rpm_files, self._seed_rpm_files())
+            verified_packages = {
+                package for call in verify.call_args_list for package in call.args[1]
+            }
+            self.assertIn("bash-0:1-1.fc44.x86_64", verified_packages)
+
+    def test_prepare_seed_rpms_verifies_when_every_rpm_is_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entries = _read_seed_entries(self._write_seed_manifest(root))
+            package_dir = root / "packages"
+            package_dir.mkdir()
+            for filenames in self._seed_rpm_files().values():
+                for filename in filenames:
+                    (package_dir / filename).touch()
+            with (
+                patch("ludos.ci._download_exact_packages") as download,
+                patch("ludos.ci._verify_repository_rpms") as verify,
+            ):
+                _prepare_seed_rpms(entries)
+            download.assert_not_called()
+            verified_packages = {
+                package for call in verify.call_args_list for package in call.args[1]
+            }
+            self.assertEqual(
+                verified_packages,
+                {package for _section, _manifest, _image, packages in entries for package in packages},
+            )
+
+    def test_prepare_seed_rpms_stops_on_cached_verification_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            entries = _read_seed_entries(self._write_seed_manifest(Path(temp)))
+            with (
+                patch("ludos.ci._download_exact_packages"),
+                patch("ludos.ci._verify_repository_rpms", side_effect=ConfigError("bad signature")),
+                self.assertRaisesRegex(ConfigError, "bad signature"),
+            ):
+                _prepare_seed_rpms(entries)
 
     def test_seed_ci_rejects_invalid_workers(self) -> None:
         with self.assertRaisesRegex(ConfigError, "workers must be"):

@@ -26,6 +26,7 @@ from .build import (
     _create_builder_image,
     _create_package_image,
     _download_exact_packages,
+    _verify_repository_rpms,
     _ensure_image,
     _image_tag,
     _metadata_build_result,
@@ -1379,6 +1380,10 @@ def _prepare_seed_rpms(
             missing_packages,
             "/ludos/packages",
         )
+    # Verify every repository context, including packages skipped by the
+    # download batching because they already exist in the shared cache.
+    for manifest, package_map in groups.values():
+        _verify_repository_rpms(list(manifest.orchestrator_dnf_base), tuple(package_map))
     return rpm_files_by_image
 
 

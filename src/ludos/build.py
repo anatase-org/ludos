@@ -32,6 +32,7 @@ from .common import (
 )
 from .logging import confirm, log, stream
 from .model import ConfigError, SpecBuild, _resolve_card_path
+from .rpmverify import repository_rpms, verify_repository_rpms as _verify_repository_rpms
 
 
 HASH_LENGTH = 8
@@ -3381,37 +3382,7 @@ def _parse_resolved_package_entries(
 def _package_rpm_files(
     orchestrator_dnf_base: list[str], block_packages: tuple[str, ...]
 ) -> tuple[str, ...]:
-    query = subprocess.run(
-        [
-            *orchestrator_dnf_base,
-            "--setopt=reposdir=/ludos/dnf/repos",
-            "--setopt=cachedir=/ludos/dnf/cache",
-            "--setopt=system_cachedir=/ludos/dnf/cache",
-            "--setopt=persistdir=/ludos/dnf/persist",
-            "--setopt=logdir=/ludos/dnf/log",
-            "--disable-repo=*",
-            "--enable-repo=*",
-            "repoquery",
-            "--location",
-            *block_packages,
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    rpm_files = []
-    seen = set()
-    for line in query.stdout.splitlines():
-        filename = line.rsplit("/", 1)[-1].strip()
-        if not filename.endswith(".rpm") or filename in seen:
-            continue
-        seen.add(filename)
-        rpm_files.append(filename)
-    if len(rpm_files) != len(block_packages):
-        raise ConfigError(
-            f"repoquery returned {len(rpm_files)} RPM locations for {len(block_packages)} packages"
-        )
-    return tuple(rpm_files)
+    return tuple(record.filename for record in repository_rpms(orchestrator_dnf_base, block_packages))
 
 
 def _download_block_packages(
@@ -3423,42 +3394,14 @@ def _download_block_packages(
 ) -> tuple[str, ...]:
     if not block_packages:
         return tuple()
-    if resolve_dependencies:
-        if package_dir is None:
-            raise ConfigError("package_dir is required when resolving download dependencies")
+    if resolve_dependencies and package_dir is None:
+        raise ConfigError("package_dir is required when resolving download dependencies")
+    rpm_files = _package_rpm_files(orchestrator_dnf_base, block_packages)
+    if resolve_dependencies and _rpm_files_cached(package_dir, rpm_files):
+        _verify_repository_rpms(orchestrator_dnf_base, block_packages)
     else:
-        rpm_files = _package_rpm_files(orchestrator_dnf_base, block_packages)
-        download_options = ["--destdir=/ludos/packages"]
-        _run_logged_command(
-            [
-                *orchestrator_dnf_base,
-                "-y",
-                "--setopt=reposdir=/ludos/dnf/repos",
-                "--setopt=cachedir=/ludos/dnf/cache",
-                "--setopt=system_cachedir=/ludos/dnf/cache",
-                "--setopt=persistdir=/ludos/dnf/persist",
-                "--setopt=logdir=/ludos/dnf/log",
-                "--disable-repo=*",
-                "--enable-repo=*",
-                "download",
-                *download_options,
-                *block_packages,
-            ],
-            "package download",
-        )
-        return rpm_files
-
-    if resolve_dependencies:
-        rpm_files = _package_rpm_files(orchestrator_dnf_base, block_packages)
-        if not _rpm_files_cached(package_dir, rpm_files):
-            _download_exact_packages(
-                orchestrator_dnf_base,
-                block_packages,
-                "/ludos/packages",
-            )
-        return rpm_files
-
-    raise AssertionError("unreachable")
+        _download_exact_packages(orchestrator_dnf_base, block_packages, "/ludos/packages")
+    return rpm_files
 
 
 def _download_exact_packages(
@@ -3466,6 +3409,8 @@ def _download_exact_packages(
     packages: tuple[str, ...],
     destdir: str,
 ) -> None:
+    if not packages:
+        return
     _run_logged_command(
         [
             *orchestrator_dnf_base,
@@ -3483,6 +3428,8 @@ def _download_exact_packages(
         ],
         "package download",
     )
+
+    _verify_repository_rpms(orchestrator_dnf_base, packages, destdir)
 
 
 def _rpm_files_cached(package_dir: Path, rpm_files: tuple[str, ...]) -> bool:
