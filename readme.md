@@ -9,7 +9,7 @@
 # Ludos
 **Ludos** is an end-to-end OS image builder for rpm-based Linux distributions. You begin with an rpm-based Linux distribution such as Fedora and a set of cards. The cards contain information about how to build/collect a certain subset of packages with your changes (e.g., KDE, Gnome, Nvidia drivers, dev tools). Finally, you combine a set of cards to form a deck, which is the final image.
 
-Unmodified packages can be collected from the distribution's repositories, or rebuilt using package sources to ensure provenance. Cards define a multi-stage build process that is cached at the card level, ensuring you only need to rebuild cards that have changed. An SLSA L3 chain (TODO) ensures provenance end-to-end, and Ludos is designed to run completely in CI/CD pipelines. At the same time, it has a weak dependency to Github Actions, allowing it to run locally or in other CI/CD environments.
+Unmodified packages are collected from the distribution's repositories, or build from scratch with specs you provide. Cards define a multi-stage build process that is cached at the card level, ensuring you only need to rebuild cards that have changed. An SLSA L3 chain (TODO) ensures provenance end-to-end, and Ludos is designed to run completely in CI/CD pipelines. At the same time, it has a weak dependency to Github Actions, allowing it to run locally or in other CI/CD environments.
 
 ## Features
 Ludos is a complete immutable distribution creation toolkit. Unlike existing tools, it covers the whole creation and distribution process, producing fully featured images, installer ISOs, preinstalled applications and a hosted backend for all of them in S3.
