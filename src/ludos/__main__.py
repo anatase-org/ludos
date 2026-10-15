@@ -1272,6 +1272,12 @@ def build_command(args: argparse.Namespace) -> int:
     targeted = args.card is not None or args.flatpak is not None or args.flatpaks
     if targeted and len(manifests) != 1:
         raise ConfigError("targeted builds require exactly one manifest")
+    project = getattr(args, "project", None)
+    if not targeted and project is not None:
+        manifests_by_path = {}
+        for path in (*manifests, *(project.root / ref for ref in project.manifests)):
+            manifests_by_path.setdefault(path.resolve(), path)
+        manifests = tuple(manifests_by_path.values())
     manifest = manifests[0]
 
     if args.flatpak is not None:

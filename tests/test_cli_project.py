@@ -8,11 +8,83 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ludos.__main__ import main
+from ludos.__main__ import build_command, build_parser, main
 from ludos.model import ConfigError, Project
 
 
 class CliProjectTests(unittest.TestCase):
+    def test_project_parser_accepts_manifests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "ludos.yml"
+            config.write_text("version: 1\nmanifests: [base.yml, anatase.yml]\n")
+            self.assertEqual(Project.from_file(config).manifests, ("base.yml", "anatase.yml"))
+            config.write_text("version: 1\n")
+            self.assertEqual(Project.from_file(config).manifests, ())
+
+    def test_project_parser_rejects_invalid_manifests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "ludos.yml"
+            for value in ("base.yml anatase.yml", "[base.yml, 1]"):
+                config.write_text(f"version: 1\nmanifests: {value}\n")
+                with self.subTest(value=value), self.assertRaisesRegex(ConfigError, "manifests"):
+                    Project.from_file(config)
+
+    def test_build_appends_project_manifests_and_deduplicates_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = Project(name="Test", root=root, manifests=("base.yml", "anatase.yml"))
+            for requested, expected in (
+                ([root / "custom.yml"], ["custom.yml", "base.yml", "anatase.yml"]),
+                ([root / "base.yml"], ["base.yml", "anatase.yml"]),
+                ([root / "anatase.yml", root / "subdir/../anatase.yml"], ["anatase.yml", "base.yml"]),
+            ):
+                args = build_parser().parse_args(["build", *map(str, requested)])
+                args.project = project
+                with (
+                    self.subTest(requested=requested),
+                    patch("ludos.__main__.show_logo"),
+                    patch("ludos.__main__.build_manifest") as build,
+                    patch("ludos.__main__._log_build_result"),
+                ):
+                    self.assertEqual(build_command(args), 0)
+                    self.assertEqual([call.args[0] for call in build.call_args_list],
+                                     [root / name for name in expected])
+
+    def test_build_all_includes_project_manifests_for_flatpaks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = build_parser().parse_args(["build", str(root / "base.yml"), "--all"])
+            args.project = Project(name="Test", root=root, manifests=("base.yml", "anatase.yml"))
+            with (
+                patch("ludos.__main__.show_logo"),
+                patch("ludos.__main__.build_manifest"),
+                patch("ludos.__main__._log_build_result"),
+                patch("ludos.__main__.build_flatpaks", return_value=()) as flatpaks,
+            ):
+                self.assertEqual(build_command(args), 0)
+            self.assertEqual([call.args[0] for call in flatpaks.call_args_list],
+                             [root / "base.yml", root / "anatase.yml"])
+
+    def test_targeted_builds_do_not_append_project_manifests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for options in (("--card", "cards/test"), ("--flatpak", "app"), ("--flatpaks",)):
+                args = build_parser().parse_args(["build", str(root / "anatase.yml"), *options])
+                args.project = Project(name="Test", root=root, manifests=("base.yml", "anatase.yml"))
+                with (
+                    self.subTest(options=options),
+                    patch("ludos.__main__.show_logo"),
+                    patch("ludos.__main__.build_manifest") as image,
+                    patch("ludos.__main__.build_flatpak") as flatpak,
+                    patch("ludos.__main__.build_flatpaks", return_value=()) as flatpaks,
+                    patch("ludos.__main__._log_build_result"),
+                    patch("ludos.__main__._log_flatpak_result"),
+                ):
+                    self.assertEqual(build_command(args), 0)
+                    calls = image.call_args_list + flatpak.call_args_list + flatpaks.call_args_list
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(calls[0].args[0], root / "anatase.yml")
+
     def test_project_parser_accepts_ci_registry(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

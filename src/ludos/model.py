@@ -47,6 +47,7 @@ class Project:
     flatpak_images: FlatpakImagesConfig = FlatpakImagesConfig()
     flatpak_gpg: FlatpakGpgConfig = FlatpakGpgConfig()
     oci_cosign: OciCosignConfig = OciCosignConfig()
+    manifests: tuple[str, ...] = tuple()
 
     @classmethod
     def from_file(cls, path: Path) -> "Project":
@@ -65,6 +66,7 @@ class Project:
             flatpak_images=_flatpak_images_config(data, path),
             flatpak_gpg=_flatpak_gpg_config(data, path),
             oci_cosign=_oci_cosign_config(data, path),
+            manifests=_string_tuple(data, "manifests", path),
         )
 
 
