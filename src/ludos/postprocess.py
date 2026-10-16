@@ -189,8 +189,10 @@ def _tar_args(
         "--xattrs",
         # Added by the container engine
         "--xattrs-exclude=user.overlay.impure",
+        # OSTree assigns labels using --selinux-policy. Importing existing
+        # labels as well produces duplicate security.selinux xattrs.
+        "--xattrs-exclude=security.selinux",
         "--acls",
-        "--selinux",
         "--numeric-owner",
         "-C",
         str(directory),

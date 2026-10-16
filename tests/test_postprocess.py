@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import io
+import os
+import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +13,29 @@ from ludos import postprocess
 
 
 class PostprocessTests(unittest.TestCase):
+    def test_tar_leaves_selinux_labeling_to_ostree_and_preserves_other_xattrs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            try:
+                os.getxattr(source, "security.selinux")
+            except OSError:
+                self.skipTest("SELinux labels are not available on the test filesystem")
+            os.setxattr(source, "user.ludos-test", b"preserved")
+            os.setxattr(source, "user.overlay.impure", b"y")
+
+            archive = subprocess.check_output(postprocess._tar_args(root, "source"))
+            with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
+                directory = tree.getmember("source")
+
+            self.assertNotIn("RHT.security.selinux", directory.pax_headers)
+            self.assertNotIn("SCHILY.xattr.security.selinux", directory.pax_headers)
+            self.assertEqual(
+                directory.pax_headers["SCHILY.xattr.user.ludos-test"], "preserved"
+            )
+            self.assertNotIn("SCHILY.xattr.user.overlay.impure", directory.pax_headers)
+
     def test_prepare_projection_adds_altfiles_to_regular_nsswitch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
