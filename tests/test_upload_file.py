@@ -643,7 +643,7 @@ class UploadFileTests(unittest.TestCase):
             ),
         )
 
-    def test_upload_truncates_sha256sums_to_twenty_entries(self) -> None:
+    def test_upload_preserves_all_sha256sums_beyond_twenty_entries(self) -> None:
         checksum_key = ("anatase-artifacts", "isos/SHA256SUMS")
         old_entries = "".join(f"{index:064x} old-{index}.iso\n" for index in range(25))
         client = FakeS3Client({checksum_key: old_entries.encode("utf-8")})
@@ -661,10 +661,14 @@ class UploadFileTests(unittest.TestCase):
             )
 
         lines = client.objects[checksum_key].decode("utf-8").splitlines()
-        self.assertEqual(len(lines), 20)
-        self.assertEqual(lines[0], f"{digest} anatase-44.20260627.iso")
-        self.assertEqual(lines[1], f"{digest} anatase.iso")
-        self.assertEqual(lines[-1], f"{17:064x} old-17.iso")
+        self.assertEqual(
+            lines,
+            [
+                f"{digest} anatase-44.20260627.iso",
+                f"{digest} anatase.iso",
+                *old_entries.splitlines(),
+            ],
+        )
 
     def test_upload_sign_uploads_detached_signatures_and_reuses_digest(self) -> None:
         client = FakeS3Client()

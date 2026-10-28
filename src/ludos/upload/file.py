@@ -18,7 +18,6 @@ from .common import (
 from .gpg import config_from_env as gpg_config_from_env, sign_detached_digest
 
 SHA256SUMS = "SHA256SUMS"
-SHA256SUMS_LIMIT = 20
 HASH_CHUNK_SIZE = 1024 * 1024
 
 
@@ -354,7 +353,7 @@ def _update_sha256sums(
     download_name: str,
 ) -> list[tuple[str, str]]:
     preserved = [entry for entry in entries if entry[1] != download_name]
-    return [(digest, download_name), *preserved][:SHA256SUMS_LIMIT]
+    return [(digest, download_name), *preserved]
 
 
 def _update_sha256sums_for_file(
