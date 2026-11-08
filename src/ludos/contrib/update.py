@@ -1025,6 +1025,7 @@ def _commit_summary(repo_dir: Path, old_sha: str, new_sha: str) -> str:
         repo_dir,
         [
             "log",
+            "--reverse",
             "--date=default",
             "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n    %s%n",
             f"{old_sha}..{new_sha}",
