@@ -296,6 +296,7 @@ def resolve_manifest_flatpak_images(
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = True,
+    arch: str | None = None,
 ) -> FlatpakImageResolution:
     context: ResolvedManifestContext | None = None
     dnf_workspace_dirs: list[Path] = []
@@ -306,6 +307,7 @@ def resolve_manifest_flatpak_images(
             cache_version=cache_version,
             cache_only=cache_only,
             dnf_workspace_dirs=dnf_workspace_dirs,
+            **({"arch": arch} if arch is not None else {}),
         )
         if context.validation.missing_flatpaks:
             missing = ", ".join(context.validation.missing_flatpaks)

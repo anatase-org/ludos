@@ -6,9 +6,15 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .build import _run_logged_command, resolve_manifest_images
-from .common import _default_cache_version
-from .flatpaks import resolve_manifest_flatpak_images
+from .build import (
+    _remove_tree,
+    _run_logged_command,
+    resolve_build_manifest_context,
+    resolve_build_manifest_from_context,
+    resolve_manifest_images,
+)
+from .common import _default_cache_version, _normalize_arch
+from .flatpaks import plan_manifest_flatpaks_with_context, resolve_manifest_flatpak_images
 from .logging import log
 from .model import ConfigError
 
@@ -48,6 +54,7 @@ def cleanup_local_images(
     dry_run: bool = False,
     purge: bool = False,
     cache_only: bool = False,
+    arches: tuple[str, ...] = tuple(),
 ) -> int:
     podman = shutil.which("podman")
     if not podman:
@@ -58,10 +65,12 @@ def cleanup_local_images(
     manifest_targets = tuple(
         target
         for manifest in manifests
+        for arch in tuple(dict.fromkeys(map(_normalize_arch, arches))) or (None,)
         for target in _manifest_cleanup_targets(
             manifest,
             clean_version,
             cache_only=cache_only,
+            **({"arch": arch} if arch is not None else {}),
         )
     )
     if purge:
@@ -99,6 +108,72 @@ def cleanup_local_images(
     )
     _log_intermediate_cleanup_hint()
     return 0
+
+
+def cleanup_ci_images(
+    *,
+    registry: str,
+    version: str | None = None,
+    local_prefix: str = "",
+    manifests: tuple[Path, ...] = tuple(),
+    arches: tuple[str, ...] = tuple(),
+    dry_run: bool = False,
+    cache_only: bool = False,
+) -> int:
+    from .cleanup_ghcr import cleanup_ghcr_images, validate_ghcr_registry
+
+    registry = validate_ghcr_registry(registry)
+    clean_version = _cleanup_version(version)
+    clean_prefix = _cleanup_local_prefix(local_prefix)
+    if not manifests:
+        raise ConfigError("cleanup --ci requires manifests or project 'manifests'")
+    if not shutil.which("gh"):
+        raise ConfigError("gh must be installed to clean up GHCR images")
+    if not shutil.which("skopeo"):
+        raise ConfigError("skopeo must be installed to inspect GHCR manifests")
+
+    keep_refs: set[str] = set()
+    workspaces: list[Path] = []
+    try:
+        for arch in tuple(dict.fromkeys(map(_normalize_arch, arches))) or (None,):
+            for manifest in dict.fromkeys(manifests):
+                context = resolve_build_manifest_context(
+                    manifest,
+                    arch=arch,
+                    cache_version=clean_version,
+                    cache_only=cache_only,
+                    ccache=False,
+                    dnf_workspace_dirs=workspaces,
+                )
+                if (
+                    context.ci_registry.rstrip("/") != registry
+                    or context.local_prefix != clean_prefix
+                ):
+                    raise ConfigError(
+                        f"{manifest}: CI registry or local prefix differs from cleanup target"
+                    )
+                metadata = resolve_build_manifest_from_context(
+                    context, manifest_path=manifest, cache_only=cache_only
+                )
+                keep_refs.update((metadata.orchestrator, *metadata.repo_images))
+                keep_refs.update(plan.image for plan in metadata.package_images)
+                for plan in metadata.build_images:
+                    keep_refs.update((plan.image, plan.builder_image))
+                for plan in plan_manifest_flatpaks_with_context(
+                    context, manifest_path=manifest, cache_only=cache_only
+                ):
+                    keep_refs.update((plan.build_image, plan.builder_image))
+    finally:
+        for workspace in dict.fromkeys(workspaces):
+            _remove_tree(workspace, podman=shutil.which("podman"))
+
+    return cleanup_ghcr_images(
+        registry,
+        keep_refs,
+        version=clean_version,
+        local_prefix=clean_prefix,
+        dry_run=dry_run,
+    )
 
 
 def _remove_cleanup_targets(
@@ -156,16 +231,19 @@ def _manifest_cleanup_targets(
     version: str,
     *,
     cache_only: bool = False,
+    arch: str | None = None,
 ) -> tuple[str, ...]:
     result = resolve_manifest_images(
         manifest_path,
         cache_version=version,
         cache_only=cache_only,
+        **({"arch": arch} if arch is not None else {}),
     )
     flatpaks = resolve_manifest_flatpak_images(
         manifest_path,
         cache_version=version,
         cache_only=cache_only,
+        **({"arch": arch} if arch is not None else {}),
     )
     installer_latest = _installer_latest_from_image_latest(
         getattr(result, "latest_image", "")

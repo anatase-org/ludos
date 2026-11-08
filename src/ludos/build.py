@@ -1256,6 +1256,7 @@ def resolve_manifest_images(
     cache_dir: Path | None = None,
     cache_version: str | None = None,
     cache_only: bool = True,
+    arch: str | None = None,
 ) -> BuildResult:
     metadata: tuple[ResolvedBuildMetadata, ...] = tuple()
     try:
@@ -1264,6 +1265,7 @@ def resolve_manifest_images(
             cache_dir=cache_dir,
             cache_version=cache_version,
             cache_only=cache_only,
+            **({"arch": arch} if arch is not None else {}),
         )
         metadata = _resolve_final_manifest_metadata(metadata, mode="separated")
         return _metadata_build_result(metadata[0])

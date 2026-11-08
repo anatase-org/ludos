@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .bootc import DEFAULT_OCI_WRITERS, bootc_create, ostree_import
 from .build import build_manifest
-from .cleanup import cleanup_local_images
+from .cleanup import cleanup_ci_images, cleanup_local_images
 from .ci import (
     DEFAULT_PREPARE_WORKERS,
     DEFAULT_VERSION_LABEL,
@@ -1193,7 +1193,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     cleanup = subcommands.add_parser(
         "cleanup",
-        help="Remove stale local Ludos cache images.",
+        help="Remove stale local or CI Ludos cache images.",
+    )
+    cleanup.add_argument(
+        "--ci",
+        choices=("ghcr",),
+        metavar="PROVIDER",
+        help="Clean the configured CI registry using the provider's API.",
+    )
+    cleanup.add_argument(
+        "--arch",
+        action="append",
+        default=[],
+        dest="arches",
+        help="Architecture to preserve. Repeat for multiple architectures; defaults to the host.",
     )
     cleanup.add_argument(
         "--version",
@@ -1227,7 +1240,7 @@ def build_parser() -> argparse.ArgumentParser:
         "manifests",
         nargs="*",
         type=Path,
-        help="Optional manifests whose final image tags should also be cleaned.",
+        help="Manifests to resolve; CI cleanup defaults to the project's configured manifests.",
     )
     cleanup.set_defaults(func=cleanup_command)
 
@@ -1380,6 +1393,25 @@ def _package_block_summary(
 
 
 def cleanup_command(args: argparse.Namespace) -> int:
+    if args.ci:
+        if args.purge:
+            raise ConfigError("cleanup --ci does not support --purge")
+        project = getattr(args, "project", None)
+        if project is None:
+            raise ConfigError("cleanup --ci requires a ludos.yml with ci.registry")
+        manifests = tuple(args.manifests) or tuple(
+            project.root / ref for ref in project.manifests
+        )
+        return cleanup_ci_images(
+            registry=project.ci.registry,
+            version=args.version,
+            local_prefix=args.local_prefix,
+            manifests=manifests,
+            arches=tuple(args.arches),
+            dry_run=args.dry_run,
+            cache_only=args.cache,
+        )
+    arch_options = {"arches": tuple(args.arches)} if args.arches else {}
     return cleanup_local_images(
         version=args.version,
         local_prefix=args.local_prefix,
@@ -1387,6 +1419,7 @@ def cleanup_command(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         purge=args.purge,
         cache_only=args.cache,
+        **arch_options,
     )
 
 
