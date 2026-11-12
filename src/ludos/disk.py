@@ -623,6 +623,8 @@ cat > "{CONTAINER_WORKDIR}/origin" <<EOF_ORIGIN
 [origin]
 container-image-reference=$TARGET_REF
 EOF_ORIGIN
+# Firmware-enabled serial consoles (e.g. Raspberry Pi) otherwise force Plymouth
+# into text mode; keep serial access while showing the graphical splash.
 disk_status "Deploying bootc payload"
 ostree admin deploy \
     --sysroot "$SYSROOT" \
@@ -634,6 +636,7 @@ ostree admin deploy \
     --karg rw \
     --karg quiet \
     --karg rhgb \
+    --karg plymouth.ignore-serial-consoles \
     "$COMMIT"
 rm -f "{CONTAINER_WORKDIR}/commit" "{CONTAINER_WORKDIR}/origin"
 
