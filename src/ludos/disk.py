@@ -632,6 +632,8 @@ ostree admin deploy \
     --karg "root=UUID=$ROOT_UUID" \
     --karg "rootflags=compress=$BTRFS_COMPRESSION" \
     --karg rw \
+    --karg quiet \
+    --karg rhgb \
     "$COMMIT"
 rm -f "{CONTAINER_WORKDIR}/commit" "{CONTAINER_WORKDIR}/origin"
 
