@@ -655,6 +655,9 @@ disk_status "Preinstalling Flatpaks"
 {flatpaks}
 
 disk_status "Preparing UEFI boot assets"
+if test -d "$DEPLOY/usr/lib/ludos/efi"; then
+    cp -R "$DEPLOY/usr/lib/ludos/efi/." "$ESP_TREE/"
+fi
 mkdir -p "$SYSROOT/boot/grub2"
 cat "$DEPLOY/usr/lib/bootupd/grub2-static/grub-static-pre.cfg" \
     "$DEPLOY"/usr/lib/bootupd/grub2-static/configs.d/*.cfg \
@@ -736,7 +739,7 @@ truncate -s "$ROOT_BYTES" "$ROOT_IMAGE"
 disk_status "Creating FAT32 EFI system partition"
 truncate -s {ESP_SIZE} "$ESP_IMAGE"
 mkfs.vfat -F 32 -n "$ESP_FILESYSTEM_LABEL" -i "$ESP_VOLUME_ID" "$ESP_IMAGE"
-mcopy -s -i "$ESP_IMAGE" "$ESP_TREE/EFI" ::/
+find "$ESP_TREE" -mindepth 1 -maxdepth 1 -exec mcopy -s -i "$ESP_IMAGE" {{}} ::/ ';'
 
 disk_status "Assembling sparse GPT disk image"
 truncate -s "$DISK_BYTES" "$DISK_IMAGE"
