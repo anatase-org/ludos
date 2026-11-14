@@ -3085,6 +3085,16 @@ def _create_builder_image(
                 "--workdir",
                 "/workspace/repos",
                 orchestrator,
+                # systemd-sysusers labels --root files from the target policy,
+                # even on hosts where rootless builds cannot set SELinux labels.
+                # Use RPM's shadow-utils helper only in this installer container.
+                "/bin/sh",
+                "-ceu",
+                "mkdir -p /etc/rpm\n"
+                "printf '%s\\n' '%__systemd_sysusers /usr/lib/rpm/sysusers.sh' "
+                "> /etc/rpm/macros.ludos-sysusers\n"
+                'exec "$@"',
+                "ludos-builder-install",
                 "dnf5",
                 "-y",
                 "--installroot=/target",
